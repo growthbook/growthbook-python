@@ -1,3 +1,9 @@
+#!/usr/bin/env python
+"""
+This is the Python client library for Growth Book, the open-source A/B
+testing platform.  More info at https://www.growthbook.io
+"""
+
 import re
 
 
