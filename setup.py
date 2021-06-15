@@ -13,7 +13,7 @@ test_requirements = ['pytest>=3', ]
 
 setup(
     name='growthbook',
-    version='0.1.0',
+    version='0.1.1',
     author="Growth Book",
     author_email='hello@growthbook.io',
     python_requires='>=3.6',
