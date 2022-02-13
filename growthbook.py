@@ -456,7 +456,7 @@ class GrowthBook(object):
     def isOff(self, key: str) -> bool:
         return self.evalFeature(key).off
 
-    def getValue(self, key: str, fallback):
+    def getFeatureValue(self, key: str, fallback):
         res = self.evalFeature(key)
         return res.value if res.value is not None else fallback
 
