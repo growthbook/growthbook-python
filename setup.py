@@ -13,12 +13,12 @@ test_requirements = ['pytest>=3', ]
 
 setup(
     name='growthbook',
-    version='0.1.1',
-    author="Growth Book",
+    version='0.2.0',
+    author="GrowthBook",
     author_email='hello@growthbook.io',
     python_requires='>=3.6',
     classifiers=[
-        'Development Status :: 2 - Pre-Alpha',
+        'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',
         'License :: OSI Approved :: MIT License',
         'Natural Language :: English',
@@ -27,7 +27,7 @@ setup(
         'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
     ],
-    description="Powerful A/B testing for Python apps",
+    description="Powerful Feature flagging and A/B testing for Python apps",
     long_description=long_description,
     long_description_content_type='text/markdown',
     install_requires=requirements,

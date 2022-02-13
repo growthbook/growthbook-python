@@ -1,100 +1,127 @@
 #!/usr/bin/env python
 
-from growthbook import GrowthBook, Experiment
+import json
+import os
+from growthbook import (
+    FeatureRule,
+    GrowthBook,
+    Experiment,
+    Feature,
+    getBucketRanges,
+    gbhash,
+    chooseVariation,
+    getQueryStringOverride,
+    inNamespace,
+    getEqualWeights,
+    evalCondition,
+)
 
 
-def test_default_weights():
-    gb = GrowthBook(user={})
-    exp = Experiment(
-        key="my-test",
-        variations=[0, 1]
-    )
-    expected = [1, 0, 0, 1, 1, 1, 0, 1, 0]
+def pytest_generate_tests(metafunc):
+    folder = os.path.abspath(os.path.dirname(__file__))
+    jsonfile = os.path.join(folder, "cases.json")
+    with open(jsonfile) as file:
+        data = json.load(file)
 
-    for i, v in enumerate(expected):
-        gb._user = {"id": str(i+1)+""}
-        assert gb.run(exp).value == v
+    for func, cases in data.items():
+        key = func + "_data"
+        if key in metafunc.fixturenames:
+            metafunc.parametrize(key, cases)
 
+
+def test_hash(hash_data):
+    hashValue, expected = hash_data
+    assert gbhash(hashValue) == expected
+
+
+def round_list(item):
+    is_tuple = type(item) is tuple
+
+    if is_tuple:
+        item = list(item)
+
+    for i, value in enumerate(item):
+        item[i] = round(value, 6)
+
+    return item
+
+
+def round_list_of_lists(item):
+    for i, value in enumerate(item):
+        item[i] = round_list(value)
+    return item
+
+
+def test_get_bucket_range(getBucketRange_data):
+    _, args, expected = getBucketRange_data
+    numVariations, coverage, weights = args
+
+    actual = getBucketRanges(numVariations, coverage, weights)
+
+    assert round_list_of_lists(actual) == round_list_of_lists(expected)
+
+
+def test_choose_variation(chooseVariation_data):
+    _, n, ranges, expected = chooseVariation_data
+    assert chooseVariation(n, ranges) == expected
+
+
+def test_get_qs_override(getQueryStringOverride_data):
+    _, id, url, numVariations, expected = getQueryStringOverride_data
+    assert getQueryStringOverride(id, url, numVariations) == expected
+
+
+def test_namespace(inNamespace_data):
+    _, id, namespace, expected = inNamespace_data
+    assert inNamespace(id, namespace) == expected
+
+
+def test_equal_weights(getEqualWeights_data):
+    numVariations, expected = getEqualWeights_data
+    weights = getEqualWeights(numVariations)
+    assert round_list(weights) == round_list(expected)
+
+
+def test_conditions(evalCondition_data):
+    _, condition, attributes, expected = evalCondition_data
+    assert evalCondition(attributes, condition) == expected
+
+
+def test_feature(feature_data):
+    _, ctx, key, expected = feature_data
+    gb = GrowthBook(**ctx)
+    res = gb.evalFeature(key)
+
+    if "experiment" in expected:
+        expected["experiment"] = Experiment(**expected["experiment"]).to_dict()
+
+    assert res.to_dict() == expected
     gb.destroy()
 
 
-def test_uneven_weights():
-    gb = GrowthBook(user={})
-    exp = Experiment(
-        key="my-test",
-        variations=[0, 1],
-        weights=[0.1, 0.9]
-    )
-    expected = [1, 1, 0, 1, 1, 1, 0, 1, 1]
+def test_run(run_data):
+    _, ctx, exp, value, inExperiment = run_data
+    gb = GrowthBook(**ctx)
 
-    for i, v in enumerate(expected):
-        gb._user = {"id": str(i+1)+""}
-        assert gb.run(exp).value == v
-
-
-def test_coverage():
-    gb = GrowthBook(user={})
-    exp = Experiment(
-        key="my-test",
-        variations=[0, 1],
-        coverage=0.4
-    )
-    expected = [-1, 0, 0, -1, -1, -1, 0, -1, 1]
-
-    for i, v in enumerate(expected):
-        gb._user = {"id": str(i+1)+""}
-        res = gb.run(exp)
-        actual = res.variationId if res.inExperiment else -1
-        assert actual == v
-
-
-def test_threeWayTest():
-    gb = GrowthBook(user={})
-
-    exp = Experiment(
-        key="my-test",
-        variations=[0, 1, 2],
-    )
-
-    expected = [2, 0, 0, 2, 1, 2, 0, 1, 0]
-
-    for i, v in enumerate(expected):
-        gb._user = {"id": str(i+1)+""}
-        assert gb.run(exp).value == v
-
-
-def test_testName():
-    gb = GrowthBook(user={"id": '1'})
-
-    assert gb.run(Experiment(key="my-test", variations=[0, 1])).value == 1
-    assert gb.run(Experiment(key="my-test-3", variations=[0, 1])).value == 0
-
-    gb.destroy()
-
-
-def test_missing_id():
-    gb = GrowthBook(user={"id": '1'})
-
-    exp = Experiment(
-        key="my-test",
-        variations=[0, 1],
-    )
-    assert gb.run(exp).inExperiment is True
-    gb._user = {"id": ''}
-    assert gb.run(exp).inExperiment is False
+    res = gb.run(Experiment(**exp))
+    assert res.value == value
+    assert res.inExperiment == inExperiment
 
     gb.destroy()
 
 
 def getTrackingMock(gb: GrowthBook):
     calls = []
-    def track(experiment, result): return calls.append([experiment, result])
+
+    def track(experiment, result):
+        return calls.append([experiment, result])
+
     gb._trackingCallback = track
     return lambda: calls
 
 
 def test_tracking():
-    gb = GrowthBook(user={"id": '1'})
+    gb = GrowthBook(user={"id": "1"})
 
     getMockedCalls = getTrackingMock(gb)
 
@@ -111,7 +138,7 @@ def test_tracking():
     gb.run(exp1)
     gb.run(exp1)
     res4 = gb.run(exp2)
-    gb._user = {"id": '2'}
+    gb._user = {"id": "2"}
     res5 = gb.run(exp2)
 
     calls = getMockedCalls()
@@ -124,77 +151,38 @@ def test_tracking():
 
 
 def test_handles_weird_experiment_values():
-    gb = GrowthBook(user={"id": '1'})
+    gb = GrowthBook(user={"id": "1"})
 
-    assert gb.run(Experiment(
-        key="my-test",
-        variations=[0],
-    )).inExperiment is False
-
-    assert gb.run(Experiment(
-        key="my-test",
-        variations=[0, 1],
-        include=lambda: 1/0,
-    )).inExperiment is False
-
-    exp = Experiment(
-        key="my-test",
-        variations=[0, 1],
-        coverage=-0.2
+    assert (
+        gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+                include=lambda: 1 / 0,
+            )
+        ).inExperiment
+        is False
     )
-    assert exp.getWeights() == [0, 0]
-
-    exp.coverage = 1.5
-    assert exp.getWeights() == [0.5, 0.5]
-
-    exp.coverage = 1
-    exp.weights = [0.4, 0.1]
-    assert exp.getWeights() == [0.5, 0.5]
-
-    exp.weights = [0.7, 0.6]
-    assert exp.getWeights() == [0.5, 0.5]
-
-    exp.variations = [0, 1, 2, 3]
-    exp.weights = [0.4, 0.4, 0.2]
-    assert exp.getWeights() == [.25, .25, .25, .25]
-
-    res1 = gb.run(Experiment(
-        key="my-test",
-        variations=[0, 1],
-        force=-8,
-    ))
-
-    assert res1.inExperiment is False
-    assert res1.value == 0
-
-    res2 = gb.run(Experiment(
-        key="my-test",
-        variations=[0, 1],
-        force=25,
-    ))
-
-    assert res2.inExperiment is False
-    assert res2.value == 0
 
     # Should fail gracefully
-    gb._trackingCallback = lambda experiment, result: 1/0
+    gb._trackingCallback = lambda experiment, result: 1 / 0
     assert gb.run(Experiment(key="my-test", variations=[0, 1])).value == 1
 
-    gb.subscribe(lambda: 1/0)
+    gb.subscribe(lambda: 1 / 0)
     assert gb.run(Experiment(key="my-new-test", variations=[0, 1])).value == 0
 
     gb.destroy()
 
 
 def test_force_variation():
-    gb = GrowthBook(user={"id": '6'})
+    gb = GrowthBook(user={"id": "6"})
     exp = Experiment(key="forced-test", variations=[0, 1])
     assert gb.run(exp).value == 0
 
     getMockedCalls = getTrackingMock(gb)
 
     gb._overrides = {
-        'forced-test': {
+        "forced-test": {
             "force": 1,
         },
     }
@@ -208,36 +196,46 @@ def test_force_variation():
 
 def test_uses_overrides():
     gb = GrowthBook(
-        user={"id": '1'},
+        user={"id": "1"},
         overrides={
-            'my-test': {
-                'coverage': 0.01,
+            "my-test": {
+                "coverage": 0.01,
             },
         },
     )
 
-    assert gb.run(Experiment(
-        key="my-test",
-        variations=[0, 1],
-    )).inExperiment is False
+    assert (
+        gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+            )
+        ).inExperiment
+        is False
+    )
 
     gb._overrides = {
-        'my-test': {
-            'url': r'^\\/path',
+        "my-test": {
+            "url": r"^\\/path",
         },
     }
 
-    assert gb.run(Experiment(
-        key="my-test",
-        variations=[0, 1],
-    )).inExperiment is False
+    assert (
+        gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+            )
+        ).inExperiment
+        is False
+    )
 
     gb.destroy()
 
 
 def test_filters_user_groups():
     gb = GrowthBook(
-        user={"id": '123'},
+        user={"id": "123"},
         groups={
             "alpha": True,
             "beta": True,
@@ -246,48 +244,57 @@ def test_filters_user_groups():
         },
     )
 
-    assert gb.run(Experiment(
-        key="my-test",
-        variations=[0, 1],
-        groups=['internal', 'qa'],
-    )).inExperiment is False
+    assert (
+        gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+                groups=["internal", "qa"],
+            )
+        ).inExperiment
+        is False
+    )
 
-    assert gb.run(Experiment(
-        key="my-test",
-        variations=[0, 1],
-        groups=['internal', 'qa', 'beta'],
-    )).inExperiment is True
+    assert (
+        gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+                groups=["internal", "qa", "beta"],
+            )
+        ).inExperiment
+        is True
+    )
 
-    assert gb.run(Experiment(
-        key="my-test",
-        variations=[0, 1],
-    )).inExperiment is True
+    assert (
+        gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+            )
+        ).inExperiment
+        is True
+    )
 
     gb.destroy()
 
 
 def test_runs_custom_include_callback():
-    gb = GrowthBook(user={"id": '1'})
-    assert gb.run(Experiment(
-        key="my-test",
-        variations=[0, 1],
-        include=lambda: False
-    )).inExperiment is False
+    gb = GrowthBook(user={"id": "1"})
+    assert (
+        gb.run(
+            Experiment(key="my-test", variations=[0, 1], include=lambda: False)
+        ).inExperiment
+        is False
+    )
 
     gb.destroy()
 
 
 def test_supports_custom_user_hash_keys():
-    gb = GrowthBook(user={
-        "id": "1",
-        "company": "abc"
-    })
+    gb = GrowthBook(user={"id": "1", "company": "abc"})
 
-    exp = Experiment(
-        key="my-test",
-        variations=[0, 1],
-        hashAttribute="company"
-    )
+    exp = Experiment(key="my-test", variations=[0, 1], hashAttribute="company")
 
     res = gb.run(exp)
 
@@ -297,43 +304,10 @@ def test_supports_custom_user_hash_keys():
     gb.destroy()
 
 
-def test_experiments_disabled():
-    gb = GrowthBook(user={"id": '1'}, enabled=False)
-
-    getMockedCalls = getTrackingMock(gb)
-
-    assert gb.run(Experiment(key="disabled-test",
-                             variations=[0, 1])).inExperiment is False
-
-    calls = getMockedCalls()
-    assert len(calls) == 0
-
-    gb.destroy()
-
-
-def test_querystring_force():
-    gb = GrowthBook(user={"id": '1'})
-    exp = Experiment(
-        key="forced-test-qs",
-        variations=[0, 1],
-    )
-    res1 = gb.run(exp)
-    assert res1.value == 0
-    assert res1.inExperiment is True
-
-    gb._url = 'http://example.com?forced-test-qs=1#someanchor'
-
-    res2 = gb.run(exp)
-    assert res2.value == 1
-    assert res2.inExperiment is False
-
-    gb.destroy()
-
-
 def test_querystring_force_disabled_tracking():
     gb = GrowthBook(
-        user={"id": '1'},
-        url='http://example.com?forced-test-qs=1',
+        user={"id": "1"},
+        url="http://example.com?forced-test-qs=1",
     )
     getMockedCalls = getTrackingMock(gb)
 
@@ -347,50 +321,28 @@ def test_querystring_force_disabled_tracking():
     assert len(calls) == 0
 
 
-def test_querystring_force_invalid_url():
-    gb = GrowthBook(
-        user={},
-        url=""
-    )
-
-    gb._url = ""
-    assert gb._getQueryStringOverride('my-test') is None
-
-    gb._url = 'http://example.com'
-    assert gb._getQueryStringOverride('my-test') is None
-
-    gb._url = 'http://example.com?'
-    assert gb._getQueryStringOverride('my-test') is None
-
-    gb._url = 'http://example.com?somequery'
-    assert gb._getQueryStringOverride('my-test') is None
-
-    gb._url = 'http://example.com??&&&?#'
-    assert gb._getQueryStringOverride('my-test') is None
-
-
 def test_url_targeting():
     gb = GrowthBook(
-        user={"id": '1'},
-        url='http://example.com',
+        user={"id": "1"},
+        url="http://example.com",
     )
 
     exp = Experiment(
         key="my-test",
         variations=[0, 1],
-        url='^\\/post\\/[0-9]+',
+        url="^\\/post\\/[0-9]+",
     )
 
     res = gb.run(exp)
     assert res.inExperiment is False
     assert res.value == 0
 
-    gb._url = 'http://example.com/post/123'
+    gb._url = "http://example.com/post/123"
     res = gb.run(exp)
     assert res.inExperiment is True
     assert res.value == 1
 
-    exp.url = 'http:\\/\\/example.com\\/post\\/[0-9]+'
+    exp.url = "http:\\/\\/example.com\\/post\\/[0-9]+"
     res = gb.run(exp)
     assert res.inExperiment is True
     assert res.value == 1
@@ -400,33 +352,38 @@ def test_url_targeting():
 
 def test_invalid_url_regex():
     gb = GrowthBook(
-        user={"id": '1'},
+        user={"id": "1"},
         overrides={
-            'my-test': {
-                'url': '???***[)',
+            "my-test": {
+                "url": "???***[)",
             },
         },
-        url='http://example.com',
+        url="http://example.com",
     )
 
-    assert gb.run(Experiment(
-        key="my-test",
-        variations=[0, 1],
-    )).value == 1
+    assert (
+        gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+            )
+        ).value
+        == 1
+    )
 
     gb.destroy()
 
 
 def test_ignores_draft_experiments():
-    gb = GrowthBook(user={"id": '1'})
+    gb = GrowthBook(user={"id": "1"})
     exp = Experiment(
         key="my-test",
-        status='draft',
+        status="draft",
         variations=[0, 1],
     )
 
     res1 = gb.run(exp)
-    gb._url = 'http://example.com/?my-test=1'
+    gb._url = "http://example.com/?my-test=1"
     res2 = gb.run(exp)
 
     assert res1.inExperiment is False
@@ -438,15 +395,15 @@ def test_ignores_draft_experiments():
 
 
 def test_ignores_stopped_experiments_unless_forced():
-    gb = GrowthBook(user={"id": '1'})
+    gb = GrowthBook(user={"id": "1"})
     expLose = Experiment(
         key="my-test",
-        status='stopped',
+        status="stopped",
         variations=[0, 1, 2],
     )
     expWin = Experiment(
         key="my-test",
-        status='stopped',
+        status="stopped",
         variations=[0, 1, 2],
         force=2,
     )
@@ -478,166 +435,31 @@ def resetFiredFlag():
 
 
 def test_destroy_removes_subscriptions():
-    gb = GrowthBook(user={"id": '1'})
+    gb = GrowthBook(user={"id": "1"})
 
     resetFiredFlag()
     gb.subscribe(flagSubscription)
 
-    gb.run(Experiment(
-        key="my-test",
-        variations=[0, 1],
-    ))
+    gb.run(
+        Experiment(
+            key="my-test",
+            variations=[0, 1],
+        )
+    )
 
     assert hasFired() is True
 
     resetFiredFlag()
     gb.destroy()
 
-    gb.run(Experiment(
-        key="my-other-test",
-        variations=[0, 1],
-    ))
+    gb.run(
+        Experiment(
+            key="my-other-test",
+            variations=[0, 1],
+        )
+    )
 
     assert hasFired() is False
-
-    gb.destroy()
-
-
-def test_configData_experiment():
-    gb = GrowthBook(user={"id": '1'})
-    exp = Experiment(
-        key="my-test",
-        variations=[
-            {
-                "color": 'blue',
-                "size": 'small',
-            },
-            {
-                "color": 'green',
-                "size": 'large',
-            },
-        ],
-    )
-
-    res1 = gb.run(exp)
-    assert res1.variationId == 1
-    assert res1.value == {
-        "color": 'green',
-        "size": 'large',
-    }
-
-    # Fallback to control config data if not in test
-    exp.coverage = 0.01
-    res2 = gb.run(exp)
-    assert res2.inExperiment is False
-    assert res2.variationId == 0
-    assert res2.value == {
-        "color": 'blue',
-        "size": 'small',
-    }
-
-    gb.destroy()
-
-
-def test_does_even_weighting():
-    gb = GrowthBook(user={})
-    # Full coverage
-    exp = Experiment(key="my-test", variations=[0, 1])
-    variations = {
-        '0': 0,
-        '1': 0,
-        '-1': 0,
-    }
-    for i in range(1000):
-        gb._user = {"id": str(i) + ''}
-        res = gb.run(exp)
-        v = res.value if res.inExperiment else -1
-        variations[str(v)] += 1
-
-    assert variations['0'] == 503
-
-    # Reduced coverage
-    exp.coverage = 0.4
-    variations = {
-        '0': 0,
-        '1': 0,
-        '-1': 0,
-    }
-    for i in range(1000):
-        gb._user = {"id": str(i) + ''}
-        res = gb.run(exp)
-        v = res.value if res.inExperiment else -1
-        variations[str(v)] += 1
-    assert variations['0'] == 200
-    assert variations['1'] == 204
-    assert variations['-1'] == 596
-
-    # 3-way
-    exp.coverage = 0.6
-    exp.variations = [0, 1, 2]
-    variations = {
-        '0': 0,
-        '1': 0,
-        '2': 0,
-        '-1': 0,
-    }
-    for i in range(10000):
-        gb._user = {"id": str(i) + ''}
-        res = gb.run(exp)
-        v = res.value if res.inExperiment else -1
-        variations[str(v)] += 1
-    assert variations['-1'] == 3973
-    assert variations['0'] == 2044
-    assert variations['1'] == 1992
-    assert variations['2'] == 1991
-
-    gb.destroy()
-
-
-def test_forces_variations_from_the_client():
-    gb = GrowthBook(user={"id": '1'})
-    exp = Experiment(
-        key="my-test",
-        variations=[0, 1],
-    )
-    res1 = gb.run(exp)
-    assert res1.inExperiment is True
-    assert res1.value == 1
-
-    gb._forcedVariations = {'my-test': 0}
-    res2 = gb.run(exp)
-    assert res2.inExperiment is False
-    assert res2.value == 0
-
-    gb.destroy()
-
-
-def test_qa_mode():
-    gb = GrowthBook(user={"id": '1'}, qaMode=True)
-    exp = Experiment(
-        key="my-test",
-        variations=[0, 1],
-    )
-
-    res1 = gb.run(exp)
-    assert res1.inExperiment is False
-    assert res1.value == 0
-
-    # Still works if explicitly forced
-    gb._forcedVariations = {'my-test': 1}
-    res2 = gb.run(exp)
-    assert res2.inExperiment is False
-    assert res2.value == 1
-
-    # Works if the experiment itself is forced
-    res3 = gb.run(Experiment(
-        key="my-test-2",
-        variations=[0, 1],
-        force=1,
-    ))
-
-    assert res3.inExperiment is False
-    assert res3.value == 1
 
     gb.destroy()
 
@@ -645,7 +467,7 @@ def test_qa_mode():
 def test_fires_subscriptions_correctly():
     gb = GrowthBook(
         user={
-            "id": '1',
+            "id": "1",
         },
     )
 
@@ -670,10 +492,12 @@ def test_fires_subscriptions_correctly():
 
     # Does not fire after unsubscribed
     unsubscriber()
-    gb.run(Experiment(
-        key="other-test",
-        variations=[0, 1],
-    ))
+    gb.run(
+        Experiment(
+            key="other-test",
+            variations=[0, 1],
+        )
+    )
 
     assert hasFired() is False
 
@@ -683,7 +507,7 @@ def test_fires_subscriptions_correctly():
 def test_stores_assigned_variations_in_the_user():
     gb = GrowthBook(
         user={
-            "id": '1',
+            "id": "1",
         },
     )
 
@@ -694,15 +518,58 @@ def test_stores_assigned_variations_in_the_user():
     assignedArr = []
 
     for e in assigned:
-        assignedArr.append({
-            "key": e,
-            "variation": assigned[e]["result"].variationId
-        })
+        assignedArr.append({"key": e, "variation": assigned[e]["result"].variationId})
 
     assert len(assignedArr) == 2
-    assert assignedArr[0]["key"] == 'my-test'
+    assert assignedArr[0]["key"] == "my-test"
     assert assignedArr[0]["variation"] == 1
-    assert assignedArr[1]["key"] == 'my-test-3'
+    assert assignedArr[1]["key"] == "my-test-3"
     assert assignedArr[1]["variation"] == 0
+
+    gb.destroy()
+
+
+def test_getters_setters():
+    gb = GrowthBook()
+
+    feat = Feature(defaultValue="yes", rules=[FeatureRule(force="no")])
+    featuresInput = {"feature-1": feat.to_dict()}
+    attributes = {"id": "123", "url": "/"}
+
+    gb.setFeatures(featuresInput)
+    gb.setAttributes(attributes)
+
+    featuresOutput = {k: v.to_dict() for (k, v) in gb.getFeatures().items()}
+
+    assert featuresOutput == featuresInput
+    assert attributes == gb.getAttributes()
+
+    newAttrs = {"url": "/hello"}
+    gb.setAttributes(newAttrs)
+    assert newAttrs == gb.getAttributes()
+
+    gb.destroy()
+
+
+def test_feature_methods():
+    gb = GrowthBook(
+        features={
+            "featureOn": {"defaultValue": 12},
+            "featureNone": {"defaultValue": None},
+            "featureOff": {"defaultValue": 0},
+        }
+    )
+
+    assert gb.isOn("featureOn") is True
+    assert gb.isOff("featureOn") is False
+    assert gb.getFeatureValue("featureOn", 15) == 12
+
+    assert gb.isOn("featureOff") is False
+    assert gb.isOff("featureOff") is True
+    assert gb.getFeatureValue("featureOff", 10) == 0
+
+    assert gb.isOn("featureNone") is False
+    assert gb.isOff("featureNone") is True
+    assert gb.getFeatureValue("featureNone", 10) == 10
 
     gb.destroy()
