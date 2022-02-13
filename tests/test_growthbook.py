@@ -3,8 +3,10 @@
 import json
 import os
 from growthbook import (
+    FeatureRule,
     GrowthBook,
     Experiment,
+    Feature,
     getBucketRanges,
     gbhash,
     chooseVariation,
@@ -516,15 +518,58 @@ def test_stores_assigned_variations_in_the_user():
     assignedArr = []
 
     for e in assigned:
-        assignedArr.append({
-            "key": e,
-            "variation": assigned[e]["result"].variationId
-        })
+        assignedArr.append({"key": e, "variation": assigned[e]["result"].variationId})
 
     assert len(assignedArr) == 2
     assert assignedArr[0]["key"] == "my-test"
     assert assignedArr[0]["variation"] == 1
     assert assignedArr[1]["key"] == "my-test-3"
     assert assignedArr[1]["variation"] == 0
+
+    gb.destroy()
+
+
+def test_getters_setters():
+    gb = GrowthBook()
+
+    feat = Feature(defaultValue="yes", rules=[FeatureRule(force="no")])
+    featuresInput = {"feature-1": feat.to_dict()}
+    attributes = {"id": "123", "url": "/"}
+
+    gb.setFeatures(featuresInput)
+    gb.setAttributes(attributes)
+
+    featuresOutput = {k: v.to_dict() for (k, v) in gb.getFeatures().items()}
+
+    assert featuresOutput == featuresInput
+    assert attributes == gb.getAttributes()
+
+    newAttrs = {"url": "/hello"}
+    gb.setAttributes(newAttrs)
+    assert newAttrs == gb.getAttributes()
+
+    gb.destroy()
+
+
+def test_feature_methods():
+    gb = GrowthBook(
+        features={
+            "featureOn": {"defaultValue": 12},
+            "featureNone": {"defaultValue": None},
+            "featureOff": {"defaultValue": 0},
+        }
+    )
+
+    assert gb.isOn("featureOn") is True
+    assert gb.isOff("featureOn") is False
+    assert gb.getFeatureValue("featureOn", 15) == 12
+
+    assert gb.isOn("featureOff") is False
+    assert gb.isOff("featureOff") is True
+    assert gb.getFeatureValue("featureOff", 10) == 0
+
+    assert gb.isOn("featureNone") is False
+    assert gb.isOff("featureNone") is True
+    assert gb.getFeatureValue("featureNone", 10) == 10
 
     gb.destroy()

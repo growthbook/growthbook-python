@@ -1,7 +1,8 @@
 #!/usr/bin/env python
 """
-This is the Python client library for Growth Book, the open-source A/B
-testing platform.  More info at https://www.growthbook.io
+This is the Python client library for GrowthBook, the open-source
+feature flagging and A/B testing platform.
+More info at https://www.growthbook.io
 """
 
 import re
@@ -66,11 +67,7 @@ def chooseVariation(n: float, ranges: "list[tuple[float,float]]") -> int:
     return -1
 
 
-def getQueryStringOverride(
-    id: str,
-    url: str,
-    numVariations: int
-) -> Optional[int]:
+def getQueryStringOverride(id: str, url: str, numVariations: int) -> Optional[int]:
     res = urlparse(url)
     if not res.query:
         return None
@@ -313,7 +310,7 @@ class Result(object):
         self.hashAttribute = hashAttribute
         self.hashValue = hashValue
 
-    def to_dict(self):
+    def to_dict(self) -> dict:
         return {
             "variationId": self.variationId,
             "inExperiment": self.inExperiment,
@@ -332,6 +329,12 @@ class Feature(object):
                 self.rules.append(rule)
             else:
                 self.rules.append(FeatureRule(**rule))
+
+    def to_dict(self) -> dict:
+        return {
+            "defaultValue": self.defaultValue,
+            "rules": [rule.to_dict() for rule in self.rules],
+        }
 
 
 class FeatureRule(object):
@@ -355,6 +358,27 @@ class FeatureRule(object):
         self.force = force
         self.hashAttribute = hashAttribute
 
+    def to_dict(self) -> dict:
+        data = {}
+        if self.key:
+            data["key"] = self.key
+        if self.variations is not None:
+            data["variations"] = self.variations
+        if self.weights is not None:
+            data["weights"] = self.weights
+        if self.coverage != 1:
+            data["coverage"] = self.coverage
+        if self.condition is not None:
+            data["condition"] = self.condition
+        if self.namespace is not None:
+            data["namespace"] = self.namespace
+        if self.force is not None:
+            data["force"] = self.force
+        if self.hashAttribute != "id":
+            data["hashAttribute"] = self.hashAttribute
+
+        return data
+
 
 class FeatureResult(object):
     def __init__(
@@ -371,7 +395,7 @@ class FeatureResult(object):
         self.on = bool(value)
         self.off = not bool(value)
 
-    def to_dict(self):
+    def to_dict(self) -> dict:
         data = {
             "value": self.value,
             "source": self.source,
@@ -568,10 +592,7 @@ class GrowthBook(object):
             return self._getExperimentResult(experiment)
 
         # 7. Exclude if user not in experiment.namespace
-        if experiment.namespace and not inNamespace(
-            hashValue,
-            experiment.namespace
-        ):
+        if experiment.namespace and not inNamespace(hashValue, experiment.namespace):
             return self._getExperimentResult(experiment)
 
         # 7.5. If experiment has an include property
@@ -604,9 +625,7 @@ class GrowthBook(object):
 
         # 9. Get bucket ranges and choose variation
         ranges = getBucketRanges(
-            len(experiment.variations),
-            experiment.coverage or 1,
-            experiment.weights
+            len(experiment.variations), experiment.coverage or 1, experiment.weights
         )
         n = gbhash(hashValue + experiment.key)
         assigned = chooseVariation(n, ranges)
@@ -661,10 +680,7 @@ class GrowthBook(object):
             if r.search(self._url):
                 return True
 
-            pathOnly = re.sub(
-                r"^[^/]*/", "/",
-                re.sub(r"^https?:\/\/", "", self._url)
-            )
+            pathOnly = re.sub(r"^[^/]*/", "/", re.sub(r"^https?:\/\/", "", self._url))
             if r.search(pathOnly):
                 return True
             return False
@@ -672,10 +688,7 @@ class GrowthBook(object):
             return True
 
     def _getExperimentResult(
-        self,
-        experiment: Experiment,
-        variationId: int = 0,
-        inExperiment: bool = False
+        self, experiment: Experiment, variationId: int = 0, inExperiment: bool = False
     ) -> Result:
         hashAttribute = experiment.hashAttribute or "id"
 
