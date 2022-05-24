@@ -301,12 +301,14 @@ class Result(object):
         variationId: int,
         inExperiment: bool,
         value,
+        hashUsed: bool,
         hashAttribute: str,
         hashValue: str,
     ) -> None:
         self.variationId = variationId
         self.inExperiment = inExperiment
         self.value = value
+        self.hashUsed = hashUsed
         self.hashAttribute = hashAttribute
         self.hashValue = hashValue
 
@@ -315,6 +317,7 @@ class Result(object):
             "variationId": self.variationId,
             "inExperiment": self.inExperiment,
             "value": self.value,
+            "hashUsed": self.hashUsed,
             "hashAttribute": self.hashAttribute,
             "hashValue": self.hashValue,
         }
@@ -688,17 +691,20 @@ class GrowthBook(object):
             return True
 
     def _getExperimentResult(
-        self, experiment: Experiment, variationId: int = 0, inExperiment: bool = False
+        self, experiment: Experiment, variationId: int = -1, hashUsed: bool = False
     ) -> Result:
         hashAttribute = experiment.hashAttribute or "id"
 
+        inExperiment = True
         if variationId < 0 or variationId > len(experiment.variations) - 1:
             variationId = 0
+            inExperiment = False
 
         return Result(
             inExperiment=inExperiment,
             variationId=variationId,
             value=experiment.variations[variationId],
+            hashUsed=hashUsed,
             hashAttribute=hashAttribute,
             hashValue=self._getHashValue(hashAttribute),
         )

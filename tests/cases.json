@@ -631,6 +631,26 @@
       false
     ],
     [
+      "nested value is null",
+      {
+        "address.state": "CA"
+      },
+      {
+        "address": null
+      },
+      false
+    ],
+    [
+      "nested value is integer",
+      {
+        "address.state": "CA"
+      },
+      {
+        "address": 123
+      },
+      false
+    ],
+    [
       "$type string - pass",
       {
         "a": {
@@ -813,6 +833,26 @@
       false
     ],
     [
+      "$size empty - pass",
+      {
+        "tags": { "$size": 0 }
+      },
+      {
+        "tags": []
+      },
+      true
+    ],
+    [
+      "$size empty - fail",
+      {
+        "tags": { "$size": 0 }
+      },
+      {
+        "tags": [10]
+      },
+      false
+    ],
+    [
       "$size number - pass",
       {
         "tags": {
@@ -899,6 +939,66 @@
       },
       {
         "tags": [0]
+      },
+      false
+    ],
+    [
+      "$elemMatch contains - pass",
+      {
+        "tags": {
+          "$elemMatch": {
+            "$eq": "bar"
+          }
+        }
+      },
+      {
+        "tags": ["foo", "bar", "baz"]
+      },
+      true
+    ],
+    [
+      "$elemMatch contains - false",
+      {
+        "tags": {
+          "$elemMatch": {
+            "$eq": "bar"
+          }
+        }
+      },
+      {
+        "tags": ["foo", "baz"]
+      },
+      false
+    ],
+    [
+      "$elemMatch not contains - pass",
+      {
+        "tags": {
+          "$not": {
+            "$elemMatch": {
+              "$eq": "bar"
+            }
+          }
+        }
+      },
+      {
+        "tags": ["foo", "baz"]
+      },
+      true
+    ],
+    [
+      "$elemMatch not contains - fail",
+      {
+        "tags": {
+          "$not": {
+            "$elemMatch": {
+              "$eq": "bar"
+            }
+          }
+        }
+      },
+      {
+        "tags": ["foo", "bar", "baz"]
       },
       false
     ],
@@ -1607,6 +1707,7 @@
           "value": "c",
           "variationId": 2,
           "inExperiment": true,
+          "hashUsed": true,
           "hashAttribute": "id",
           "hashValue": "123"
         },
@@ -1642,6 +1743,7 @@
           "value": "a",
           "variationId": 0,
           "inExperiment": true,
+          "hashUsed": true,
           "hashAttribute": "id",
           "hashValue": "456"
         },
@@ -1677,6 +1779,7 @@
           "value": "b",
           "variationId": 1,
           "inExperiment": true,
+          "hashUsed": true,
           "hashAttribute": "id",
           "hashValue": "fds"
         },
@@ -1724,6 +1827,7 @@
           "value": false,
           "variationId": 1,
           "inExperiment": true,
+          "hashUsed": true,
           "hashAttribute": "anonId",
           "hashValue": "123"
         }
@@ -1911,6 +2015,47 @@
         "off": false,
         "source": "force"
       }
+    ],
+    [
+      "include experiments when forced",
+      {
+        "attributes": { "id": "123" },
+        "forcedVariations": {
+          "feature": 1
+        },
+        "features": {
+          "feature": {
+            "defaultValue": 0,
+            "rules": [
+              {
+                "variations": [0, 1, 2, 3]
+              },
+              {
+                "force": 3
+              }
+            ]
+          }
+        }
+      },
+      "feature",
+      {
+        "value": 1,
+        "on": true,
+        "off": false,
+        "source": "experiment",
+        "experiment": {
+          "key": "feature",
+          "variations": [0, 1, 2, 3]
+        },
+        "experimentResult": {
+          "value": 1,
+          "variationId": 1,
+          "inExperiment": true,
+          "hashUsed": false,
+          "hashAttribute": "id",
+          "hashValue": "123"
+        }
+      }
     ]
   ],
   "run": [
@@ -1919,6 +2064,7 @@
       { "attributes": { "id": "1" } },
       { "key": "my-test", "variations": [0, 1] },
       1,
+      true,
       true
     ],
     [
@@ -1926,6 +2072,7 @@
       { "attributes": { "id": "2" } },
       { "key": "my-test", "variations": [0, 1] },
       0,
+      true,
       true
     ],
     [
@@ -1933,6 +2080,7 @@
       { "attributes": { "id": "3" } },
       { "key": "my-test", "variations": [0, 1] },
       0,
+      true,
       true
     ],
     [
@@ -1940,6 +2088,7 @@
       { "attributes": { "id": "4" } },
       { "key": "my-test", "variations": [0, 1] },
       1,
+      true,
       true
     ],
     [
@@ -1947,6 +2096,7 @@
       { "attributes": { "id": "5" } },
       { "key": "my-test", "variations": [0, 1] },
       1,
+      true,
       true
     ],
     [
@@ -1954,6 +2104,7 @@
       { "attributes": { "id": "6" } },
       { "key": "my-test", "variations": [0, 1] },
       1,
+      true,
       true
     ],
     [
@@ -1961,6 +2112,7 @@
       { "attributes": { "id": "7" } },
       { "key": "my-test", "variations": [0, 1] },
       0,
+      true,
       true
     ],
     [
@@ -1968,6 +2120,7 @@
       { "attributes": { "id": "8" } },
       { "key": "my-test", "variations": [0, 1] },
       1,
+      true,
       true
     ],
     [
@@ -1975,6 +2128,7 @@
       { "attributes": { "id": "9" } },
       { "key": "my-test", "variations": [0, 1] },
       0,
+      true,
       true
     ],
     [
@@ -1982,6 +2136,7 @@
       { "attributes": { "id": "1" } },
       { "key": "my-test", "variations": [0, 1], "weights": [0.1, 0.9] },
       1,
+      true,
       true
     ],
     [
@@ -1989,6 +2144,7 @@
       { "attributes": { "id": "2" } },
       { "key": "my-test", "variations": [0, 1], "weights": [0.1, 0.9] },
       1,
+      true,
       true
     ],
     [
@@ -1996,6 +2152,7 @@
       { "attributes": { "id": "3" } },
       { "key": "my-test", "variations": [0, 1], "weights": [0.1, 0.9] },
       0,
+      true,
       true
     ],
     [
@@ -2003,6 +2160,7 @@
       { "attributes": { "id": "4" } },
       { "key": "my-test", "variations": [0, 1], "weights": [0.1, 0.9] },
       1,
+      true,
       true
     ],
     [
@@ -2010,6 +2168,7 @@
       { "attributes": { "id": "5" } },
       { "key": "my-test", "variations": [0, 1], "weights": [0.1, 0.9] },
       1,
+      true,
       true
     ],
     [
@@ -2017,6 +2176,7 @@
       { "attributes": { "id": "6" } },
       { "key": "my-test", "variations": [0, 1], "weights": [0.1, 0.9] },
       1,
+      true,
       true
     ],
     [
@@ -2024,6 +2184,7 @@
       { "attributes": { "id": "7" } },
       { "key": "my-test", "variations": [0, 1], "weights": [0.1, 0.9] },
       0,
+      true,
       true
     ],
     [
@@ -2031,6 +2192,7 @@
       { "attributes": { "id": "8" } },
       { "key": "my-test", "variations": [0, 1], "weights": [0.1, 0.9] },
       1,
+      true,
       true
     ],
     [
@@ -2038,6 +2200,7 @@
       { "attributes": { "id": "9" } },
       { "key": "my-test", "variations": [0, 1], "weights": [0.1, 0.9] },
       1,
+      true,
       true
     ],
     [
@@ -2045,6 +2208,7 @@
       { "attributes": { "id": "1" } },
       { "key": "my-test", "variations": [0, 1], "coverage": 0.4 },
       0,
+      false,
       false
     ],
     [
@@ -2052,6 +2216,7 @@
       { "attributes": { "id": "2" } },
       { "key": "my-test", "variations": [0, 1], "coverage": 0.4 },
       0,
+      true,
       true
     ],
     [
@@ -2059,6 +2224,7 @@
       { "attributes": { "id": "3" } },
       { "key": "my-test", "variations": [0, 1], "coverage": 0.4 },
       0,
+      true,
       true
     ],
     [
@@ -2066,6 +2232,7 @@
       { "attributes": { "id": "4" } },
       { "key": "my-test", "variations": [0, 1], "coverage": 0.4 },
       0,
+      false,
       false
     ],
     [
@@ -2073,6 +2240,7 @@
       { "attributes": { "id": "5" } },
       { "key": "my-test", "variations": [0, 1], "coverage": 0.4 },
       1,
+      true,
       true
     ],
     [
@@ -2080,6 +2248,7 @@
       { "attributes": { "id": "6" } },
       { "key": "my-test", "variations": [0, 1], "coverage": 0.4 },
       0,
+      false,
       false
     ],
     [
@@ -2087,6 +2256,7 @@
       { "attributes": { "id": "7" } },
       { "key": "my-test", "variations": [0, 1], "coverage": 0.4 },
       0,
+      true,
       true
     ],
     [
@@ -2094,6 +2264,7 @@
       { "attributes": { "id": "8" } },
       { "key": "my-test", "variations": [0, 1], "coverage": 0.4 },
       1,
+      true,
       true
     ],
     [
@@ -2101,6 +2272,7 @@
       { "attributes": { "id": "9" } },
       { "key": "my-test", "variations": [0, 1], "coverage": 0.4 },
       0,
+      false,
       false
     ],
     [
@@ -2108,6 +2280,7 @@
       { "attributes": { "id": "1" } },
       { "key": "my-test", "variations": [0, 1, 2] },
       2,
+      true,
       true
     ],
     [
@@ -2115,6 +2288,7 @@
       { "attributes": { "id": "2" } },
       { "key": "my-test", "variations": [0, 1, 2] },
       0,
+      true,
       true
     ],
     [
@@ -2122,6 +2296,7 @@
       { "attributes": { "id": "3" } },
       { "key": "my-test", "variations": [0, 1, 2] },
       0,
+      true,
       true
     ],
     [
@@ -2129,6 +2304,7 @@
       { "attributes": { "id": "4" } },
       { "key": "my-test", "variations": [0, 1, 2] },
       2,
+      true,
       true
     ],
     [
@@ -2136,6 +2312,7 @@
       { "attributes": { "id": "5" } },
       { "key": "my-test", "variations": [0, 1, 2] },
       1,
+      true,
       true
     ],
     [
@@ -2143,6 +2320,7 @@
       { "attributes": { "id": "6" } },
       { "key": "my-test", "variations": [0, 1, 2] },
       2,
+      true,
       true
     ],
     [
@@ -2150,6 +2328,7 @@
       { "attributes": { "id": "7" } },
       { "key": "my-test", "variations": [0, 1, 2] },
       0,
+      true,
       true
     ],
     [
@@ -2157,6 +2336,7 @@
       { "attributes": { "id": "8" } },
       { "key": "my-test", "variations": [0, 1, 2] },
       1,
+      true,
       true
     ],
     [
@@ -2164,6 +2344,7 @@
       { "attributes": { "id": "9" } },
       { "key": "my-test", "variations": [0, 1, 2] },
       0,
+      true,
       true
     ],
     [
@@ -2171,6 +2352,7 @@
       { "attributes": { "id": "1" } },
       { "key": "my-test", "variations": [0, 1] },
       1,
+      true,
       true
     ],
     [
@@ -2178,6 +2360,7 @@
       { "attributes": { "id": "1" } },
       { "key": "my-test-3", "variations": [0, 1] },
       0,
+      true,
       true
     ],
     [
@@ -2185,6 +2368,7 @@
       { "attributes": { "id": "" } },
       { "key": "my-test", "variations": [0, 1] },
       0,
+      false,
       false
     ],
     [
@@ -2192,6 +2376,7 @@
       { "attributes": {} },
       { "key": "my-test", "variations": [0, 1] },
       0,
+      false,
       false
     ],
     [
@@ -2199,6 +2384,7 @@
       {},
       { "key": "my-test", "variations": [0, 1] },
       0,
+      false,
       false
     ],
     [
@@ -2206,6 +2392,7 @@
       { "attributes": { "id": "1" } },
       { "key": "my-test", "variations": [0] },
       0,
+      false,
       false
     ],
     [
@@ -2213,6 +2400,7 @@
       { "attributes": { "id": "1" } },
       { "key": "my-test", "variations": [0, 1], "force": -8 },
       0,
+      false,
       false
     ],
     [
@@ -2220,6 +2408,7 @@
       { "attributes": { "id": "1" } },
       { "key": "my-test", "variations": [0, 1], "force": 25 },
       0,
+      false,
       false
     ],
     [
@@ -2238,6 +2427,7 @@
         }
       },
       1,
+      true,
       true
     ],
     [
@@ -2256,6 +2446,7 @@
         }
       },
       0,
+      false,
       false
     ],
     [
@@ -2272,6 +2463,7 @@
         "hashAttribute": "companyId"
       },
       1,
+      true,
       true
     ],
     [
@@ -2287,6 +2479,7 @@
         "variations": [0, 1]
       },
       0,
+      false,
       false
     ],
     [
@@ -2302,6 +2495,7 @@
         "variations": [0, 1]
       },
       1,
+      true,
       false
     ],
     [
@@ -2317,6 +2511,7 @@
         "variations": [0, 1]
       },
       1,
+      true,
       true
     ],
     [
@@ -2332,6 +2527,7 @@
         "variations": [0, 1]
       },
       0,
+      false,
       false
     ],
     [
@@ -2348,6 +2544,7 @@
         "variations": [0, 1]
       },
       1,
+      true,
       false
     ],
     [
@@ -2364,6 +2561,7 @@
         "variations": [0, 1]
       },
       0,
+      false,
       false
     ],
     [
@@ -2390,6 +2588,7 @@
         "color": "green",
         "size": "large"
       },
+      true,
       true
     ],
     [
@@ -2403,6 +2602,7 @@
         "variations": [0, 1]
       },
       0,
+      true,
       false
     ],
     [
@@ -2416,6 +2616,7 @@
         "variations": [0, 1]
       },
       0,
+      false,
       false
     ],
     [
@@ -2430,6 +2631,7 @@
         "variations": [0, 1]
       },
       1,
+      true,
       false
     ],
     [
@@ -2444,6 +2646,7 @@
         "force": 1
       },
       1,
+      true,
       false
     ],
     [
@@ -2459,6 +2662,7 @@
         "namespace": ["namespace", 0.1, 1]
       },
       1,
+      true,
       true
     ],
     [
@@ -2474,6 +2678,7 @@
         "namespace": ["namespace", 0, 0.1]
       },
       0,
+      false,
       false
     ]
   ],
