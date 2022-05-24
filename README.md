@@ -230,6 +230,9 @@ print(result.variationId) # e.g. 0 or 1
 # The value of the assigned variation
 print(result.value) # e.g. "A" or "B"
 
+# If the variation was randomly assigned by hashing user attributes
+print(result.hashUsed) # True or False
+
 # The user attribute used to assign a variation
 print(result.hashAttribute) # "id"
 
@@ -237,8 +240,9 @@ print(result.hashAttribute) # "id"
 print(result.hashValue) # e.g. "123"
 ```
 
-The `inExperiment` flag is only set to True if the user was randomly assigned a variation. If the user failed any targeting rules or was forced into a specific variation, this flag will be false.
+The `inExperiment` flag will be false if the user was excluded from being part of the experiment for any reason (e.g. failed targeting conditions).
 
+The `hashUsed` flag will only be true if the user was randomly assigned a variation. If the user was forced into a specific variation instead, this flag will be false.
 
 ### Example Experiments
 
