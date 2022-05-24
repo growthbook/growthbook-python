@@ -100,12 +100,13 @@ def test_feature(feature_data):
 
 
 def test_run(run_data):
-    _, ctx, exp, value, inExperiment = run_data
+    _, ctx, exp, value, inExperiment, hashUsed = run_data
     gb = GrowthBook(**ctx)
 
     res = gb.run(Experiment(**exp))
     assert res.value == value
     assert res.inExperiment == inExperiment
+    assert res.hashUsed == hashUsed
 
     gb.destroy()
 
@@ -387,8 +388,10 @@ def test_ignores_draft_experiments():
     res2 = gb.run(exp)
 
     assert res1.inExperiment is False
+    assert res1.hashUsed is False
     assert res1.value == 0
-    assert res2.inExperiment is False
+    assert res2.inExperiment is True
+    assert res2.hashUsed is False
     assert res2.value == 1
 
     gb.destroy()
@@ -414,7 +417,7 @@ def test_ignores_stopped_experiments_unless_forced():
     assert res1.value == 0
     assert res1.inExperiment is False
     assert res2.value == 2
-    assert res2.inExperiment is False
+    assert res2.inExperiment is True
 
     gb.destroy()
 
