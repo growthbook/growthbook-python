@@ -304,6 +304,7 @@ class Result(object):
         hashUsed: bool,
         hashAttribute: str,
         hashValue: str,
+        featureId: str,
     ) -> None:
         self.variationId = variationId
         self.inExperiment = inExperiment
@@ -311,9 +312,11 @@ class Result(object):
         self.hashUsed = hashUsed
         self.hashAttribute = hashAttribute
         self.hashValue = hashValue
+        self.featureId = featureId or None
 
     def to_dict(self) -> dict:
         return {
+            "featureId": self.featureId,
             "variationId": self.variationId,
             "inExperiment": self.inExperiment,
             "value": self.value,
@@ -520,7 +523,8 @@ class GrowthBook(object):
                 namespace=rule.namespace,
             )
 
-            result = self.run(exp)
+            result = self._run(exp, key)
+            self._fireSubscriptions(exp, result)
 
             if not result.inExperiment:
                 continue
@@ -534,14 +538,13 @@ class GrowthBook(object):
 
     def _getHashValue(self, attr: str) -> str:
         if attr in self._attributes:
-            return str(self._attributes[attr])
+            return str(self._attributes[attr] or "")
         if attr in self._user:
-            return str(self._user[attr])
+            return str(self._user[attr] or "")
         return ""
 
-    def run(self, experiment: Experiment) -> Result:
-        result = self._run(experiment)
 
+    def _fireSubscriptions(self, experiment: Experiment, result: Result):
         prev = self._assigned.get(experiment.key, None)
         if (
             not prev
@@ -558,19 +561,23 @@ class GrowthBook(object):
                 except Exception:
                     pass
 
+
+    def run(self, experiment: Experiment) -> Result:
+        result = self._run(experiment)
+        self._fireSubscriptions(experiment, result)
         return result
 
     def subscribe(self, callback):
         self._subscriptions.add(callback)
         return lambda: self._subscriptions.remove(callback)
 
-    def _run(self, experiment: Experiment) -> Result:
+    def _run(self, experiment: Experiment, featureId: str = None) -> Result:
         # 1. If experiment has less than 2 variations, return immediately
         if len(experiment.variations) < 2:
-            return self._getExperimentResult(experiment)
+            return self._getExperimentResult(experiment, featureId=featureId)
         # 2. If growthbook is disabled, return immediately
         if not self._enabled:
-            return self._getExperimentResult(experiment)
+            return self._getExperimentResult(experiment, featureId=featureId)
         # 2.5. If the experiment props have been overridden, merge them in
         if self._overrides.get(experiment.key, None):
             experiment.update(self._overrides[experiment.key])
@@ -579,38 +586,38 @@ class GrowthBook(object):
             experiment.key, self._url, len(experiment.variations)
         )
         if qs is not None:
-            return self._getExperimentResult(experiment, qs)
+            return self._getExperimentResult(experiment, qs, featureId=featureId)
         # 4. If variation is forced in the context
         if self._forcedVariations.get(experiment.key, None) is not None:
             return self._getExperimentResult(
-                experiment, self._forcedVariations[experiment.key]
+                experiment, self._forcedVariations[experiment.key], featureId=featureId
             )
         # 5. If experiment is a draft or not active, return immediately
         if experiment.status == "draft" or not experiment.active:
-            return self._getExperimentResult(experiment)
+            return self._getExperimentResult(experiment, featureId=featureId)
         # 6. Get the user hash attribute and value
         hashAttribute = experiment.hashAttribute or "id"
         hashValue = self._getHashValue(hashAttribute)
         if not hashValue:
-            return self._getExperimentResult(experiment)
+            return self._getExperimentResult(experiment, featureId=featureId)
 
         # 7. Exclude if user not in experiment.namespace
         if experiment.namespace and not inNamespace(hashValue, experiment.namespace):
-            return self._getExperimentResult(experiment)
+            return self._getExperimentResult(experiment, featureId=featureId)
 
         # 7.5. If experiment has an include property
         if experiment.include:
             try:
                 if not experiment.include():
-                    return self._getExperimentResult(experiment)
+                    return self._getExperimentResult(experiment, featureId=featureId)
             except Exception:
-                return self._getExperimentResult(experiment)
+                return self._getExperimentResult(experiment, featureId=featureId)
 
         # 8. Exclude if condition is false
         if experiment.condition and not evalCondition(
             self._attributes, experiment.condition
         ):
-            return self._getExperimentResult(experiment)
+            return self._getExperimentResult(experiment, featureId=featureId)
 
         # 8.1. Make sure user is in a matching group
         if experiment.groups and len(experiment.groups):
@@ -620,11 +627,11 @@ class GrowthBook(object):
                 if expGroups[group]:
                     matched = True
             if not matched:
-                return self._getExperimentResult(experiment)
+                return self._getExperimentResult(experiment, featureId=featureId)
         # 8.2. If experiment.url is set, see if it's valid
         if experiment.url:
             if not self._urlIsValid(experiment.url):
-                return self._getExperimentResult(experiment)
+                return self._getExperimentResult(experiment, featureId=featureId)
 
         # 9. Get bucket ranges and choose variation
         ranges = getBucketRanges(
@@ -635,22 +642,22 @@ class GrowthBook(object):
 
         # 10. Return if not in experiment
         if assigned < 0:
-            return self._getExperimentResult(experiment)
+            return self._getExperimentResult(experiment, featureId=featureId)
 
         # 11. If experiment is forced, return immediately
         if experiment.force is not None:
-            return self._getExperimentResult(experiment, experiment.force)
+            return self._getExperimentResult(experiment, experiment.force, featureId=featureId)
 
         # 12. Exclude if in QA mode
         if self._qaMode:
-            return self._getExperimentResult(experiment)
+            return self._getExperimentResult(experiment, featureId=featureId)
 
         # 12.5. If experiment is stopped, return immediately
         if experiment.status == "stopped":
-            return self._getExperimentResult(experiment)
+            return self._getExperimentResult(experiment, featureId=featureId)
 
         # 13. Build the result object
-        result = self._getExperimentResult(experiment, assigned, True)
+        result = self._getExperimentResult(experiment, assigned, True, featureId=featureId)
 
         # 14. Fire the tracking callback if set
         self._track(experiment, result)
@@ -691,7 +698,7 @@ class GrowthBook(object):
             return True
 
     def _getExperimentResult(
-        self, experiment: Experiment, variationId: int = -1, hashUsed: bool = False
+        self, experiment: Experiment, variationId: int = -1, hashUsed: bool = False, featureId:str = None
     ) -> Result:
         hashAttribute = experiment.hashAttribute or "id"
 
@@ -701,6 +708,7 @@ class GrowthBook(object):
             inExperiment = False
 
         return Result(
+            featureId=featureId,
             inExperiment=inExperiment,
             variationId=variationId,
             value=experiment.variations[variationId],
