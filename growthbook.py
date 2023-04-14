@@ -10,7 +10,7 @@ from urllib.parse import urlparse, parse_qs
 from typing import Optional
 
 
-def fnv1a32(str: str) -> str:
+def fnv1a32(str: str) -> int:
     hval = 0x811C9DC5
     prime = 0x01000193
     uint32_max = 2 ** 32
@@ -20,13 +20,20 @@ def fnv1a32(str: str) -> str:
     return hval
 
 
-def gbhash(str: str) -> float:
-    n = fnv1a32(str)
-    return (n % 1000) / 1000
+def gbhash(seed: str, value: str, version: int) -> float:
+    if version == 2:
+        n = fnv1a32(fnv1a32(seed + value) + "")
+        return (n % 10000) / 10000
+    if version == 1:
+        n = fnv1a32(value + seed)
+        return (n % 1000) / 1000
+    return None
 
+def inRange(n: float, range: "tuple[float,float]") -> bool:
+    return n >= range[0] and n < range[1]
 
 def inNamespace(userId: str, namespace: "tuple[str,float,float]") -> bool:
-    n = gbhash(userId + "__" + namespace[0])
+    n = gbhash("__" + namespace[0], userId, 1)
     return n >= namespace[1] and n < namespace[2]
 
 
@@ -505,7 +512,7 @@ class GrowthBook(object):
                     if not hashValue:
                         continue
 
-                    n = gbhash(hashValue + key)
+                    n = gbhash(key, hashValue, rule.hashVersion)
 
                     if n > rule.coverage:
                         continue
@@ -543,6 +550,24 @@ class GrowthBook(object):
             return str(self._user[attr] or "")
         return ""
 
+    def isIncludedInRollout(self, seed: str, hashAttribute:str = None, range: "tuple[float,float]" = None, coverage: float = None, hashVersion: int = None) -> bool:
+        if coverage == None and range == None:
+            return True
+
+        hash_value = self._getHashValue(hashAttribute)
+        if (hash_value == ""):
+            return False
+        
+        n = gbhash(seed, hash_value, hashVersion or 1)
+        if n == None:
+            return False
+        
+        if range:
+            return inRange(n, range)
+        elif coverage != None:
+            return n <= coverage
+        
+        return True
 
     def _fireSubscriptions(self, experiment: Experiment, result: Result):
         prev = self._assigned.get(experiment.key, None)
@@ -637,7 +662,7 @@ class GrowthBook(object):
         ranges = getBucketRanges(
             len(experiment.variations), experiment.coverage or 1, experiment.weights
         )
-        n = gbhash(hashValue + experiment.key)
+        n = gbhash(experiment.key, hashValue, experiment.hashVersion)
         assigned = chooseVariation(n, ranges)
 
         # 10. Return if not in experiment
