@@ -14,6 +14,7 @@ from growthbook import (
     inNamespace,
     getEqualWeights,
     evalCondition,
+    decrypt
 )
 
 
@@ -30,8 +31,8 @@ def pytest_generate_tests(metafunc):
 
 
 def test_hash(hash_data):
-    hashValue, expected = hash_data
-    assert gbhash(hashValue) == expected
+    seed, value, version, expected = hash_data
+    assert gbhash(seed, value, version) == expected
 
 
 def round_list(item):
@@ -86,6 +87,12 @@ def test_conditions(evalCondition_data):
     _, condition, attributes, expected = evalCondition_data
     assert evalCondition(attributes, condition) == expected
 
+def test_decrypt(decrypt_data):
+    _, encrypted, key, expected = decrypt_data
+    try:
+        assert(decrypt(encrypted, key)) == expected
+    except:
+        assert(expected) == None
 
 def test_feature(feature_data):
     _, ctx, key, expected = feature_data

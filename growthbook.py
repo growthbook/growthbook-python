@@ -8,7 +8,9 @@ More info at https://www.growthbook.io
 import re
 from urllib.parse import urlparse, parse_qs
 from typing import Optional
-
+from base64 import b64decode
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from cryptography.hazmat.primitives import padding
 
 def fnv1a32(str: str) -> int:
     hval = 0x811C9DC5
@@ -22,7 +24,7 @@ def fnv1a32(str: str) -> int:
 
 def gbhash(seed: str, value: str, version: int) -> float:
     if version == 2:
-        n = fnv1a32(fnv1a32(seed + value) + "")
+        n = fnv1a32(str(fnv1a32(seed + value)))
         return (n % 10000) / 10000
     if version == 1:
         n = fnv1a32(value + seed)
@@ -69,7 +71,7 @@ def getBucketRanges(
 
 def chooseVariation(n: float, ranges: "list[tuple[float,float]]") -> int:
     for i, r in enumerate(ranges):
-        if n >= r[0] and n < r[1]:
+        if inRange(n, r):
             return i
     return -1
 
@@ -89,6 +91,22 @@ def getQueryStringOverride(id: str, url: str, numVariations: int) -> Optional[in
         return None
     return varId
 
+def decrypt(encrypted: str, key: str) -> str:
+    iv, cipher_text = encrypted.split('.', 2)
+
+    key = b64decode(key)
+    iv = b64decode(iv)
+    ct = b64decode(cipher_text)
+
+    cipher = Cipher(algorithms.AES128(key), modes.CBC(iv))
+    decryptor = cipher.decryptor()
+
+    decrypted = decryptor.update(ct) + decryptor.finalize()
+
+    unpadder = padding.PKCS7(128).unpadder()
+    bytestring = unpadder.update(decrypted) + unpadder.finalize()
+
+    return bytestring.decode("utf-8")
 
 def evalCondition(attributes: dict, condition: dict) -> bool:
     if "$or" in condition:
@@ -544,18 +562,19 @@ class GrowthBook(object):
         return self._assigned.copy()
 
     def _getHashValue(self, attr: str) -> str:
+        attr = attr or "id"
         if attr in self._attributes:
             return str(self._attributes[attr] or "")
         if attr in self._user:
             return str(self._user[attr] or "")
         return ""
 
-    def isIncludedInRollout(self, seed: str, hashAttribute:str = None, range: "tuple[float,float]" = None, coverage: float = None, hashVersion: int = None) -> bool:
+    def _isIncludedInRollout(self, seed: str, hashAttribute:str = None, range: "tuple[float,float]" = None, coverage: float = None, hashVersion: int = None) -> bool:
         if coverage == None and range == None:
             return True
 
         hash_value = self._getHashValue(hashAttribute)
-        if (hash_value == ""):
+        if hash_value == "":
             return False
         
         n = gbhash(seed, hash_value, hashVersion or 1)
@@ -568,6 +587,25 @@ class GrowthBook(object):
             return n <= coverage
         
         return True
+
+    def _isFilteredOut(self, filters) -> bool:
+        for filter in filters:
+            hash_value = self._getHashValue(filter["hashAttribute"])
+            if hash_value == "":
+                return False
+            
+            n = gbhash(filter["seed"] or "", hash_value, filter["hashVersion"] or 2)
+            if n == None:
+                return False
+            
+            filtered = False
+            for range in filter["ranges"]:
+                if inRange(n, range):
+                    filtered = True
+                    break
+            if not filtered:
+                return True
+        return False
 
     def _fireSubscriptions(self, experiment: Experiment, result: Result):
         prev = self._assigned.get(experiment.key, None)
