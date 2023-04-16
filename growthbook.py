@@ -7,7 +7,7 @@ More info at https://www.growthbook.io
 
 import re
 from urllib.parse import urlparse, parse_qs
-from typing import Optional
+from typing import Optional, TypedDict
 from base64 import b64decode
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
@@ -251,6 +251,16 @@ def evalOperatorCondition(operator, attributeValue, conditionValue) -> bool:
         return not evalConditionValue(conditionValue, attributeValue)
     return False
 
+class VariationMeta(TypedDict):
+    key: str
+    name: str
+    passthrough: bool
+
+class Filter(TypedDict):
+    seed: str
+    ranges: "list[tuple[float,float]]"
+    hashVersion: int
+    attribute: str
 
 class Experiment(object):
     def __init__(
@@ -268,6 +278,13 @@ class Experiment(object):
         groups: list = None,
         force: int = None,
         hashAttribute: str = "id",
+        hashVersion: int = None,
+        ranges: "list[tuple[float,float]]" = None,
+        meta: "list[VariationMeta]" = None,
+        filters: "list[Filter]" = None,
+        seed: str = None,
+        name: str = None,
+        phase: str = None
     ) -> None:
         self.key = key
         self.variations = variations
@@ -278,6 +295,13 @@ class Experiment(object):
         self.namespace = namespace
         self.force = force
         self.hashAttribute = hashAttribute
+        self.hashVersion = hashVersion or 1
+        self.ranges = ranges
+        self.meta = meta
+        self.filters = filters
+        self.seed = seed
+        self.name = name
+        self.phase = phase
 
         # Deprecated properties
         self.status = status
@@ -296,6 +320,13 @@ class Experiment(object):
             "namespace": self.namespace,
             "force": self.force,
             "hashAttribute": self.hashAttribute,
+            "hashVersion": self.hashVersion,
+            "ranges": self.ranges,
+            "meta": self.meta,
+            "filters": self.filters,
+            "seed": self.seed,
+            "name": self.name,
+            "phase": self.phase
         }
 
     def update(self, data: dict) -> None:
@@ -330,6 +361,8 @@ class Result(object):
         hashAttribute: str,
         hashValue: str,
         featureId: str,
+        meta: VariationMeta = None,
+        bucket: float = None
     ) -> None:
         self.variationId = variationId
         self.inExperiment = inExperiment
@@ -338,6 +371,19 @@ class Result(object):
         self.hashAttribute = hashAttribute
         self.hashValue = hashValue
         self.featureId = featureId or None
+        self.bucket = bucket
+
+        self.key = str(variationId)
+        self.name = ""
+        self.passthrough = False
+
+        if meta:
+            if meta.name:
+                self.name = meta.name
+            if meta.key:
+                self.key = meta.key
+            if meta.passthrough:
+                self.passthrough = meta.passthrough
 
     def to_dict(self) -> dict:
         return {
@@ -348,8 +394,11 @@ class Result(object):
             "hashUsed": self.hashUsed,
             "hashAttribute": self.hashAttribute,
             "hashValue": self.hashValue,
+            "bucket": self.bucket,
+            "name": self.name,
+            "key": self.key,
+            "passthrough": self.passthrough
         }
-
 
 class Feature(object):
     def __init__(self, defaultValue=None, rules: list = []) -> None:
@@ -379,6 +428,14 @@ class FeatureRule(object):
         namespace: "tuple[str,float,float]" = None,
         force=None,
         hashAttribute: str = "id",
+        hashVersion: int = None,
+        range: "tuple[float,float]" = None,
+        ranges: "list[tuple[float,float]]" = None,
+        meta: "list[VariationMeta]" = None,
+        filters: "list[Filter]" = None,
+        seed: str = None,
+        name: str = None,
+        phase: str = None
     ) -> None:
         self.key = key
         self.variations = variations
@@ -388,6 +445,14 @@ class FeatureRule(object):
         self.namespace = namespace
         self.force = force
         self.hashAttribute = hashAttribute
+        self.hashVersion = hashVersion or 1
+        self.range = range
+        self.ranges = ranges
+        self.meta = meta
+        self.filters = filters
+        self.seed = seed
+        self.name = name
+        self.phase = phase
 
     def to_dict(self) -> dict:
         data = {}
@@ -407,6 +472,22 @@ class FeatureRule(object):
             data["force"] = self.force
         if self.hashAttribute != "id":
             data["hashAttribute"] = self.hashAttribute
+        if self.hashVersion:
+            data["hashVersion"] = self.hashVersion
+        if self.range is not None:
+            data["range"] = self.range
+        if self.ranges is not None:
+            data["ranges"] = self.ranges
+        if self.meta is not None:
+            data["meta"] = self.meta
+        if self.filters is not None:
+            data["filters"] = self.filters
+        if self.seed is not None:
+            data["seed"] = self.seed
+        if self.name is not None:
+            data["name"] = self.name
+        if self.phase is not None:
+            data["phase"] = self.phase
 
         return data
 
@@ -524,16 +605,18 @@ class GrowthBook(object):
             if rule.condition:
                 if not evalCondition(self._attributes, rule.condition):
                     continue
+            if rule.filters:
+                if self._isFilteredOut(rule.filters):
+                    continue
             if rule.force is not None:
-                if rule.coverage < 1:
-                    hashValue = self._getHashValue(rule.hashAttribute)
-                    if not hashValue:
-                        continue
-
-                    n = gbhash(key, hashValue, rule.hashVersion)
-
-                    if n > rule.coverage:
-                        continue
+                if not self._isIncludedInRollout(
+                    rule.seed or key,
+                    rule.hashAttribute,
+                    rule.range,
+                    rule.coverage,
+                    rule.hashVersion
+                ):
+                    continue
                 return FeatureResult(rule.force, "force")
 
             if rule.variations is None:
@@ -546,12 +629,21 @@ class GrowthBook(object):
                 weights=rule.weights,
                 hashAttribute=rule.hashAttribute,
                 namespace=rule.namespace,
+                hashVersion=rule.hashVersion,
+                meta=rule.meta,
+                ranges=rule.ranges,
+                name=rule.name,
+                phase=rule.phase,
+                seed=rule.seed,
             )
 
             result = self._run(exp, key)
             self._fireSubscriptions(exp, result)
 
             if not result.inExperiment:
+                continue
+
+            if result.passthrough:
                 continue
 
             return FeatureResult(result.value, "experiment", exp, result)
@@ -664,8 +756,11 @@ class GrowthBook(object):
         if not hashValue:
             return self._getExperimentResult(experiment, featureId=featureId)
 
-        # 7. Exclude if user not in experiment.namespace
-        if experiment.namespace and not inNamespace(hashValue, experiment.namespace):
+        # 7. Filtered out / not in namespace
+        if experiment.filters:
+            if self._isFilteredOut(experiment.filters):
+                return self._getExperimentResult(experiment, featureId=featureId)
+        elif experiment.namespace and not inNamespace(hashValue, experiment.namespace):
             return self._getExperimentResult(experiment, featureId=featureId)
 
         # 7.5. If experiment has an include property
@@ -697,10 +792,10 @@ class GrowthBook(object):
                 return self._getExperimentResult(experiment, featureId=featureId)
 
         # 9. Get bucket ranges and choose variation
-        ranges = getBucketRanges(
+        ranges = experiment.ranges or getBucketRanges(
             len(experiment.variations), experiment.coverage or 1, experiment.weights
         )
-        n = gbhash(experiment.key, hashValue, experiment.hashVersion)
+        n = gbhash(experiment.seed or experiment.key, hashValue, experiment.hashVersion or 1)
         assigned = chooseVariation(n, ranges)
 
         # 10. Return if not in experiment
@@ -720,7 +815,7 @@ class GrowthBook(object):
             return self._getExperimentResult(experiment, featureId=featureId)
 
         # 13. Build the result object
-        result = self._getExperimentResult(experiment, assigned, True, featureId=featureId)
+        result = self._getExperimentResult(experiment, assigned, True, featureId=featureId, bucket=n)
 
         # 14. Fire the tracking callback if set
         self._track(experiment, result)
@@ -761,7 +856,7 @@ class GrowthBook(object):
             return True
 
     def _getExperimentResult(
-        self, experiment: Experiment, variationId: int = -1, hashUsed: bool = False, featureId:str = None
+        self, experiment: Experiment, variationId: int = -1, hashUsed: bool = False, featureId:str = None, bucket:float = None
     ) -> Result:
         hashAttribute = experiment.hashAttribute or "id"
 
@@ -769,6 +864,10 @@ class GrowthBook(object):
         if variationId < 0 or variationId > len(experiment.variations) - 1:
             variationId = 0
             inExperiment = False
+
+        meta = None
+        if experiment.meta:
+            meta = experiment.meta[variationId]
 
         return Result(
             featureId=featureId,
@@ -778,4 +877,6 @@ class GrowthBook(object):
             hashUsed=hashUsed,
             hashAttribute=hashAttribute,
             hashValue=self._getHashValue(hashAttribute),
+            meta=meta,
+            bucket=bucket
         )
