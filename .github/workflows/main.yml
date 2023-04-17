@@ -2,10 +2,12 @@ name: Build
 on: [push]
 jobs:
   build:
-    runs-on: ubuntu-latest
+    # Python 3.5 and 3.6 are not supported on ubuntu latest (22.04)
+    # Need to pin this to 20.04 instead
+    runs-on: ubuntu-20.04
     strategy:
       matrix:
-        python-version: [3.6, 3.7, 3.8]
+        python-version: [3.5, 3.6, 3.7, 3.8, 3.9, 3.10, 3.11]
 
     steps:
       - name: "Begin CI..."
