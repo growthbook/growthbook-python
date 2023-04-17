@@ -8,7 +8,7 @@ More info at https://www.growthbook.io
 import re
 import sys
 
-from typing import Optional, TypedDict, Any, Set, Tuple, List, Dict
+from typing import Optional, Any, Set, Tuple, List, Dict
 
 # Only require typing_extensions if using Python 3.7 or earlier
 if sys.version_info >= (3, 8):
