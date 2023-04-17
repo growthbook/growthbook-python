@@ -14,7 +14,7 @@ from growthbook import (
     inNamespace,
     getEqualWeights,
     evalCondition,
-    decrypt
+    decrypt,
 )
 
 
@@ -87,12 +87,14 @@ def test_conditions(evalCondition_data):
     _, condition, attributes, expected = evalCondition_data
     assert evalCondition(attributes, condition) == expected
 
+
 def test_decrypt(decrypt_data):
     _, encrypted, key, expected = decrypt_data
     try:
-        assert(decrypt(encrypted, key)) == expected
+        assert (decrypt(encrypted, key)) == expected
     except:
-        assert(expected) == None
+        assert (expected) is None
+
 
 def test_feature(feature_data):
     _, ctx, key, expected = feature_data

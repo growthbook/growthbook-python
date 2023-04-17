@@ -12,6 +12,7 @@ from base64 import b64decode
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 
+
 def fnv1a32(str: str) -> int:
     hval = 0x811C9DC5
     prime = 0x01000193
@@ -31,8 +32,10 @@ def gbhash(seed: str, value: str, version: int) -> float:
         return (n % 1000) / 1000
     return None
 
+
 def inRange(n: float, range: "tuple[float,float]") -> bool:
     return n >= range[0] and n < range[1]
+
 
 def inNamespace(userId: str, namespace: "tuple[str,float,float]") -> bool:
     n = gbhash("__" + namespace[0], userId, 1)
@@ -91,8 +94,9 @@ def getQueryStringOverride(id: str, url: str, numVariations: int) -> Optional[in
         return None
     return varId
 
+
 def decrypt(encrypted: str, key: str) -> str:
-    iv, cipher_text = encrypted.split('.', 2)
+    iv, cipher_text = encrypted.split(".", 2)
 
     key = b64decode(key)
     iv = b64decode(iv)
@@ -107,6 +111,7 @@ def decrypt(encrypted: str, key: str) -> str:
     bytestring = unpadder.update(decrypted) + unpadder.finalize()
 
     return bytestring.decode("utf-8")
+
 
 def evalCondition(attributes: dict, condition: dict) -> bool:
     if "$or" in condition:
@@ -251,16 +256,19 @@ def evalOperatorCondition(operator, attributeValue, conditionValue) -> bool:
         return not evalConditionValue(conditionValue, attributeValue)
     return False
 
+
 class VariationMeta(TypedDict):
     key: str
     name: str
     passthrough: bool
+
 
 class Filter(TypedDict):
     seed: str
     ranges: "list[tuple[float,float]]"
     hashVersion: int
     attribute: str
+
 
 class Experiment(object):
     def __init__(
@@ -270,7 +278,7 @@ class Experiment(object):
         weights: "list[float]" = None,
         active: bool = True,
         status: str = "running",
-        coverage: int = 1,
+        coverage: int = None,
         condition: dict = None,
         namespace: "tuple[str,float,float]" = None,
         url: str = "",
@@ -284,7 +292,7 @@ class Experiment(object):
         filters: "list[Filter]" = None,
         seed: str = None,
         name: str = None,
-        phase: str = None
+        phase: str = None,
     ) -> None:
         self.key = key
         self.variations = variations
@@ -310,12 +318,12 @@ class Experiment(object):
         self.groups = groups
 
     def to_dict(self):
-        return {
+        obj = {
             "key": self.key,
             "variations": self.variations,
             "weights": self.weights,
             "active": self.active,
-            "coverage": self.coverage,
+            "coverage": self.coverage or 1,
             "condition": self.condition,
             "namespace": self.namespace,
             "force": self.force,
@@ -326,8 +334,9 @@ class Experiment(object):
             "filters": self.filters,
             "seed": self.seed,
             "name": self.name,
-            "phase": self.phase
+            "phase": self.phase,
         }
+        return obj
 
     def update(self, data: dict) -> None:
         weights = data.get("weights", None)
@@ -362,7 +371,7 @@ class Result(object):
         hashValue: str,
         featureId: str,
         meta: VariationMeta = None,
-        bucket: float = None
+        bucket: float = None,
     ) -> None:
         self.variationId = variationId
         self.inExperiment = inExperiment
@@ -378,15 +387,15 @@ class Result(object):
         self.passthrough = False
 
         if meta:
-            if meta.name:
-                self.name = meta.name
-            if meta.key:
-                self.key = meta.key
-            if meta.passthrough:
-                self.passthrough = meta.passthrough
+            if "name" in meta:
+                self.name = meta["name"]
+            if "key" in meta:
+                self.key = meta["key"]
+            if "passthrough" in meta:
+                self.passthrough = meta["passthrough"]
 
     def to_dict(self) -> dict:
-        return {
+        obj = {
             "featureId": self.featureId,
             "variationId": self.variationId,
             "inExperiment": self.inExperiment,
@@ -394,11 +403,18 @@ class Result(object):
             "hashUsed": self.hashUsed,
             "hashAttribute": self.hashAttribute,
             "hashValue": self.hashValue,
-            "bucket": self.bucket,
-            "name": self.name,
             "key": self.key,
-            "passthrough": self.passthrough
         }
+
+        if self.bucket is not None:
+            obj["bucket"] = self.bucket
+        if self.name:
+            obj["name"] = self.name
+        if self.passthrough:
+            obj["passthrough"] = True
+
+        return obj
+
 
 class Feature(object):
     def __init__(self, defaultValue=None, rules: list = []) -> None:
@@ -423,7 +439,7 @@ class FeatureRule(object):
         key: str = "",
         variations: list = None,
         weights: "list[float]" = None,
-        coverage: int = 1,
+        coverage: int = None,
         condition: dict = None,
         namespace: "tuple[str,float,float]" = None,
         force=None,
@@ -435,7 +451,7 @@ class FeatureRule(object):
         filters: "list[Filter]" = None,
         seed: str = None,
         name: str = None,
-        phase: str = None
+        phase: str = None,
     ) -> None:
         self.key = key
         self.variations = variations
@@ -462,7 +478,7 @@ class FeatureRule(object):
             data["variations"] = self.variations
         if self.weights is not None:
             data["weights"] = self.weights
-        if self.coverage != 1:
+        if self.coverage and self.coverage != 1:
             data["coverage"] = self.coverage
         if self.condition is not None:
             data["condition"] = self.condition
@@ -614,7 +630,7 @@ class GrowthBook(object):
                     rule.hashAttribute,
                     rule.range,
                     rule.coverage,
-                    rule.hashVersion
+                    rule.hashVersion,
                 ):
                     continue
                 return FeatureResult(rule.force, "force")
@@ -635,6 +651,7 @@ class GrowthBook(object):
                 name=rule.name,
                 phase=rule.phase,
                 seed=rule.seed,
+                filters=rule.filters,
             )
 
             result = self._run(exp, key)
@@ -653,43 +670,53 @@ class GrowthBook(object):
     def getAllResults(self):
         return self._assigned.copy()
 
-    def _getHashValue(self, attr: str) -> str:
+    def _getOrigHashValue(self, attr: str = None):
         attr = attr or "id"
         if attr in self._attributes:
-            return str(self._attributes[attr] or "")
+            return self._attributes[attr] or ""
         if attr in self._user:
-            return str(self._user[attr] or "")
+            return self._user[attr] or ""
         return ""
 
-    def _isIncludedInRollout(self, seed: str, hashAttribute:str = None, range: "tuple[float,float]" = None, coverage: float = None, hashVersion: int = None) -> bool:
-        if coverage == None and range == None:
+    def _getHashValue(self, attr: str = None) -> str:
+        return str(self._getOrigHashValue(attr))
+
+    def _isIncludedInRollout(
+        self,
+        seed: str,
+        hashAttribute: str = None,
+        range: "tuple[float,float]" = None,
+        coverage: float = None,
+        hashVersion: int = None,
+    ) -> bool:
+        if coverage is None and range is None:
             return True
 
-        hash_value = self._getHashValue(hashAttribute)
+        hash_value = self._getHashValue(hashAttribute or "id")
         if hash_value == "":
             return False
-        
+
         n = gbhash(seed, hash_value, hashVersion or 1)
-        if n == None:
+        if n is None:
             return False
-        
+
         if range:
             return inRange(n, range)
-        elif coverage != None:
+        elif coverage is not None:
             return n <= coverage
-        
+
         return True
 
-    def _isFilteredOut(self, filters) -> bool:
+    def _isFilteredOut(self, filters: "list[Filter]") -> bool:
         for filter in filters:
-            hash_value = self._getHashValue(filter["hashAttribute"])
+            hash_value = self._getHashValue(filter.get("attribute", "id"))
             if hash_value == "":
                 return False
-            
-            n = gbhash(filter["seed"] or "", hash_value, filter["hashVersion"] or 2)
-            if n == None:
+
+            n = gbhash(filter.get("seed", ""), hash_value, filter.get("hashVersion", 2))
+            if n is None:
                 return False
-            
+
             filtered = False
             for range in filter["ranges"]:
                 if inRange(n, range):
@@ -715,7 +742,6 @@ class GrowthBook(object):
                     cb(experiment, result)
                 except Exception:
                     pass
-
 
     def run(self, experiment: Experiment) -> Result:
         result = self._run(experiment)
@@ -792,10 +818,13 @@ class GrowthBook(object):
                 return self._getExperimentResult(experiment, featureId=featureId)
 
         # 9. Get bucket ranges and choose variation
+        c = experiment.coverage
         ranges = experiment.ranges or getBucketRanges(
-            len(experiment.variations), experiment.coverage or 1, experiment.weights
+            len(experiment.variations), c if c is not None else 1, experiment.weights
         )
-        n = gbhash(experiment.seed or experiment.key, hashValue, experiment.hashVersion or 1)
+        n = gbhash(
+            experiment.seed or experiment.key, hashValue, experiment.hashVersion or 1
+        )
         assigned = chooseVariation(n, ranges)
 
         # 10. Return if not in experiment
@@ -804,7 +833,9 @@ class GrowthBook(object):
 
         # 11. If experiment is forced, return immediately
         if experiment.force is not None:
-            return self._getExperimentResult(experiment, experiment.force, featureId=featureId)
+            return self._getExperimentResult(
+                experiment, experiment.force, featureId=featureId
+            )
 
         # 12. Exclude if in QA mode
         if self._qaMode:
@@ -815,7 +846,9 @@ class GrowthBook(object):
             return self._getExperimentResult(experiment, featureId=featureId)
 
         # 13. Build the result object
-        result = self._getExperimentResult(experiment, assigned, True, featureId=featureId, bucket=n)
+        result = self._getExperimentResult(
+            experiment, assigned, True, featureId=featureId, bucket=n
+        )
 
         # 14. Fire the tracking callback if set
         self._track(experiment, result)
@@ -856,7 +889,12 @@ class GrowthBook(object):
             return True
 
     def _getExperimentResult(
-        self, experiment: Experiment, variationId: int = -1, hashUsed: bool = False, featureId:str = None, bucket:float = None
+        self,
+        experiment: Experiment,
+        variationId: int = -1,
+        hashUsed: bool = False,
+        featureId: str = None,
+        bucket: float = None,
     ) -> Result:
         hashAttribute = experiment.hashAttribute or "id"
 
@@ -876,7 +914,7 @@ class GrowthBook(object):
             value=experiment.variations[variationId],
             hashUsed=hashUsed,
             hashAttribute=hashAttribute,
-            hashValue=self._getHashValue(hashAttribute),
+            hashValue=self._getOrigHashValue(hashAttribute),
             meta=meta,
-            bucket=bucket
+            bucket=bucket,
         )
