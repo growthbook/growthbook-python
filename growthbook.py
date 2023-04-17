@@ -6,8 +6,15 @@ More info at https://www.growthbook.io
 """
 
 import re
+import sys
+
+if sys.version_info >= (3, 8):
+    from typing import Optional, TypedDict, Any, Set, Tuple, List, Dict
+else:
+    from typing import Optional, Set, Tuple, List, Dict
+    from typing_extensions import TypedDict, Any
+
 from urllib.parse import urlparse, parse_qs
-from typing import Optional, TypedDict
 from base64 import b64decode
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
@@ -23,7 +30,7 @@ def fnv1a32(str: str) -> int:
     return hval
 
 
-def gbhash(seed: str, value: str, version: int) -> float:
+def gbhash(seed: str, value: str, version: int) -> Optional[float]:
     if version == 2:
         n = fnv1a32(str(fnv1a32(seed + value)))
         return (n % 10000) / 10000
@@ -33,24 +40,26 @@ def gbhash(seed: str, value: str, version: int) -> float:
     return None
 
 
-def inRange(n: float, range: "tuple[float,float]") -> bool:
+def inRange(n: float, range: Tuple[float,float]) -> bool:
     return n >= range[0] and n < range[1]
 
 
-def inNamespace(userId: str, namespace: "tuple[str,float,float]") -> bool:
+def inNamespace(userId: str, namespace: Tuple[str,float,float]) -> bool:
     n = gbhash("__" + namespace[0], userId, 1)
+    if n is None:
+        return False
     return n >= namespace[1] and n < namespace[2]
 
 
-def getEqualWeights(numVariations: int) -> "list[float]":
+def getEqualWeights(numVariations: int) -> List[float]:
     if numVariations < 1:
         return []
     return [1 / numVariations for i in range(numVariations)]
 
 
 def getBucketRanges(
-    numVariations: int, coverage: float = 1, weights: "list[float]" = None
-) -> "list[tuple[float,float]]":
+    numVariations: int, coverage: float = 1, weights: List[float] = None
+) -> List[Tuple[float,float]]:
     if coverage < 0:
         coverage = 0
     if coverage > 1:
@@ -62,7 +71,7 @@ def getBucketRanges(
     if sum(weights) < 0.99 or sum(weights) > 1.01:
         weights = getEqualWeights(numVariations)
 
-    cumulative = 0
+    cumulative: float = 0
     ranges = []
     for w in weights:
         start = cumulative
@@ -72,7 +81,7 @@ def getBucketRanges(
     return ranges
 
 
-def chooseVariation(n: float, ranges: "list[tuple[float,float]]") -> int:
+def chooseVariation(n: float, ranges: List[Tuple[float,float]]) -> int:
     for i, r in enumerate(ranges):
         if inRange(n, r):
             return i
@@ -95,12 +104,12 @@ def getQueryStringOverride(id: str, url: str, numVariations: int) -> Optional[in
     return varId
 
 
-def decrypt(encrypted: str, key: str) -> str:
-    iv, cipher_text = encrypted.split(".", 2)
+def decrypt(encrypted_str: str, key_str: str) -> str:
+    iv_str, ct_str = encrypted_str.split(".", 2)
 
-    key = b64decode(key)
-    iv = b64decode(iv)
-    ct = b64decode(cipher_text)
+    key = b64decode(key_str)
+    iv = b64decode(iv_str)
+    ct = b64decode(ct_str)
 
     cipher = Cipher(algorithms.AES128(key), modes.CBC(iv))
     decryptor = cipher.decryptor()
@@ -265,7 +274,7 @@ class VariationMeta(TypedDict):
 
 class Filter(TypedDict):
     seed: str
-    ranges: "list[tuple[float,float]]"
+    ranges: List[Tuple[float,float]]
     hashVersion: int
     attribute: str
 
@@ -275,21 +284,21 @@ class Experiment(object):
         self,
         key: str,
         variations: list,
-        weights: "list[float]" = None,
+        weights: List[float] = None,
         active: bool = True,
         status: str = "running",
         coverage: int = None,
         condition: dict = None,
-        namespace: "tuple[str,float,float]" = None,
+        namespace: Tuple[str,float,float] = None,
         url: str = "",
         include=None,
         groups: list = None,
         force: int = None,
         hashAttribute: str = "id",
         hashVersion: int = None,
-        ranges: "list[tuple[float,float]]" = None,
-        meta: "list[VariationMeta]" = None,
-        filters: "list[Filter]" = None,
+        ranges: List[Tuple[float,float]] = None,
+        meta: List[VariationMeta] = None,
+        filters: List[Filter] = None,
         seed: str = None,
         name: str = None,
         phase: str = None,
@@ -369,7 +378,7 @@ class Result(object):
         hashUsed: bool,
         hashAttribute: str,
         hashValue: str,
-        featureId: str,
+        featureId: Optional[str],
         meta: VariationMeta = None,
         bucket: float = None,
     ) -> None:
@@ -419,7 +428,7 @@ class Result(object):
 class Feature(object):
     def __init__(self, defaultValue=None, rules: list = []) -> None:
         self.defaultValue = defaultValue
-        self.rules: list[FeatureRule] = []
+        self.rules: List[FeatureRule] = []
         for rule in rules:
             if isinstance(rule, FeatureRule):
                 self.rules.append(rule)
@@ -438,17 +447,17 @@ class FeatureRule(object):
         self,
         key: str = "",
         variations: list = None,
-        weights: "list[float]" = None,
+        weights: List[float] = None,
         coverage: int = None,
         condition: dict = None,
-        namespace: "tuple[str,float,float]" = None,
+        namespace: Tuple[str,float,float] = None,
         force=None,
         hashAttribute: str = "id",
         hashVersion: int = None,
-        range: "tuple[float,float]" = None,
-        ranges: "list[tuple[float,float]]" = None,
-        meta: "list[VariationMeta]" = None,
-        filters: "list[Filter]" = None,
+        range: Tuple[float,float] = None,
+        ranges: List[Tuple[float,float]] = None,
+        meta: List[VariationMeta] = None,
+        filters: List[Filter] = None,
         seed: str = None,
         name: str = None,
         phase: str = None,
@@ -471,7 +480,7 @@ class FeatureRule(object):
         self.phase = phase
 
     def to_dict(self) -> dict:
-        data = {}
+        data: Dict[str, Any] = {}
         if self.key:
             data["key"] = self.key
         if self.variations is not None:
@@ -556,7 +565,7 @@ class GrowthBook(object):
         self._enabled = enabled
         self._attributes = attributes
         self._url = url
-        self._features: dict[str, Feature] = {}
+        self._features: Dict[str, Feature] = {}
 
         if features:
             self.setFeatures(features)
@@ -570,9 +579,9 @@ class GrowthBook(object):
         self._overrides = overrides
         self._forcedVariations = forcedVariations
 
-        self._tracked = {}
-        self._assigned = {}
-        self._subscriptions = set()
+        self._tracked: Dict[str, Any] = {}
+        self._assigned: Dict[str, Any] = {}
+        self._subscriptions: Set[Any] = set()
 
     def setFeatures(self, features: dict) -> None:
         self._features = {}
@@ -582,7 +591,7 @@ class GrowthBook(object):
             else:
                 self._features[key] = Feature(**feature)
 
-    def getFeatures(self) -> "dict[str,Feature]":
+    def getFeatures(self) -> Dict[str,Feature]:
         return self._features
 
     def setAttributes(self, attributes: dict) -> None:
@@ -685,7 +694,7 @@ class GrowthBook(object):
         self,
         seed: str,
         hashAttribute: str = None,
-        range: "tuple[float,float]" = None,
+        range: Tuple[float,float] = None,
         coverage: float = None,
         hashVersion: int = None,
     ) -> bool:
@@ -707,7 +716,7 @@ class GrowthBook(object):
 
         return True
 
-    def _isFilteredOut(self, filters: "list[Filter]") -> bool:
+    def _isFilteredOut(self, filters: List[Filter]) -> bool:
         for filter in filters:
             hash_value = self._getHashValue(filter.get("attribute", "id"))
             if hash_value == "":
@@ -752,7 +761,7 @@ class GrowthBook(object):
         self._subscriptions.add(callback)
         return lambda: self._subscriptions.remove(callback)
 
-    def _run(self, experiment: Experiment, featureId: str = None) -> Result:
+    def _run(self, experiment: Experiment, featureId: Optional[str] = None) -> Result:
         # 1. If experiment has less than 2 variations, return immediately
         if len(experiment.variations) < 2:
             return self._getExperimentResult(experiment, featureId=featureId)
@@ -825,6 +834,8 @@ class GrowthBook(object):
         n = gbhash(
             experiment.seed or experiment.key, hashValue, experiment.hashVersion or 1
         )
+        if n is None:
+            return self._getExperimentResult(experiment, featureId=featureId)
         assigned = chooseVariation(n, ranges)
 
         # 10. Return if not in experiment
