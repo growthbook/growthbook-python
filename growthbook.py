@@ -8,11 +8,13 @@ More info at https://www.growthbook.io
 import re
 import sys
 
+from typing import Optional, TypedDict, Any, Set, Tuple, List, Dict
+
+# Only require typing_extensions if using Python 3.7 or earlier
 if sys.version_info >= (3, 8):
-    from typing import Optional, TypedDict, Any, Set, Tuple, List, Dict
+    from typing import TypedDict
 else:
-    from typing import Optional, Set, Tuple, List, Dict
-    from typing_extensions import TypedDict, Any
+    from typing_extensions import TypedDict
 
 from urllib.parse import urlparse, parse_qs
 from base64 import b64decode
