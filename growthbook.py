@@ -18,9 +18,11 @@ else:
 
 from urllib.parse import urlparse, parse_qs
 from base64 import b64decode
+from time import time
+import json
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
-
+from urllib3 import PoolManager
 
 def fnv1a32(str: str) -> int:
     hval = 0x811C9DC5
@@ -548,6 +550,63 @@ class FeatureResult(object):
 
         return data
 
+class CacheEntry(object):
+    def __init__(self, value: Dict, ttl: int) -> None:
+        self.value = value
+        self.ttl = ttl
+        self.expires = time() + ttl
+    
+    def update(self, value: Dict):
+        self.value = value
+        self.expires = time() + self.ttl
+
+class FeatureRepository(object):
+    def __init__(self) -> None:
+        self.cache: Dict[str, CacheEntry] = {}
+        self.http = PoolManager()
+
+    # Loads features with an in-memory cache in front
+    def load_features(self, api_host: str, client_key: str, decryption_key: str):
+        key = api_host + '::' + client_key
+        # If it's already cached
+        if key in self.cache:
+            entry = self.cache[key]
+            # Expired, refresh
+            if entry.expires < time():
+                res = self.fetch_features(api_host, client_key, decryption_key)
+                if res is not None:
+                    entry.update(res)
+            return entry.value
+        # Not cached, need to fetch
+        res = self.fetch_features(api_host, client_key, decryption_key)
+        if res is not None:
+            # Cache for later
+            self.cache[key] = CacheEntry(res, 60)
+        return res
+
+    # Fetch features from the GrowthBook API
+    def fetch_features(self, api_host: str, client_key: str, decryption_key: str):
+        r = self.http.request('GET', self.get_features_url(api_host, client_key))
+        if r.status >= 400:
+            return None
+        
+        decoded = json.loads(r.data.decode('utf-8'))
+
+        if 'encryptedFeatures' in decoded:
+            decrypted = decrypt(decoded['encryptedFeatures'], decryption_key)
+            return decrypted
+        elif 'features' in decoded:
+            return decoded['features']
+        else:
+            return None
+        
+    def get_features_url(self, api_host: str, client_key: str):
+        api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
+        return api_host + "/api/features/" + client_key
+        
+
+# Singleton instance
+repo = FeatureRepository()
 
 class GrowthBook(object):
     def __init__(
@@ -931,3 +990,4 @@ class GrowthBook(object):
             meta=meta,
             bucket=bucket,
         )
+
