@@ -7,6 +7,7 @@ More info at https://www.growthbook.io
 
 import re
 import sys
+import json
 
 from typing import Optional, Any, Set, Tuple, List, Dict
 
@@ -19,10 +20,10 @@ else:
 from urllib.parse import urlparse, parse_qs
 from base64 import b64decode
 from time import time
-import json
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from urllib3 import PoolManager
+
 
 def fnv1a32(str: str) -> int:
     hval = 0x811C9DC5
@@ -44,11 +45,11 @@ def gbhash(seed: str, value: str, version: int) -> Optional[float]:
     return None
 
 
-def inRange(n: float, range: Tuple[float,float]) -> bool:
+def inRange(n: float, range: Tuple[float, float]) -> bool:
     return n >= range[0] and n < range[1]
 
 
-def inNamespace(userId: str, namespace: Tuple[str,float,float]) -> bool:
+def inNamespace(userId: str, namespace: Tuple[str, float, float]) -> bool:
     n = gbhash("__" + namespace[0], userId, 1)
     if n is None:
         return False
@@ -63,7 +64,7 @@ def getEqualWeights(numVariations: int) -> List[float]:
 
 def getBucketRanges(
     numVariations: int, coverage: float = 1, weights: List[float] = None
-) -> List[Tuple[float,float]]:
+) -> List[Tuple[float, float]]:
     if coverage < 0:
         coverage = 0
     if coverage > 1:
@@ -85,7 +86,7 @@ def getBucketRanges(
     return ranges
 
 
-def chooseVariation(n: float, ranges: List[Tuple[float,float]]) -> int:
+def chooseVariation(n: float, ranges: List[Tuple[float, float]]) -> int:
     for i, r in enumerate(ranges):
         if inRange(n, r):
             return i
@@ -278,7 +279,7 @@ class VariationMeta(TypedDict):
 
 class Filter(TypedDict):
     seed: str
-    ranges: List[Tuple[float,float]]
+    ranges: List[Tuple[float, float]]
     hashVersion: int
     attribute: str
 
@@ -293,14 +294,14 @@ class Experiment(object):
         status: str = "running",
         coverage: int = None,
         condition: dict = None,
-        namespace: Tuple[str,float,float] = None,
+        namespace: Tuple[str, float, float] = None,
         url: str = "",
         include=None,
         groups: list = None,
         force: int = None,
         hashAttribute: str = "id",
         hashVersion: int = None,
-        ranges: List[Tuple[float,float]] = None,
+        ranges: List[Tuple[float, float]] = None,
         meta: List[VariationMeta] = None,
         filters: List[Filter] = None,
         seed: str = None,
@@ -454,12 +455,12 @@ class FeatureRule(object):
         weights: List[float] = None,
         coverage: int = None,
         condition: dict = None,
-        namespace: Tuple[str,float,float] = None,
+        namespace: Tuple[str, float, float] = None,
         force=None,
         hashAttribute: str = "id",
         hashVersion: int = None,
-        range: Tuple[float,float] = None,
-        ranges: List[Tuple[float,float]] = None,
+        range: Tuple[float, float] = None,
+        ranges: List[Tuple[float, float]] = None,
         meta: List[VariationMeta] = None,
         filters: List[Filter] = None,
         seed: str = None,
@@ -550,15 +551,17 @@ class FeatureResult(object):
 
         return data
 
+
 class CacheEntry(object):
     def __init__(self, value: Dict, ttl: int) -> None:
         self.value = value
         self.ttl = ttl
         self.expires = time() + ttl
-    
+
     def update(self, value: Dict):
         self.value = value
         self.expires = time() + self.ttl
+
 
 class FeatureRepository(object):
     def __init__(self) -> None:
@@ -567,7 +570,7 @@ class FeatureRepository(object):
 
     # Loads features with an in-memory cache in front
     def load_features(self, api_host: str, client_key: str, decryption_key: str):
-        key = api_host + '::' + client_key
+        key = api_host + "::" + client_key
         # If it's already cached
         if key in self.cache:
             entry = self.cache[key]
@@ -586,27 +589,28 @@ class FeatureRepository(object):
 
     # Fetch features from the GrowthBook API
     def fetch_features(self, api_host: str, client_key: str, decryption_key: str):
-        r = self.http.request('GET', self.get_features_url(api_host, client_key))
+        r = self.http.request("GET", self.get_features_url(api_host, client_key))
         if r.status >= 400:
             return None
-        
-        decoded = json.loads(r.data.decode('utf-8'))
 
-        if 'encryptedFeatures' in decoded:
-            decrypted = decrypt(decoded['encryptedFeatures'], decryption_key)
+        decoded = json.loads(r.data.decode("utf-8"))
+
+        if "encryptedFeatures" in decoded:
+            decrypted = decrypt(decoded["encryptedFeatures"], decryption_key)
             return decrypted
-        elif 'features' in decoded:
-            return decoded['features']
+        elif "features" in decoded:
+            return decoded["features"]
         else:
             return None
-        
+
     def get_features_url(self, api_host: str, client_key: str):
         api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
         return api_host + "/api/features/" + client_key
-        
+
 
 # Singleton instance
 repo = FeatureRepository()
+
 
 class GrowthBook(object):
     def __init__(
@@ -622,11 +626,17 @@ class GrowthBook(object):
         groups: dict = {},
         overrides: dict = {},
         forcedVariations: dict = {},
+        api_host: str = "",
+        client_key: str = "",
+        decryption_key: str = "",
     ):
         self._enabled = enabled
         self._attributes = attributes
         self._url = url
         self._features: Dict[str, Feature] = {}
+        self._api_host = api_host
+        self._client_key = client_key
+        self._decryption_key = decryption_key
 
         if features:
             self.setFeatures(features)
@@ -644,7 +654,21 @@ class GrowthBook(object):
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Any] = set()
 
+    def load_features(self) -> None:
+        if not self._client_key:
+            raise ValueError("Must specify `client_key` to refresh features")
+
+        features = repo.load_features(
+            self._api_host, self._client_key, self._decryption_key
+        )
+        if features is not None:
+            self.setFeatures(features)
+
+    # @deprecated, use set_features
     def setFeatures(self, features: dict) -> None:
+        return self.set_features(features)
+
+    def set_features(self, features: dict) -> None:
         self._features = {}
         for key, feature in features.items():
             if isinstance(feature, Feature):
@@ -652,13 +676,25 @@ class GrowthBook(object):
             else:
                 self._features[key] = Feature(**feature)
 
-    def getFeatures(self) -> Dict[str,Feature]:
+    # @deprecated, use get_features
+    def getFeatures(self) -> Dict[str, Feature]:
+        return self.get_features()
+
+    def get_features(self) -> Dict[str, Feature]:
         return self._features
 
+    # @deprecated, use set_attributes
     def setAttributes(self, attributes: dict) -> None:
+        return self.set_attributes(attributes)
+
+    def set_attributes(self, attributes: dict) -> None:
         self._attributes = attributes
 
+    # @deprecated, use get_attributes
     def getAttributes(self) -> dict:
+        return self.get_attributes()
+
+    def get_attributes(self) -> dict:
         return self._attributes
 
     def destroy(self) -> None:
@@ -672,17 +708,33 @@ class GrowthBook(object):
         self._attributes.clear()
         self._features.clear()
 
+    # @deprecated, use is_on
     def isOn(self, key: str) -> bool:
+        return self.is_on(key)
+
+    def is_on(self, key: str) -> bool:
         return self.evalFeature(key).on
 
+    # @deprecated, use is_off
     def isOff(self, key: str) -> bool:
+        return self.is_off(key)
+
+    def is_off(self, key: str) -> bool:
         return self.evalFeature(key).off
 
+    # @deprecated, use get_feature_value
     def getFeatureValue(self, key: str, fallback):
+        return self.get_feature_value(key, fallback)
+
+    def get_feature_value(self, key: str, fallback):
         res = self.evalFeature(key)
         return res.value if res.value is not None else fallback
 
+    # @deprecated, use eval_feature
     def evalFeature(self, key: str) -> FeatureResult:
+        return self.eval_feature(key)
+
+    def eval_feature(self, key: str) -> FeatureResult:
         if key not in self._features:
             return FeatureResult(None, "unknownFeature")
 
@@ -737,7 +789,11 @@ class GrowthBook(object):
 
         return FeatureResult(feature.defaultValue, "defaultValue")
 
+    # @deprecated, use get_all_results
     def getAllResults(self):
+        return self.get_all_results()
+
+    def get_all_results(self):
         return self._assigned.copy()
 
     def _getOrigHashValue(self, attr: str = None):
@@ -755,7 +811,7 @@ class GrowthBook(object):
         self,
         seed: str,
         hashAttribute: str = None,
-        range: Tuple[float,float] = None,
+        range: Tuple[float, float] = None,
         coverage: float = None,
         hashVersion: int = None,
     ) -> bool:
@@ -990,4 +1046,3 @@ class GrowthBook(object):
             meta=meta,
             bucket=bucket,
         )
-
