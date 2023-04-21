@@ -569,7 +569,7 @@ class FeatureRepository(object):
         self.http = PoolManager()
 
     # Loads features with an in-memory cache in front
-    def load_features(self, api_host: str, client_key: str, decryption_key: str):
+    def load_features(self, api_host: str, client_key: str, decryption_key: str, ttl: int = 60) -> Optional[Dict]:
         key = api_host + "::" + client_key
         # If it's already cached
         if key in self.cache:
@@ -584,11 +584,11 @@ class FeatureRepository(object):
         res = self.fetch_features(api_host, client_key, decryption_key)
         if res is not None:
             # Cache for later
-            self.cache[key] = CacheEntry(res, 60)
+            self.cache[key] = CacheEntry(res, ttl)
         return res
 
     # Fetch features from the GrowthBook API
-    def fetch_features(self, api_host: str, client_key: str, decryption_key: str):
+    def fetch_features(self, api_host: str, client_key: str, decryption_key: str)->Optional[Dict]:
         r = self.http.request("GET", self.get_features_url(api_host, client_key))
         if r.status >= 400:
             return None
@@ -603,7 +603,7 @@ class FeatureRepository(object):
         else:
             return None
 
-    def get_features_url(self, api_host: str, client_key: str):
+    def get_features_url(self, api_host: str, client_key: str) -> str:
         api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
         return api_host + "/api/features/" + client_key
 
@@ -619,16 +619,19 @@ class GrowthBook(object):
         attributes: dict = {},
         url: str = "",
         features: dict = {},
-        qaMode: bool = False,
-        trackingCallback=None,
+        qa_mode: bool = False,
+        on_experiment_viewed=None,
+        api_host: str = "",
+        client_key: str = "",
+        decryption_key: str = "",
+        cache_ttl: int = 60,
         # Deprecated args
+        trackingCallback=None,
+        qaMode: bool = False,
         user: dict = {},
         groups: dict = {},
         overrides: dict = {},
         forcedVariations: dict = {},
-        api_host: str = "",
-        client_key: str = "",
-        decryption_key: str = "",
     ):
         self._enabled = enabled
         self._attributes = attributes
@@ -637,12 +640,13 @@ class GrowthBook(object):
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
+        self._cache_ttl = cache_ttl
 
         if features:
             self.setFeatures(features)
 
-        self._qaMode = qaMode
-        self._trackingCallback = trackingCallback
+        self._qaMode = qa_mode or qaMode
+        self._trackingCallback = on_experiment_viewed or trackingCallback
 
         # Deprecated args
         self._user = user
@@ -659,7 +663,10 @@ class GrowthBook(object):
             raise ValueError("Must specify `client_key` to refresh features")
 
         features = repo.load_features(
-            self._api_host, self._client_key, self._decryption_key
+            self._api_host, 
+            self._client_key, 
+            self._decryption_key,
+            self._cache_ttl
         )
         if features is not None:
             self.setFeatures(features)

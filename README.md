@@ -4,9 +4,8 @@ Powerful Feature flagging and A/B testing for Python apps.
 
 ![Build Status](https://github.com/growthbook/growthbook-python/workflows/Build/badge.svg)
 
--  **No external dependencies**
 -  **Lightweight and fast**
--  **No HTTP requests** everything is defined and evaluated locally
+-  **Local evaluation**, no network requests required
 -  Python 3.6+
 -  100% test coverage
 -  Flexible **targeting**
@@ -20,13 +19,7 @@ Powerful Feature flagging and A/B testing for Python apps.
 ## Quick Usage
 
 ```python
-import requests
 from growthbook import GrowthBook
-
-
-# We recommend using a db or cache layer in production
-apiResp = requests.get("https://cdn.growthbook.io/api/features/MY_API_KEY")
-features = apiResp.json()["features"]
 
 # User attributes for targeting and experimentation
 attributes = {
@@ -44,16 +37,53 @@ def on_experiment_viewed(experiment, result):
 # Create a GrowthBook instance
 gb = GrowthBook(
   attributes = attributes,
-  features = features,
-  trackingCallback = on_experiment_viewed
+  on_experiment_viewed = on_experiment_viewed,
+  api_host = "https://cdn.growthbook.io",
+  client_key = "sdk-abc123"
 )
 
+# Load features from the GrowthBook API with caching
+gb.load_features()
+
 # Simple on/off feature gating
-if gb.isOn("my-feature"):
+if gb.is_on("my-feature"):
   print("My feature is on!")
 
 # Get the value of a feature with a fallback
-color = gb.getFeatureValue("button-color-feature", "blue")
+color = gb.get_feature_value("button-color-feature", "blue")
+```
+
+
+### Web Frameworks (Django, Flask, etc.)
+
+For web frameworks, you should create a new `GrowthBook` instance for every incoming request and call `destroy()` at the end of a request to clean up resources.
+
+In Django, for example, this is best done with a simple middleware:
+
+```python
+from growthbook import GrowthBook
+
+def growthbook_middleware(get_response):
+    def middleware(request):
+        request.gb = GrowthBook(
+          # ...
+        )
+        request.gb.load_features()
+
+        response = get_response(request)
+
+        request.gb.destroy() # Cleanup
+
+        return response
+    return middleware
+```
+
+Then, you can easily use GrowthBook in any of your views:
+
+```python
+def index(request):
+    feature_enabled = request.gb.is_on("my-feature")
+    # ...
 ```
 
 ## GrowthBook class
@@ -63,41 +93,56 @@ The GrowthBook constructor has the following parameters:
 -  **enabled** (`bool`) - Flag to globally disable all experiments. Default true.
 -  **attributes** (`dict`) - Dictionary of user attributes that are used for targeting and to assign variations
 -  **url** (`str`) - The URL of the current request (if applicable)
--  **features** (`dict`) - Feature definitions from the GrowthBook API
+-  **qa_mode** (`boolean`) - If true, random assignment is disabled and only explicitly forced variations are used.
+-  **on_experiment_viewed** (`callable`) - A function that takes `experiment` and `result` as arguments.
+-  **api_host** (`str`) - The GrowthBook API host to fetch feature flags from. Defaults to `https://cdn.growthbook.io`
+-  **client_key** (`str`) - The client key that will be passed to the API Host to fetch feature flags
+-  **decryption_key** (`str`) - If the GrowthBook API endpoint has encryption enabled, specify the decryption key here
+-  **cache_ttl** (`int`) - How long to cache features in-memory from the GrowthBook API (seconds, default `60`)
+-  **features** (`dict`) - Feature definitions from the GrowthBook API (only required if `client_key` is not specified)
 -  **forcedVariations** (`dict`) - Dictionary of forced experiment variations (used for QA)
--  **qaMode** (`boolean`) - If true, random assignment is disabled and only explicitly forced variations are used.
--  **trackingCallback** (`callable`) - A function that takes `experiment` and `result` as arguments.
 
 There are also getter and setter methods for features and attributes if you need to update them later in the request:
 
 ```python
-gb.setFeatures(gb.getFeatures())
-gb.setAttributes(gb.getAttributes())
+gb.set_features(gb.get_features())
+gb.set_attributes(gb.get_attributes())
 ```
 
-### Features
+### Loading Features
 
-Defines all of the available features plus rules for how to assign values to users. Features are usually fetched from the GrowthBook API and persisted in cache or a database in production.
+There are two ways to load feature flags into the GrowthBook SDK.  You can either use the built-in fetching/caching logic or implement your own custom solution.
 
-Feature definitions are defined in a JSON format. You can fetch them directly from the GrowthBook API:
+#### Built-in Fetching and Caching
+
+To use the built-in fetching and caching logic, in the `GrowthBook` constructor, pass in your GrowthBook `api_host` and `client_key`.  If you have encryption enabled for your GrowthBook endpoint, you also need to pass the `decryption_key` into the constructor.
+
+Then, call the `load_features()` method to initiate the HTTP request with an in-memory cache layer.
+
+Here's a full example:
 
 ```python
-import requests
-
-apiResp = requests.get("https://cdn.growthbook.io/api/features/MY_API_KEY")
-features = apiResp.json()["features"]
+gb = GrowthBook(
+  api_host = "https://cdn.growthbook.io",
+  client_key = "sdk-abc123",
+)
+gb.load_features()
 ```
 
-Or, you can use a copy stored in your database or cache server instead:
+Under the hood, we're using `urllib3` to perform the HTTP request and a custom in-memory cache implementation. We use a 60s cache TTL, but you can override this with the `cache_ttl` parameter.
+
+#### Custom Implementation
+
+If you prefer to handle the fetching/caching logic yourself, you can just pass in a `dict` of features from the GrowthBook API directly into the constructor:
 
 ```python
-import json
+# From the GrowthBook API
+features = {'my-feature':{'defaultValue':False}}
 
-json_string = '{"feature-1":{...},"feature-2":{...},...}'
-features = json.loads(json_string)
+gb = GrowthBook(
+  features = features
+)
 ```
-
-We recommend using the db/cache approach for production.
 
 ### Attributes
 
@@ -116,7 +161,7 @@ attributes = {
   'tags': ["tag1", "tag2"],
   'account': {
     'age': 90
-  ]
+  }
 }
 ```
 
@@ -124,7 +169,7 @@ attributes = {
 
 Any time an experiment is run to determine the value of a feature, you want to track that event in your analytics system.
 
-You can use the `trackingCallback` option to do this:
+You can use the `on_experiment_viewed` option to do this:
 
 ```python
 from growthbook import GrowthBook, Experiment, Result
@@ -137,7 +182,7 @@ def on_experiment_viewed(experiment: Experiment, result: Result):
   })
 
 gb = GrowthBook(
-  trackingCallback = on_experiment_viewed
+  on_experiment_viewed = on_experiment_viewed
 )
 ```
 
@@ -145,9 +190,9 @@ gb = GrowthBook(
 
 There are 3 main methods for interacting with features.
 
-- `gb.isOn("feature-key")` returns true if the feature is on
-- `gb.isOff("feature-key")` returns false if the feature is on
-- `gb.getFeatureValue("feature-key", "default")` returns the value of the feature with a fallback
+- `gb.is_on("feature-key")` returns true if the feature is on
+- `gb.is_off("feature-key")` returns false if the feature is on
+- `gb.get_feature_value("feature-key", "default")` returns the value of the feature with a fallback
 
 
 In addition, you can use `gb.evalFeature("feature-key")` to get back a `FeatureResult` object with the following properties:
@@ -183,9 +228,10 @@ There are a number of additional settings to control the experiment behavior:
 -  **variations** (`any[]`) - The different variations to choose between
 -  **weights** (`float[]`) - How to weight traffic between variations. Must add to 1.
 -  **coverage** (`float`) - What percent of users should be included in the experiment (between 0 and 1, inclusive)
-- **condition** (`dict`) - Targeting conditions
+-  **condition** (`dict`) - Targeting conditions
 -  **force** (`int`) - All users included in the experiment will be forced into the specified variation index
 -  **hashAttribute** (`string`) - What user attribute should be used to assign variations (defaults to "id")
+-  **hashVersion** (`int`) - What version of our hashing algorithm to use.  We recommend using the latest version `2`.
 -  **namespace** (`tuple[str,float,float]`) - Used to run mutually exclusive experiments.
 
 Here's an example that uses all of them:
@@ -208,6 +254,8 @@ exp = Experiment(
   },
   # Use an alternate attribute for assigning variations (default is 'id')
   hashAttribute="sessionId",
+  # Use the latest hashing algorithm
+  hashVersion=2,
   # Includes the first 50% of users in the "pricing" namespace
   # Another experiment with a non-overlapping range will be mutually exclusive (e.g. [0.5, 1])
   namespace=("pricing", 0, 0.5),
@@ -305,32 +353,4 @@ gb.run(Experiment(
   variations = ["A", "B"],
   hashAttribute = "company"
 ))
-```
-
-### Django
-
-For Django (and other web frameworks), we recommend adding a simple middleware where you instantiate the GrowthBook object
-
-```python
-from growthbook import GrowthBook
-
-def growthbook_middleware(get_response):
-    def middleware(request):
-        request.gb = GrowthBook(
-          # ...
-        )
-        response = get_response(request)
-
-        request.gb.destroy() # Cleanup
-
-        return response
-    return middleware
-```
-
-Then, you can easily evaluate a feature (or run an inline experiment) in any of your views:
-
-```python
-def index(request):
-    featureEnabled = request.gb.isOn("my-feature")
-    # ...
 ```
