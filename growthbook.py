@@ -566,10 +566,18 @@ class CacheEntry(object):
 class FeatureRepository(object):
     def __init__(self) -> None:
         self.cache: Dict[str, CacheEntry] = {}
-        self.http = PoolManager()
+
+    def _get(self, url: str):
+        self.http = self.http or PoolManager()
+        return self.http.request("GET", url)
+
+    def clear_cache(self):
+        self.cache.clear()
 
     # Loads features with an in-memory cache in front
-    def load_features(self, api_host: str, client_key: str, decryption_key: str, ttl: int = 60) -> Optional[Dict]:
+    def load_features(
+        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
+    ) -> Optional[Dict]:
         key = api_host + "::" + client_key
         # If it's already cached
         if key in self.cache:
@@ -588,8 +596,10 @@ class FeatureRepository(object):
         return res
 
     # Fetch features from the GrowthBook API
-    def fetch_features(self, api_host: str, client_key: str, decryption_key: str)->Optional[Dict]:
-        r = self.http.request("GET", self.get_features_url(api_host, client_key))
+    def fetch_features(
+        self, api_host: str, client_key: str, decryption_key: str = ""
+    ) -> Optional[Dict]:
+        r = self._get(self.get_features_url(api_host, client_key))
         if r.status >= 400:
             return None
 
@@ -597,7 +607,7 @@ class FeatureRepository(object):
 
         if "encryptedFeatures" in decoded:
             decrypted = decrypt(decoded["encryptedFeatures"], decryption_key)
-            return decrypted
+            return json.loads(decrypted)
         elif "features" in decoded:
             return decoded["features"]
         else:
@@ -625,6 +635,7 @@ class GrowthBook(object):
         client_key: str = "",
         decryption_key: str = "",
         cache_ttl: int = 60,
+        forced_variations: dict = {},
         # Deprecated args
         trackingCallback=None,
         qaMode: bool = False,
@@ -652,7 +663,7 @@ class GrowthBook(object):
         self._user = user
         self._groups = groups
         self._overrides = overrides
-        self._forcedVariations = forcedVariations
+        self._forcedVariations = forced_variations or forcedVariations
 
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
@@ -663,10 +674,7 @@ class GrowthBook(object):
             raise ValueError("Must specify `client_key` to refresh features")
 
         features = repo.load_features(
-            self._api_host, 
-            self._client_key, 
-            self._decryption_key,
-            self._cache_ttl
+            self._api_host, self._client_key, self._decryption_key, self._cache_ttl
         )
         if features is not None:
             self.setFeatures(features)

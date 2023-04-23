@@ -56,7 +56,7 @@ color = gb.get_feature_value("button-color-feature", "blue")
 
 ### Web Frameworks (Django, Flask, etc.)
 
-For web frameworks, you should create a new `GrowthBook` instance for every incoming request and call `destroy()` at the end of a request to clean up resources.
+For web frameworks, you should create a new `GrowthBook` instance for every incoming request and call `destroy()` at the end of the request to clean up resources.
 
 In Django, for example, this is best done with a simple middleware:
 
@@ -100,7 +100,7 @@ The GrowthBook constructor has the following parameters:
 -  **decryption_key** (`str`) - If the GrowthBook API endpoint has encryption enabled, specify the decryption key here
 -  **cache_ttl** (`int`) - How long to cache features in-memory from the GrowthBook API (seconds, default `60`)
 -  **features** (`dict`) - Feature definitions from the GrowthBook API (only required if `client_key` is not specified)
--  **forcedVariations** (`dict`) - Dictionary of forced experiment variations (used for QA)
+-  **forced_variations** (`dict`) - Dictionary of forced experiment variations (used for QA)
 
 There are also getter and setter methods for features and attributes if you need to update them later in the request:
 
@@ -163,6 +163,12 @@ attributes = {
     'age': 90
   }
 }
+
+# Pass into constructor
+gb = GrowthBook(attributes = attributes)
+
+# Or set later
+gb.set_attributes(attributes)
 ```
 
 ### Tracking Experiments
@@ -181,6 +187,7 @@ def on_experiment_viewed(experiment: Experiment, result: Result):
     'variationId': result.variationId
   })
 
+# Pass into constructor
 gb = GrowthBook(
   on_experiment_viewed = on_experiment_viewed
 )
@@ -197,7 +204,7 @@ There are 3 main methods for interacting with features.
 
 In addition, you can use `gb.evalFeature("feature-key")` to get back a `FeatureResult` object with the following properties:
 
-- **value** - The JSON-decoded value of the feature (or `null` if not defined)
+- **value** - The JSON-decoded value of the feature (or `None` if not defined)
 - **on** and **off** - The JSON-decoded value cast to booleans
 - **source** - Why the value was assigned to the user. One of `unknownFeature`, `defaultValue`, `force`, or `experiment`
 - **experiment** - Information about the experiment (if any) which was used to assign the value to the user
@@ -206,7 +213,7 @@ In addition, you can use `gb.evalFeature("feature-key")` to get back a `FeatureR
 
 ## Inline Experiments
 
-Instead of declaring all features up-front and referencing them by ids in your code, you can also just run an experiment directly. This is done with the `gb->run` method:
+Instead of declaring all features up-front and referencing them by ids in your code, you can also just run an experiment directly. This is done with the `run` method:
 
 ```python
 from growthbook import Experiment
@@ -226,6 +233,7 @@ There are a number of additional settings to control the experiment behavior:
 
 -  **key** (`str`) - The globally unique tracking key for the experiment
 -  **variations** (`any[]`) - The different variations to choose between
+-  **seed** (`str`) - Added to the user id when hashing to determine a variation. Defaults to the experiment `key`
 -  **weights** (`float[]`) - How to weight traffic between variations. Must add to 1.
 -  **coverage** (`float`) - What percent of users should be included in the experiment (between 0 and 1, inclusive)
 -  **condition** (`dict`) - Targeting conditions
@@ -241,6 +249,8 @@ exp = Experiment(
   key="my-test",
   # Variations can be a list of any data type
   variations=[0, 1],
+  # If this changes, it will re-randomize all users in the experiment
+  seed="abcdef123456",
   # Run a 40/60 experiment instead of the default even split (50/50)
   weights=[0.4, 0.6],
   # Only include 20% of users in the experiment

@@ -6,5 +6,6 @@ flake8
 coverage
 twine
 pytest
+pytest-mock
 mypy
 types-urllib3
