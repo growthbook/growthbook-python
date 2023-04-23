@@ -4,13 +4,13 @@ Powerful Feature flagging and A/B testing for Python apps.
 
 ![Build Status](https://github.com/growthbook/growthbook-python/workflows/Build/badge.svg)
 
--  **Lightweight and fast**
--  **Local evaluation**, no network requests required
--  Python 3.6+
--  100% test coverage
--  Flexible **targeting**
--  **Use your existing event tracking** (GA, Segment, Mixpanel, custom)
--  **Remote configuration** to change feature flags without deploying new code
+-   **Lightweight and fast**
+-   **Local evaluation**, no network requests required
+-   Python 3.6+
+-   100% test coverage
+-   Flexible **targeting**
+-   **Use your existing event tracking** (GA, Segment, Mixpanel, custom)
+-   **Remote configuration** to change feature flags without deploying new code
 
 ## Installation
 
@@ -53,7 +53,6 @@ if gb.is_on("my-feature"):
 color = gb.get_feature_value("button-color-feature", "blue")
 ```
 
-
 ### Web Frameworks (Django, Flask, etc.)
 
 For web frameworks, you should create a new `GrowthBook` instance for every incoming request and call `destroy()` at the end of the request to clean up resources.
@@ -86,38 +85,15 @@ def index(request):
     # ...
 ```
 
-## GrowthBook class
+## Loading Features
 
-The GrowthBook constructor has the following parameters:
+There are two ways to load feature flags into the GrowthBook SDK. You can either use the built-in fetching/caching logic or implement your own custom solution.
 
--  **enabled** (`bool`) - Flag to globally disable all experiments. Default true.
--  **attributes** (`dict`) - Dictionary of user attributes that are used for targeting and to assign variations
--  **url** (`str`) - The URL of the current request (if applicable)
--  **qa_mode** (`boolean`) - If true, random assignment is disabled and only explicitly forced variations are used.
--  **on_experiment_viewed** (`callable`) - A function that takes `experiment` and `result` as arguments.
--  **api_host** (`str`) - The GrowthBook API host to fetch feature flags from. Defaults to `https://cdn.growthbook.io`
--  **client_key** (`str`) - The client key that will be passed to the API Host to fetch feature flags
--  **decryption_key** (`str`) - If the GrowthBook API endpoint has encryption enabled, specify the decryption key here
--  **cache_ttl** (`int`) - How long to cache features in-memory from the GrowthBook API (seconds, default `60`)
--  **features** (`dict`) - Feature definitions from the GrowthBook API (only required if `client_key` is not specified)
--  **forced_variations** (`dict`) - Dictionary of forced experiment variations (used for QA)
+### Built-in Fetching and Caching
 
-There are also getter and setter methods for features and attributes if you need to update them later in the request:
+To use the built-in fetching and caching logic, in the `GrowthBook` constructor, pass in your GrowthBook `api_host` and `client_key`. If you have encryption enabled for your GrowthBook endpoint, you also need to pass the `decryption_key` into the constructor.
 
-```python
-gb.set_features(gb.get_features())
-gb.set_attributes(gb.get_attributes())
-```
-
-### Loading Features
-
-There are two ways to load feature flags into the GrowthBook SDK.  You can either use the built-in fetching/caching logic or implement your own custom solution.
-
-#### Built-in Fetching and Caching
-
-To use the built-in fetching and caching logic, in the `GrowthBook` constructor, pass in your GrowthBook `api_host` and `client_key`.  If you have encryption enabled for your GrowthBook endpoint, you also need to pass the `decryption_key` into the constructor.
-
-Then, call the `load_features()` method to initiate the HTTP request with an in-memory cache layer.
+Then, call the `load_features()` method to initiate the HTTP request with a cache layer.
 
 Here's a full example:
 
@@ -125,15 +101,44 @@ Here's a full example:
 gb = GrowthBook(
   api_host = "https://cdn.growthbook.io",
   client_key = "sdk-abc123",
+  # How long to cache features in seconds (Optional, default 60s)
+  cache_ttl = 60,
 )
 gb.load_features()
 ```
 
-Under the hood, we're using `urllib3` to perform the HTTP request and a custom in-memory cache implementation. We use a 60s cache TTL, but you can override this with the `cache_ttl` parameter.
+#### Caching
 
-#### Custom Implementation
+GrowthBook comes with a custom in-memory cache. If you run Python in a multi-process mode, the different processes cannot share memory, so you likely want to switch to a distributed cache system like Redis instead.
 
-If you prefer to handle the fetching/caching logic yourself, you can just pass in a `dict` of features from the GrowthBook API directly into the constructor:
+Here is an example of using Redis:
+
+```python
+from redis import Redis
+import json
+from growthbook import GrowthBook, AbstractFeatureCache, feature_repo
+
+class RedisFeatureCache(AbstractFeatureCache):
+  def __init__(self):
+    self.r = Redis(host='localhost', port=6379)
+    self.prefix = "gb:"
+
+  def get(self, key: str):
+    data = self.r.get(self.prefix + key)
+    # Data stored as a JSON string, parse into dict before returning
+    return None if data is None else json.loads(data)
+
+  def set(self, key: str, value: dict, ttl: int) -> None:
+    self.r.set(self.prefix + key, json.dumps(value))
+    self.r.expire(self.prefix + key, ttl)
+
+# Configure GrowthBook to use your custom cache class
+feature_repo.set_cache(RedisFeatureCache())
+```
+
+### Custom Implementation
+
+If you prefer to handle the entire fetching/caching logic yourself, you can just pass in a `dict` of features from the GrowthBook API directly into the constructor:
 
 ```python
 # From the GrowthBook API
@@ -142,6 +147,32 @@ features = {'my-feature':{'defaultValue':False}}
 gb = GrowthBook(
   features = features
 )
+```
+
+Note: When doing this, you do not need to specify your `api_host` or `client_key` and you don't need to call `gb.load_features()`.
+
+
+## GrowthBook class
+
+The GrowthBook constructor has the following parameters:
+
+-   **enabled** (`bool`) - Flag to globally disable all experiments. Default true.
+-   **attributes** (`dict`) - Dictionary of user attributes that are used for targeting and to assign variations
+-   **url** (`str`) - The URL of the current request (if applicable)
+-   **qa_mode** (`boolean`) - If true, random assignment is disabled and only explicitly forced variations are used.
+-   **on_experiment_viewed** (`callable`) - A function that takes `experiment` and `result` as arguments.
+-   **api_host** (`str`) - The GrowthBook API host to fetch feature flags from. Defaults to `https://cdn.growthbook.io`
+-   **client_key** (`str`) - The client key that will be passed to the API Host to fetch feature flags
+-   **decryption_key** (`str`) - If the GrowthBook API endpoint has encryption enabled, specify the decryption key here
+-   **cache_ttl** (`int`) - How long to cache features in-memory from the GrowthBook API (seconds, default `60`)
+-   **features** (`dict`) - Feature definitions from the GrowthBook API (only required if `client_key` is not specified)
+-   **forced_variations** (`dict`) - Dictionary of forced experiment variations (used for QA)
+
+There are also getter and setter methods for features and attributes if you need to update them later in the request:
+
+```python
+gb.set_features(gb.get_features())
+gb.set_attributes(gb.get_attributes())
 ```
 
 ### Attributes
@@ -197,19 +228,17 @@ gb = GrowthBook(
 
 There are 3 main methods for interacting with features.
 
-- `gb.is_on("feature-key")` returns true if the feature is on
-- `gb.is_off("feature-key")` returns false if the feature is on
-- `gb.get_feature_value("feature-key", "default")` returns the value of the feature with a fallback
-
+-   `gb.is_on("feature-key")` returns true if the feature is on
+-   `gb.is_off("feature-key")` returns false if the feature is on
+-   `gb.get_feature_value("feature-key", "default")` returns the value of the feature with a fallback
 
 In addition, you can use `gb.evalFeature("feature-key")` to get back a `FeatureResult` object with the following properties:
 
-- **value** - The JSON-decoded value of the feature (or `None` if not defined)
-- **on** and **off** - The JSON-decoded value cast to booleans
-- **source** - Why the value was assigned to the user. One of `unknownFeature`, `defaultValue`, `force`, or `experiment`
-- **experiment** - Information about the experiment (if any) which was used to assign the value to the user
-- **experimentResult** - The result of the experiment (if any) which was used to assign the value to the user
-
+-   **value** - The JSON-decoded value of the feature (or `None` if not defined)
+-   **on** and **off** - The JSON-decoded value cast to booleans
+-   **source** - Why the value was assigned to the user. One of `unknownFeature`, `defaultValue`, `force`, or `experiment`
+-   **experiment** - Information about the experiment (if any) which was used to assign the value to the user
+-   **experimentResult** - The result of the experiment (if any) which was used to assign the value to the user
 
 ## Inline Experiments
 
@@ -219,7 +248,7 @@ Instead of declaring all features up-front and referencing them by ids in your c
 from growthbook import Experiment
 
 exp = Experiment(
-  key = "my-experiment", 
+  key = "my-experiment",
   variations = ["red", "blue", "green"]
 )
 
@@ -227,20 +256,20 @@ exp = Experiment(
 print(gb.run(exp).value)
 ```
 
-As you can see, there are 2 required parameters for experiments, a string key, and an array of variations.  Variations can be any data type, not just strings.
+As you can see, there are 2 required parameters for experiments, a string key, and an array of variations. Variations can be any data type, not just strings.
 
 There are a number of additional settings to control the experiment behavior:
 
--  **key** (`str`) - The globally unique tracking key for the experiment
--  **variations** (`any[]`) - The different variations to choose between
--  **seed** (`str`) - Added to the user id when hashing to determine a variation. Defaults to the experiment `key`
--  **weights** (`float[]`) - How to weight traffic between variations. Must add to 1.
--  **coverage** (`float`) - What percent of users should be included in the experiment (between 0 and 1, inclusive)
--  **condition** (`dict`) - Targeting conditions
--  **force** (`int`) - All users included in the experiment will be forced into the specified variation index
--  **hashAttribute** (`string`) - What user attribute should be used to assign variations (defaults to "id")
--  **hashVersion** (`int`) - What version of our hashing algorithm to use.  We recommend using the latest version `2`.
--  **namespace** (`tuple[str,float,float]`) - Used to run mutually exclusive experiments.
+-   **key** (`str`) - The globally unique tracking key for the experiment
+-   **variations** (`any[]`) - The different variations to choose between
+-   **seed** (`str`) - Added to the user id when hashing to determine a variation. Defaults to the experiment `key`
+-   **weights** (`float[]`) - How to weight traffic between variations. Must add to 1.
+-   **coverage** (`float`) - What percent of users should be included in the experiment (between 0 and 1, inclusive)
+-   **condition** (`dict`) - Targeting conditions
+-   **force** (`int`) - All users included in the experiment will be forced into the specified variation index
+-   **hashAttribute** (`string`) - What user attribute should be used to assign variations (defaults to "id")
+-   **hashVersion** (`int`) - What version of our hashing algorithm to use. We recommend using the latest version `2`.
+-   **namespace** (`tuple[str,float,float]`) - Used to run mutually exclusive experiments.
 
 Here's an example that uses all of them:
 
@@ -305,6 +334,7 @@ The `hashUsed` flag will only be true if the user was randomly assigned a variat
 ### Example Experiments
 
 3-way experiment with uneven variation weights:
+
 ```python
 gb.run(Experiment(
   key = "3-way-uneven",
@@ -314,6 +344,7 @@ gb.run(Experiment(
 ```
 
 Slow rollout (10% of users who match the targeting condition):
+
 ```python
 # User is marked as being in "qa" and "beta"
 gb = GrowthBook(
@@ -335,6 +366,7 @@ gb.run(Experiment(
 ```
 
 Complex variations
+
 ```python
 result = gb.run(Experiment(
   key = "complex-variations",
@@ -349,6 +381,7 @@ print(result.value[0] + "," + result.value[1])
 ```
 
 Assign variations based on something other than user id
+
 ```python
 gb = GrowthBook(
   attributes = {

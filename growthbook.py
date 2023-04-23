@@ -8,6 +8,7 @@ More info at https://www.growthbook.io
 import re
 import sys
 import json
+from abc import ABC, abstractmethod
 
 from typing import Optional, Any, Set, Tuple, List, Dict
 
@@ -552,6 +553,19 @@ class FeatureResult(object):
         return data
 
 
+class AbstractFeatureCache(ABC):
+    @abstractmethod
+    def get(self, key: str) -> Optional[Dict]:
+        pass
+
+    @abstractmethod
+    def set(self, key: str, value: Dict, ttl: int) -> None:
+        pass
+
+    def clear(self) -> None:
+        pass
+
+
 class CacheEntry(object):
     def __init__(self, value: Dict, ttl: int) -> None:
         self.value = value
@@ -563,14 +577,33 @@ class CacheEntry(object):
         self.expires = time() + self.ttl
 
 
-class FeatureRepository(object):
+class InMemoryFeatureCache(AbstractFeatureCache):
     def __init__(self) -> None:
         self.cache: Dict[str, CacheEntry] = {}
+
+    def get(self, key: str) -> Optional[Dict]:
+        if key in self.cache:
+            entry = self.cache[key]
+            if entry.expires >= time():
+                return entry.value
+        return None
+
+    def set(self, key: str, value: Dict, ttl: int) -> None:
+        if key in self.cache:
+            self.cache[key].update(value)
+        self.cache[key] = CacheEntry(value, ttl)
+
+    def clear(self) -> None:
+        self.cache.clear()
+
+
+class FeatureRepository(object):
+    def __init__(self) -> None:
+        self.cache: AbstractFeatureCache = InMemoryFeatureCache()
         self.http: Optional[PoolManager] = None
 
-    def _get(self, url: str):
-        self.http = self.http or PoolManager()
-        return self.http.request("GET", url)
+    def set_cache(self, cache: AbstractFeatureCache) -> None:
+        self.cache = cache
 
     def clear_cache(self):
         self.cache.clear()
@@ -580,27 +613,25 @@ class FeatureRepository(object):
         self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
     ) -> Optional[Dict]:
         key = api_host + "::" + client_key
-        # If it's already cached
-        if key in self.cache:
-            entry = self.cache[key]
-            # Expired, refresh
-            if entry.expires < time():
-                res = self.fetch_features(api_host, client_key, decryption_key)
-                if res is not None:
-                    entry.update(res)
-            return entry.value
-        # Not cached, need to fetch
-        res = self.fetch_features(api_host, client_key, decryption_key)
-        if res is not None:
-            # Cache for later
-            self.cache[key] = CacheEntry(res, ttl)
-        return res
+
+        cached = self.cache.get(key)
+        if not cached:
+            res = self._fetch_features(api_host, client_key, decryption_key)
+            if res is not None:
+                self.cache.set(key, res, ttl)
+                return res
+        return cached
+
+    # Perform the GET request (separate method for easy mocking)
+    def _get(self, url: str):
+        self.http = self.http or PoolManager()
+        return self.http.request("GET", url)
 
     # Fetch features from the GrowthBook API
-    def fetch_features(
+    def _fetch_features(
         self, api_host: str, client_key: str, decryption_key: str = ""
     ) -> Optional[Dict]:
-        r = self._get(self.get_features_url(api_host, client_key))
+        r = self._get(self._get_features_url(api_host, client_key))
         if r.status >= 400:
             return None
 
@@ -614,13 +645,13 @@ class FeatureRepository(object):
         else:
             return None
 
-    def get_features_url(self, api_host: str, client_key: str) -> str:
+    def _get_features_url(self, api_host: str, client_key: str) -> str:
         api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
         return api_host + "/api/features/" + client_key
 
 
 # Singleton instance
-repo = FeatureRepository()
+feature_repo = FeatureRepository()
 
 
 class GrowthBook(object):
@@ -674,7 +705,7 @@ class GrowthBook(object):
         if not self._client_key:
             raise ValueError("Must specify `client_key` to refresh features")
 
-        features = repo.load_features(
+        features = feature_repo.load_features(
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
         )
         if features is not None:

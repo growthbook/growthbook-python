@@ -15,7 +15,7 @@ from growthbook import (
     getEqualWeights,
     evalCondition,
     decrypt,
-    repo,
+    feature_repo,
 )
 from time import time
 import pytest
@@ -597,30 +597,32 @@ class MockHttpResp:
 
 
 def test_feature_repository(mocker):
-    m = mocker.patch.object(repo, "_get")
+    m = mocker.patch.object(feature_repo, "_get")
     expected = {"feature": {"defaultValue": 5}}
     m.return_value = MockHttpResp(200, json.dumps({"features": expected}))
-    features = repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+    features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
 
     m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
     assert features == expected
 
     # Uses in-memory cache for the 2nd call
-    features = repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+    features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
     assert m.call_count == 1
     assert features == expected
 
     # Does a new request if cache entry is expired
-    repo.cache["https://cdn.growthbook.io::sdk-abc123"].expires = time() - 10
-    features = repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+    feature_repo.cache.cache["https://cdn.growthbook.io::sdk-abc123"].expires = (
+        time() - 10
+    )
+    features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
     assert m.call_count == 2
     assert features == expected
 
-    repo.clear_cache()
+    feature_repo.clear_cache()
 
 
 def test_feature_repository_encrypted(mocker):
-    m = mocker.patch.object(repo, "_get")
+    m = mocker.patch.object(feature_repo, "_get")
     m.return_value = MockHttpResp(
         200,
         json.dumps(
@@ -630,22 +632,22 @@ def test_feature_repository_encrypted(mocker):
             }
         ),
     )
-    features = repo.load_features(
+    features = feature_repo.load_features(
         "https://cdn.growthbook.io", "sdk-abc123", "Zvwv/+uhpFDznZ6SX28Yjg=="
     )
 
     m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
     assert features == {"feature": {"defaultValue": True}}
 
-    repo.clear_cache()
+    feature_repo.clear_cache()
 
     # Raises exception if missing decryption key
     with pytest.raises(Exception):
-        repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+        feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
 
 
 def test_load_features(mocker):
-    m = mocker.patch.object(repo, "_get")
+    m = mocker.patch.object(feature_repo, "_get")
     m.return_value = MockHttpResp(
         200, json.dumps({"features": {"feature": {"defaultValue": 5}}})
     )
@@ -659,5 +661,5 @@ def test_load_features(mocker):
 
     assert gb.get_features()["feature"].to_dict() == {"defaultValue": 5, "rules": []}
 
-    repo.clear_cache()
+    feature_repo.clear_cache()
     gb.destroy()
