@@ -2,13 +2,25 @@
 
 We welcome all contributions!
 
+## Type checking
+
+We use MyPy for type checking.
+
+```bash
+mypy growthbook.py --implicit-optional
+```
+
 ## Tests
 
 Run the test suite with `pytest`
 
 ## Linting
 
-Lint the code with flake8 (note: we only use a subset of linting rules): `flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics`
+Lint the code with flake8 (note: we only use a subset of linting rules)
+
+```bash
+flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+```
 
 ## Releasing
 
