@@ -7,13 +7,13 @@ this_directory = path.abspath(path.dirname(__file__))
 with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
 
-requirements = []
+requirements = ['cryptography', 'typing_extensions', 'urllib3', ]
 
 test_requirements = ['pytest>=3', ]
 
 setup(
     name='growthbook',
-    version='0.3.1',
+    version='1.0.0',
     author="GrowthBook",
     author_email='hello@growthbook.io',
     python_requires='>=3.6',

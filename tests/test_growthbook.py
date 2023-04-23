@@ -14,7 +14,11 @@ from growthbook import (
     inNamespace,
     getEqualWeights,
     evalCondition,
+    decrypt,
+    feature_repo,
 )
+from time import time
+import pytest
 
 
 def pytest_generate_tests(metafunc):
@@ -30,8 +34,8 @@ def pytest_generate_tests(metafunc):
 
 
 def test_hash(hash_data):
-    hashValue, expected = hash_data
-    assert gbhash(hashValue) == expected
+    seed, value, version, expected = hash_data
+    assert gbhash(seed, value, version) == expected
 
 
 def round_list(item):
@@ -85,6 +89,14 @@ def test_equal_weights(getEqualWeights_data):
 def test_conditions(evalCondition_data):
     _, condition, attributes, expected = evalCondition_data
     assert evalCondition(attributes, condition) == expected
+
+
+def test_decrypt(decrypt_data):
+    _, encrypted, key, expected = decrypt_data
+    try:
+        assert (decrypt(encrypted, key)) == expected
+    except(Exception):
+        assert (expected) is None
 
 
 def test_feature(feature_data):
@@ -575,4 +587,101 @@ def test_feature_methods():
     assert gb.isOff("featureNone") is True
     assert gb.getFeatureValue("featureNone", 10) == 10
 
+    gb.destroy()
+
+
+class MockHttpResp:
+    def __init__(self, status: int, data: str) -> None:
+        self.status = status
+        self.data = data.encode("utf-8")
+
+
+def test_feature_repository(mocker):
+    m = mocker.patch.object(feature_repo, "_get")
+    expected = {"feature": {"defaultValue": 5}}
+    m.return_value = MockHttpResp(200, json.dumps({"features": expected}))
+    features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    assert features == expected
+
+    # Uses in-memory cache for the 2nd call
+    features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+    assert m.call_count == 1
+    assert features == expected
+
+    # Does a new request if cache entry is expired
+    feature_repo.cache.cache["https://cdn.growthbook.io::sdk-abc123"].expires = (
+        time() - 10
+    )
+    features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+    assert m.call_count == 2
+    assert features == expected
+
+    feature_repo.clear_cache()
+
+
+def test_feature_repository_error(mocker):
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(400, "400 Error")
+    features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    assert features is None
+
+    # Does not cache errors
+    features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+    assert m.call_count == 2
+    assert features is None
+
+    # Handles broken JSON response
+    m.return_value = MockHttpResp(200, "{'corrupted':6('4")
+    features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+    assert m.call_count == 3
+    assert features is None
+
+    feature_repo.clear_cache()
+
+
+def test_feature_repository_encrypted(mocker):
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(
+        200,
+        json.dumps(
+            {
+                "features": {},
+                "encryptedFeatures": "m5ylFM6ndyOJA2OPadubkw==.Uu7ViqgKEt/dWvCyhI46q088PkAEJbnXKf3KPZjf9IEQQ+A8fojNoxw4wIbPX3aj",
+            }
+        ),
+    )
+    features = feature_repo.load_features(
+        "https://cdn.growthbook.io", "sdk-abc123", "Zvwv/+uhpFDznZ6SX28Yjg=="
+    )
+
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    assert features == {"feature": {"defaultValue": True}}
+
+    feature_repo.clear_cache()
+
+    # Raises exception if missing decryption key
+    with pytest.raises(Exception):
+        feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+
+
+def test_load_features(mocker):
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(
+        200, json.dumps({"features": {"feature": {"defaultValue": 5}}})
+    )
+
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
+
+    assert m.call_count == 0
+
+    gb.load_features()
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+
+    assert gb.get_features()["feature"].to_dict() == {"defaultValue": 5, "rules": []}
+
+    feature_repo.clear_cache()
     gb.destroy()
