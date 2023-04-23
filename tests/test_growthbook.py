@@ -95,7 +95,7 @@ def test_decrypt(decrypt_data):
     _, encrypted, key, expected = decrypt_data
     try:
         assert (decrypt(encrypted, key)) == expected
-    except:
+    except(Exception):
         assert (expected) is None
 
 
@@ -617,6 +617,28 @@ def test_feature_repository(mocker):
     features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
     assert m.call_count == 2
     assert features == expected
+
+    feature_repo.clear_cache()
+
+
+def test_feature_repository_error(mocker):
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(400, "400 Error")
+    features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    assert features is None
+
+    # Does not cache errors
+    features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+    assert m.call_count == 2
+    assert features is None
+
+    # Handles broken JSON response
+    m.return_value = MockHttpResp(200, "{'corrupted':6('4")
+    features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+    assert m.call_count == 3
+    assert features is None
 
     feature_repo.clear_cache()
 

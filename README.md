@@ -151,7 +151,6 @@ gb = GrowthBook(
 
 Note: When doing this, you do not need to specify your `api_host` or `client_key` and you don't need to call `gb.load_features()`.
 
-
 ## GrowthBook class
 
 The GrowthBook constructor has the following parameters:
@@ -396,4 +395,22 @@ gb.run(Experiment(
   variations = ["A", "B"],
   hashAttribute = "company"
 ))
+```
+
+## Logging
+
+The GrowthBook SDK uses a Python logger with the name `growthbook` and includes helpful info for debugging as well as warnings/errors if something is misconfigured.
+
+Here's an example of logging to the console
+
+```python
+import logging
+
+logger = logging.getLogger('growthbook')
+logger.setLevel(logging.DEBUG)
+
+handler = logging.StreamHandler()
+formatter = logging.Formatter('%(asctime)s %(name)s %(levelname)s %(message)s')
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 ```

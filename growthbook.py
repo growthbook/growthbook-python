@@ -9,6 +9,7 @@ import re
 import sys
 import json
 from abc import ABC, abstractmethod
+import logging
 
 from typing import Optional, Any, Set, Tuple, List, Dict
 
@@ -24,6 +25,8 @@ from time import time
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from urllib3 import PoolManager
+
+logger = logging.getLogger("growthbook")
 
 
 def fnv1a32(str: str) -> int:
@@ -619,6 +622,7 @@ class FeatureRepository(object):
             res = self._fetch_features(api_host, client_key, decryption_key)
             if res is not None:
                 self.cache.set(key, res, ttl)
+                logger.debug("Fetched features from API, stored in cache")
                 return res
         return cached
 
@@ -627,22 +631,43 @@ class FeatureRepository(object):
         self.http = self.http or PoolManager()
         return self.http.request("GET", url)
 
+    def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
+        try:
+            r = self._get(self._get_features_url(api_host, client_key))
+            if r.status >= 400:
+                logger.warning(
+                    "Failed to fetch features, received status code %d", r.status
+                )
+                return None
+            decoded = json.loads(r.data.decode("utf-8"))
+            return decoded
+        except Exception:
+            logger.warning("Failed to decode feature JSON from GrowthBook API")
+            return None
+
     # Fetch features from the GrowthBook API
     def _fetch_features(
         self, api_host: str, client_key: str, decryption_key: str = ""
     ) -> Optional[Dict]:
-        r = self._get(self._get_features_url(api_host, client_key))
-        if r.status >= 400:
+        decoded = self._fetch_and_decode(api_host, client_key)
+        if not decoded:
             return None
 
-        decoded = json.loads(r.data.decode("utf-8"))
-
         if "encryptedFeatures" in decoded:
-            decrypted = decrypt(decoded["encryptedFeatures"], decryption_key)
-            return json.loads(decrypted)
+            if not decryption_key:
+                raise ValueError("Must specify decryption_key")
+            try:
+                decrypted = decrypt(decoded["encryptedFeatures"], decryption_key)
+                return json.loads(decrypted)
+            except Exception:
+                logger.warning(
+                    "Failed to decrypt features from GrowthBook API response"
+                )
+                return None
         elif "features" in decoded:
             return decoded["features"]
         else:
+            logger.warning("GrowthBook API response missing features")
             return None
 
     def _get_features_url(self, api_host: str, client_key: str) -> str:
@@ -782,16 +807,24 @@ class GrowthBook(object):
         return self.eval_feature(key)
 
     def eval_feature(self, key: str) -> FeatureResult:
+        logger.debug("Evaluating feature %s", key)
         if key not in self._features:
+            logger.warning("Unknown feature %s", key)
             return FeatureResult(None, "unknownFeature")
 
         feature = self._features[key]
         for rule in feature.rules:
             if rule.condition:
                 if not evalCondition(self._attributes, rule.condition):
+                    logger.debug(
+                        "Skip rule because of failed condition, feature %s", key
+                    )
                     continue
             if rule.filters:
                 if self._isFilteredOut(rule.filters):
+                    logger.debug(
+                        "Skip rule because of filters/namespaces, feature %s", key
+                    )
                     continue
             if rule.force is not None:
                 if not self._isIncludedInRollout(
@@ -801,10 +834,17 @@ class GrowthBook(object):
                     rule.coverage,
                     rule.hashVersion,
                 ):
+                    logger.debug(
+                        "Skip rule because user not included in percentage rollout, feature %s",
+                        key,
+                    )
                     continue
+
+                logger.debug("Force value from rule, feature %s", key)
                 return FeatureResult(rule.force, "force")
 
             if rule.variations is None:
+                logger.warning("Skip invalid rule, feature %s", key)
                 continue
 
             exp = Experiment(
@@ -827,13 +867,17 @@ class GrowthBook(object):
             self._fireSubscriptions(exp, result)
 
             if not result.inExperiment:
+                logger.debug("Skip rule because user not included in experiment", key)
                 continue
 
             if result.passthrough:
+                logger.debug("Continue to next rule, feature %s", key)
                 continue
 
+            logger.debug("Assign value from experiment, feature %s", key)
             return FeatureResult(result.value, "experiment", exp, result)
 
+        logger.debug("Use default value for feature %s", key)
         return FeatureResult(feature.defaultValue, "defaultValue")
 
     # @deprecated, use get_all_results
@@ -928,9 +972,15 @@ class GrowthBook(object):
     def _run(self, experiment: Experiment, featureId: Optional[str] = None) -> Result:
         # 1. If experiment has less than 2 variations, return immediately
         if len(experiment.variations) < 2:
+            logger.warning(
+                "Experiment %s has less than 2 variations, skip", experiment.key
+            )
             return self._getExperimentResult(experiment, featureId=featureId)
         # 2. If growthbook is disabled, return immediately
         if not self._enabled:
+            logger.debug(
+                "Skip experiment %s because GrowthBook is disabled", experiment.key
+            )
             return self._getExperimentResult(experiment, featureId=featureId)
         # 2.5. If the experiment props have been overridden, merge them in
         if self._overrides.get(experiment.key, None):
@@ -940,40 +990,70 @@ class GrowthBook(object):
             experiment.key, self._url, len(experiment.variations)
         )
         if qs is not None:
+            logger.debug(
+                "Force variation %d from URL querystring, experiment %s",
+                qs,
+                experiment.key,
+            )
             return self._getExperimentResult(experiment, qs, featureId=featureId)
         # 4. If variation is forced in the context
         if self._forcedVariations.get(experiment.key, None) is not None:
+            logger.debug(
+                "Force variation %d from GrowthBook context, experiment %s",
+                self._forcedVariations[experiment.key],
+                experiment.key,
+            )
             return self._getExperimentResult(
                 experiment, self._forcedVariations[experiment.key], featureId=featureId
             )
         # 5. If experiment is a draft or not active, return immediately
         if experiment.status == "draft" or not experiment.active:
+            logger.debug("Experiment %s is not active, skip", experiment.key)
             return self._getExperimentResult(experiment, featureId=featureId)
         # 6. Get the user hash attribute and value
         hashAttribute = experiment.hashAttribute or "id"
         hashValue = self._getHashValue(hashAttribute)
         if not hashValue:
+            logger.debug(
+                "Skip experiment %s because user's hashAttribute value is empty",
+                experiment.key,
+            )
             return self._getExperimentResult(experiment, featureId=featureId)
 
         # 7. Filtered out / not in namespace
         if experiment.filters:
             if self._isFilteredOut(experiment.filters):
+                logger.debug(
+                    "Skip experiment %s because of filters/namespaces", experiment.key
+                )
                 return self._getExperimentResult(experiment, featureId=featureId)
         elif experiment.namespace and not inNamespace(hashValue, experiment.namespace):
+            logger.debug("Skip experiment %s because of namespace", experiment.key)
             return self._getExperimentResult(experiment, featureId=featureId)
 
         # 7.5. If experiment has an include property
         if experiment.include:
             try:
                 if not experiment.include():
+                    logger.debug(
+                        "Skip experiment %s because include() returned false",
+                        experiment.key,
+                    )
                     return self._getExperimentResult(experiment, featureId=featureId)
             except Exception:
+                logger.warning(
+                    "Skip experiment %s because include() raised an Exception",
+                    experiment.key,
+                )
                 return self._getExperimentResult(experiment, featureId=featureId)
 
         # 8. Exclude if condition is false
         if experiment.condition and not evalCondition(
             self._attributes, experiment.condition
         ):
+            logger.debug(
+                "Skip experiment %s because user failed the condition", experiment.key
+            )
             return self._getExperimentResult(experiment, featureId=featureId)
 
         # 8.1. Make sure user is in a matching group
@@ -984,10 +1064,18 @@ class GrowthBook(object):
                 if expGroups[group]:
                     matched = True
             if not matched:
+                logger.debug(
+                    "Skip experiment %s because user not in required group",
+                    experiment.key,
+                )
                 return self._getExperimentResult(experiment, featureId=featureId)
         # 8.2. If experiment.url is set, see if it's valid
         if experiment.url:
             if not self._urlIsValid(experiment.url):
+                logger.debug(
+                    "Skip experiment %s because current URL is not targeted",
+                    experiment.key,
+                )
                 return self._getExperimentResult(experiment, featureId=featureId)
 
         # 9. Get bucket ranges and choose variation
@@ -999,25 +1087,37 @@ class GrowthBook(object):
             experiment.seed or experiment.key, hashValue, experiment.hashVersion or 1
         )
         if n is None:
+            logger.warning(
+                "Skip experiment %s because of invalid hashVersion", experiment.key
+            )
             return self._getExperimentResult(experiment, featureId=featureId)
         assigned = chooseVariation(n, ranges)
 
         # 10. Return if not in experiment
         if assigned < 0:
+            logger.debug(
+                "Skip experiment %s because user is not included in the rollout",
+                experiment.key,
+            )
             return self._getExperimentResult(experiment, featureId=featureId)
 
         # 11. If experiment is forced, return immediately
         if experiment.force is not None:
+            logger.debug(
+                "Force variation %d in experiment %s", experiment.force, experiment.key
+            )
             return self._getExperimentResult(
                 experiment, experiment.force, featureId=featureId
             )
 
         # 12. Exclude if in QA mode
         if self._qaMode:
+            logger.debug("Skip experiment %s because of QA Mode", experiment.key)
             return self._getExperimentResult(experiment, featureId=featureId)
 
         # 12.5. If experiment is stopped, return immediately
         if experiment.status == "stopped":
+            logger.debug("Skip experiment %s because it is stopped", experiment.key)
             return self._getExperimentResult(experiment, featureId=featureId)
 
         # 13. Build the result object
@@ -1029,6 +1129,9 @@ class GrowthBook(object):
         self._track(experiment, result)
 
         # 15. Return the result
+        logger.debug(
+            "Assigned variation %d in experiment %s", assigned, experiment.key
+        )
         return result
 
     def _track(self, experiment: Experiment, result: Result) -> None:
