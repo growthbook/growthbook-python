@@ -566,6 +566,7 @@ class CacheEntry(object):
 class FeatureRepository(object):
     def __init__(self) -> None:
         self.cache: Dict[str, CacheEntry] = {}
+        self.http: Optional[PoolManager] = None
 
     def _get(self, url: str):
         self.http = self.http or PoolManager()

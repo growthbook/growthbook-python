@@ -20,6 +20,7 @@ from growthbook import (
 from time import time
 import pytest
 
+
 def pytest_generate_tests(metafunc):
     folder = os.path.abspath(os.path.dirname(__file__))
     jsonfile = os.path.join(folder, "cases.json")
@@ -594,17 +595,14 @@ class MockHttpResp:
         self.status = status
         self.data = data.encode("utf-8")
 
+
 def test_feature_repository(mocker):
-    m = mocker.patch.object(repo, '_get')
-    expected = {
-        'feature': {
-            'defaultValue': 5
-        }
-    }
-    m.return_value = MockHttpResp(200, json.dumps({'features': expected}))
+    m = mocker.patch.object(repo, "_get")
+    expected = {"feature": {"defaultValue": 5}}
+    m.return_value = MockHttpResp(200, json.dumps({"features": expected}))
     features = repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
-    
-    m.assert_called_once_with('https://cdn.growthbook.io/api/features/sdk-abc123')
+
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
     assert features == expected
 
     # Uses in-memory cache for the 2nd call
@@ -613,27 +611,31 @@ def test_feature_repository(mocker):
     assert features == expected
 
     # Does a new request if cache entry is expired
-    repo.cache['https://cdn.growthbook.io::sdk-abc123'].expires = time() - 10
+    repo.cache["https://cdn.growthbook.io::sdk-abc123"].expires = time() - 10
     features = repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
     assert m.call_count == 2
     assert features == expected
 
     repo.clear_cache()
 
+
 def test_feature_repository_encrypted(mocker):
-    m = mocker.patch.object(repo, '_get')
-    m.return_value = MockHttpResp(200, json.dumps({
-        'features': {}, 
-        'encryptedFeatures': "m5ylFM6ndyOJA2OPadubkw==.Uu7ViqgKEt/dWvCyhI46q088PkAEJbnXKf3KPZjf9IEQQ+A8fojNoxw4wIbPX3aj"
-    }))
-    features = repo.load_features("https://cdn.growthbook.io", "sdk-abc123", "Zvwv/+uhpFDznZ6SX28Yjg==")
-    
-    m.assert_called_once_with('https://cdn.growthbook.io/api/features/sdk-abc123')
-    assert features == {
-        'feature': {
-            'defaultValue': True
-        }
-    }
+    m = mocker.patch.object(repo, "_get")
+    m.return_value = MockHttpResp(
+        200,
+        json.dumps(
+            {
+                "features": {},
+                "encryptedFeatures": "m5ylFM6ndyOJA2OPadubkw==.Uu7ViqgKEt/dWvCyhI46q088PkAEJbnXKf3KPZjf9IEQQ+A8fojNoxw4wIbPX3aj",
+            }
+        ),
+    )
+    features = repo.load_features(
+        "https://cdn.growthbook.io", "sdk-abc123", "Zvwv/+uhpFDznZ6SX28Yjg=="
+    )
+
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    assert features == {"feature": {"defaultValue": True}}
 
     repo.clear_cache()
 
@@ -643,27 +645,19 @@ def test_feature_repository_encrypted(mocker):
 
 
 def test_load_features(mocker):
-    m = mocker.patch.object(repo, '_get')
-    m.return_value = MockHttpResp(200, json.dumps({'features': {
-        'feature': {
-            'defaultValue': 5
-        }
-    }}))
-
-    gb = GrowthBook(
-        api_host='https://cdn.growthbook.io',
-        client_key='sdk-abc123'
+    m = mocker.patch.object(repo, "_get")
+    m.return_value = MockHttpResp(
+        200, json.dumps({"features": {"feature": {"defaultValue": 5}}})
     )
+
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
 
     assert m.call_count == 0
 
     gb.load_features()
-    m.assert_called_once_with('https://cdn.growthbook.io/api/features/sdk-abc123')
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
 
-    assert gb.get_features()['feature'].to_dict() == {
-        'defaultValue': 5,
-        'rules': []
-    }
+    assert gb.get_features()["feature"].to_dict() == {"defaultValue": 5, "rules": []}
 
     repo.clear_cache()
     gb.destroy()
