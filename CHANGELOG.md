@@ -4,7 +4,7 @@
 
 - Update to the official 0.4.1 GrowthBook SDK spec version
 - Built-in fetching and caching of feature flags from the GrowthBook API
-- Add `featureId` property to experiment result
+- Added detailed logging for easier debugging
 - Support for new feature/experiment properties that enable holdout groups, meta info, better hashing algorithms, and more
 
 ## **0.3.1** - Aug 1, 2022
