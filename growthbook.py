@@ -867,7 +867,9 @@ class GrowthBook(object):
             self._fireSubscriptions(exp, result)
 
             if not result.inExperiment:
-                logger.debug("Skip rule because user not included in experiment", key)
+                logger.debug(
+                    "Skip rule because user not included in experiment, feature %s", key
+                )
                 continue
 
             if result.passthrough:
