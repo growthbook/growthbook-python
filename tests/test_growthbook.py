@@ -16,9 +16,12 @@ from growthbook import (
     evalCondition,
     decrypt,
     feature_repo,
+    logger,
 )
 from time import time
 import pytest
+
+logger.setLevel("DEBUG")
 
 
 def pytest_generate_tests(metafunc):
