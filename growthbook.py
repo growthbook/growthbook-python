@@ -10,6 +10,7 @@ import sys
 import json
 from abc import ABC, abstractmethod
 import logging
+import aiohttp
 
 from typing import Optional, Any, Set, Tuple, List, Dict
 
@@ -32,7 +33,7 @@ logger = logging.getLogger("growthbook")
 def fnv1a32(str: str) -> int:
     hval = 0x811C9DC5
     prime = 0x01000193
-    uint32_max = 2 ** 32
+    uint32_max = 2**32
     for s in str:
         hval = hval ^ ord(s)
         hval = (hval * prime) % uint32_max
@@ -603,7 +604,6 @@ class InMemoryFeatureCache(AbstractFeatureCache):
 class FeatureRepository(object):
     def __init__(self) -> None:
         self.cache: AbstractFeatureCache = InMemoryFeatureCache()
-        self.http: Optional[PoolManager] = None
 
     def set_cache(self, cache: AbstractFeatureCache) -> None:
         self.cache = cache
@@ -612,14 +612,14 @@ class FeatureRepository(object):
         self.cache.clear()
 
     # Loads features with an in-memory cache in front
-    def load_features(
+    async def load_features(
         self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
     ) -> Optional[Dict]:
         key = api_host + "::" + client_key
 
         cached = self.cache.get(key)
         if not cached:
-            res = self._fetch_features(api_host, client_key, decryption_key)
+            res = await self._fetch_features(api_host, client_key, decryption_key)
             if res is not None:
                 self.cache.set(key, res, ttl)
                 logger.debug("Fetched features from API, stored in cache")
@@ -627,29 +627,30 @@ class FeatureRepository(object):
         return cached
 
     # Perform the GET request (separate method for easy mocking)
-    def _get(self, url: str):
-        self.http = self.http or PoolManager()
-        return self.http.request("GET", url)
+    async def _get(self, url: str):
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url) as response:
+                return response
 
-    def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
+    async def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
         try:
-            r = self._get(self._get_features_url(api_host, client_key))
-            if r.status >= 400:
+            response = await self._get(self._get_features_url(api_host, client_key))
+            if response.status >= 400:
                 logger.warning(
-                    "Failed to fetch features, received status code %d", r.status
+                    "Failed to fetch features, received status code %d", response.status
                 )
                 return None
-            decoded = json.loads(r.data.decode("utf-8"))
+            decoded = await response.json()
             return decoded
         except Exception:
             logger.warning("Failed to decode feature JSON from GrowthBook API")
             return None
 
     # Fetch features from the GrowthBook API
-    def _fetch_features(
+    async def _fetch_features(
         self, api_host: str, client_key: str, decryption_key: str = ""
     ) -> Optional[Dict]:
-        decoded = self._fetch_and_decode(api_host, client_key)
+        decoded = await self._fetch_and_decode(api_host, client_key)
         if not decoded:
             return None
 
@@ -726,19 +727,15 @@ class GrowthBook(object):
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Any] = set()
 
-    def load_features(self) -> None:
+    async def load_features(self) -> None:
         if not self._client_key:
             raise ValueError("Must specify `client_key` to refresh features")
 
-        features = feature_repo.load_features(
+        features = await feature_repo.load_features(
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
         )
         if features is not None:
-            self.setFeatures(features)
-
-    # @deprecated, use set_features
-    def setFeatures(self, features: dict) -> None:
-        return self.set_features(features)
+            self.set_features(features)
 
     def set_features(self, features: dict) -> None:
         self._features = {}
@@ -748,23 +745,11 @@ class GrowthBook(object):
             else:
                 self._features[key] = Feature(**feature)
 
-    # @deprecated, use get_features
-    def getFeatures(self) -> Dict[str, Feature]:
-        return self.get_features()
-
     def get_features(self) -> Dict[str, Feature]:
         return self._features
 
-    # @deprecated, use set_attributes
-    def setAttributes(self, attributes: dict) -> None:
-        return self.set_attributes(attributes)
-
     def set_attributes(self, attributes: dict) -> None:
         self._attributes = attributes
-
-    # @deprecated, use get_attributes
-    def getAttributes(self) -> dict:
-        return self.get_attributes()
 
     def get_attributes(self) -> dict:
         return self._attributes
@@ -780,31 +765,15 @@ class GrowthBook(object):
         self._attributes.clear()
         self._features.clear()
 
-    # @deprecated, use is_on
-    def isOn(self, key: str) -> bool:
-        return self.is_on(key)
-
     def is_on(self, key: str) -> bool:
         return self.evalFeature(key).on
-
-    # @deprecated, use is_off
-    def isOff(self, key: str) -> bool:
-        return self.is_off(key)
 
     def is_off(self, key: str) -> bool:
         return self.evalFeature(key).off
 
-    # @deprecated, use get_feature_value
-    def getFeatureValue(self, key: str, fallback):
-        return self.get_feature_value(key, fallback)
-
     def get_feature_value(self, key: str, fallback):
         res = self.evalFeature(key)
         return res.value if res.value is not None else fallback
-
-    # @deprecated, use eval_feature
-    def evalFeature(self, key: str) -> FeatureResult:
-        return self.eval_feature(key)
 
     def eval_feature(self, key: str) -> FeatureResult:
         logger.debug("Evaluating feature %s", key)
@@ -882,10 +851,6 @@ class GrowthBook(object):
         logger.debug("Use default value for feature %s", key)
         return FeatureResult(feature.defaultValue, "defaultValue")
 
-    # @deprecated, use get_all_results
-    def getAllResults(self):
-        return self.get_all_results()
-
     def get_all_results(self):
         return self._assigned.copy()
 
@@ -945,7 +910,7 @@ class GrowthBook(object):
                 return True
         return False
 
-    def _fireSubscriptions(self, experiment: Experiment, result: Result):
+    async def _fireSubscriptions(self, experiment: Experiment, result: Result):
         prev = self._assigned.get(experiment.key, None)
         if (
             not prev
@@ -958,20 +923,22 @@ class GrowthBook(object):
             }
             for cb in self._subscriptions:
                 try:
-                    cb(experiment, result)
+                    await cb(experiment, result)  # Assuming the callbacks are async
                 except Exception:
                     pass
 
-    def run(self, experiment: Experiment) -> Result:
-        result = self._run(experiment)
-        self._fireSubscriptions(experiment, result)
+    async def run(self, experiment: Experiment) -> Result:
+        result = await self._run(experiment)
+        await self._fireSubscriptions(experiment, result)
         return result
 
     def subscribe(self, callback):
         self._subscriptions.add(callback)
         return lambda: self._subscriptions.remove(callback)
 
-    def _run(self, experiment: Experiment, featureId: Optional[str] = None) -> Result:
+    async def _run(
+        self, experiment: Experiment, featureId: Optional[str] = None
+    ) -> Result:
         # 1. If experiment has less than 2 variations, return immediately
         if len(experiment.variations) < 2:
             logger.warning(
@@ -1128,17 +1095,15 @@ class GrowthBook(object):
         )
 
         # 14. Fire the tracking callback if set
-        self._track(experiment, result)
+        await self._track(experiment, result)
 
         # 15. Return the result
-        logger.debug(
-            "Assigned variation %d in experiment %s", assigned, experiment.key
-        )
+        logger.debug("Assigned variation %d in experiment %s", assigned, experiment.key)
         return result
 
-    def _track(self, experiment: Experiment, result: Result) -> None:
+    async def _track(self, experiment: Experiment, result: Result) -> None:
         if not self._trackingCallback:
-            return None
+            return
         key = (
             result.hashAttribute
             + str(result.hashValue)
@@ -1147,7 +1112,7 @@ class GrowthBook(object):
         )
         if not self._tracked.get(key):
             try:
-                self._trackingCallback(experiment=experiment, result=result)
+                await self._trackingCallback(experiment=experiment, result=result)
                 self._tracked[key] = True
             except Exception:
                 pass
