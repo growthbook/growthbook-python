@@ -366,6 +366,23 @@ class Filter(TypedDict):
     hashVersion: int
     attribute: str
 
+class StickyBucketServiceInterface:
+    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+        pass
+    def save_assignments(self, doc: Dict) -> None:
+        pass
+    # By default, just loop through all attributes and call get_assignments
+    # Override this method in subclasses to perform a multi-query instead
+    def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
+        docs = {}
+        for attributeName, attributeValue in attributes.items():
+            doc = self.get_assignments(attributeName, attributeValue)
+            if doc:
+                key = f"{doc['attributeName']}||{doc['attributeValue']}"
+                docs[key] = doc
+        return docs
+
+# TODO: example sticky bucket service using cookies in the same way as our JS SDK
 
 class Experiment(object):
     def __init__(
