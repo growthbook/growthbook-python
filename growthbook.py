@@ -454,6 +454,7 @@ class Feature(object):
 class FeatureRule(object):
     def __init__(
         self,
+        id: str = None,
         key: str = "",
         variations: list = None,
         weights: List[float] = None,
@@ -471,6 +472,7 @@ class FeatureRule(object):
         name: str = None,
         phase: str = None,
     ) -> None:
+        self.id = id
         self.key = key
         self.variations = variations
         self.weights = weights
@@ -490,6 +492,8 @@ class FeatureRule(object):
 
     def to_dict(self) -> dict:
         data: Dict[str, Any] = {}
+        if self.id:
+            data["id"] = self.id
         if self.key:
             data["key"] = self.key
         if self.variations is not None:
@@ -533,9 +537,11 @@ class FeatureResult(object):
         source: str,
         experiment: Experiment = None,
         experimentResult: Result = None,
+        ruleId: str = None,
     ) -> None:
         self.value = value
         self.source = source
+        self.ruleId = ruleId
         self.experiment = experiment
         self.experimentResult = experimentResult
         self.on = bool(value)
@@ -548,6 +554,8 @@ class FeatureResult(object):
             "on": self.on,
             "off": self.off,
         }
+        if self.ruleId:
+            data["ruleId"] = self.ruleId
         if self.experiment:
             data["experiment"] = self.experiment.to_dict()
         if self.experimentResult:
@@ -842,7 +850,7 @@ class GrowthBook(object):
                     continue
 
                 logger.debug("Force value from rule, feature %s", key)
-                return FeatureResult(rule.force, "force")
+                return FeatureResult(rule.force, "force", ruleId=rule.id)
 
             if rule.variations is None:
                 logger.warning("Skip invalid rule, feature %s", key)
@@ -878,7 +886,9 @@ class GrowthBook(object):
                 continue
 
             logger.debug("Assign value from experiment, feature %s", key)
-            return FeatureResult(result.value, "experiment", exp, result)
+            return FeatureResult(
+                result.value, "experiment", exp, result, ruleId=rule.id
+            )
 
         logger.debug("Use default value for feature %s", key)
         return FeatureResult(feature.defaultValue, "defaultValue")
@@ -1132,9 +1142,7 @@ class GrowthBook(object):
         self._track(experiment, result)
 
         # 15. Return the result
-        logger.debug(
-            "Assigned variation %d in experiment %s", assigned, experiment.key
-        )
+        logger.debug("Assigned variation %d in experiment %s", assigned, experiment.key)
         return result
 
     def _track(self, experiment: Experiment, result: Result) -> None:

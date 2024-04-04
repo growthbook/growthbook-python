@@ -98,7 +98,7 @@ def test_decrypt(decrypt_data):
     _, encrypted, key, expected = decrypt_data
     try:
         assert (decrypt(encrypted, key)) == expected
-    except(Exception):
+    except Exception:
         assert (expected) is None
 
 
@@ -566,6 +566,14 @@ def test_getters_setters():
     gb.setAttributes(newAttrs)
     assert newAttrs == gb.getAttributes()
 
+    gb.destroy()
+
+
+def test_return_ruleid_when_evaluating_a_feature():
+    gb = GrowthBook(
+        features={"feature": {"defaultValue": 0, "rules": [{"force": 1, "id": "foo"}]}}
+    )
+    assert gb.eval_feature("feature").ruleId == "foo"
     gb.destroy()
 
 
