@@ -130,6 +130,32 @@ def decrypt(encrypted_str: str, key_str: str) -> str:
 
     return bytestring.decode("utf-8")
 
+def paddedVersionString(input) -> str:
+    # If input is a number, convert to a string
+    if type(input) is int or type(input) is float:
+        input = str(input)
+
+    if not input or type(input) is not str:
+        input = "0"
+    
+    # Remove build info and leading `v` if any
+    input = re.sub(r"(^v|\+.*$)", "", input)
+    # Split version into parts (both core version numbers and pre-release tags)
+    # "v1.2.3-rc.1+build123" -> ["1","2","3","rc","1"]
+    parts = re.split(r"[-.]", input)
+    # If it's SemVer without a pre-release, add `~` to the end
+    # ["1","0","0"] -> ["1","0","0","~"]
+    # "~" is the largest ASCII character, so this will make "1.0.0" greater than "1.0.0-beta" for example
+    if len(parts) == 3:
+        parts.append("~")
+    # Left pad each numeric part with spaces so string comparisons will work ("9">"10", but " 9"<"10")
+    # Then, join back together into a single string
+    return "-".join([v.rjust(5, " ") if re.match(r"^[0-9]+$", v) else v for v in parts])
+
+def isIn(conditionValue, attributeValue) -> bool:
+    if type(attributeValue) is list:
+        return bool(set(conditionValue) & set(attributeValue))
+    return attributeValue in conditionValue
 
 def evalCondition(attributes: dict, condition: dict) -> bool:
     if "$or" in condition:
@@ -223,20 +249,69 @@ def elemMatch(condition, attributeValue) -> bool:
 
     return False
 
+def compare(val1, val2) -> int:
+    if (type(val1) is int or type(val1) is float) and not (type(val2) is int or type(val2) is float):
+        if (val2 == None):
+            val2 = 0
+        else:
+            val2 = float(val2)
+
+    if (type(val2) is int or type(val2) is float) and not (type(val1) is int or type(val1) is float):
+        if (val1 == None):
+            val1 = 0
+        else:
+            val1 = float(val1)
+
+    if val1 > val2:
+        return 1
+    if val1 < val2:
+        return -1
+    return 0
+
 
 def evalOperatorCondition(operator, attributeValue, conditionValue) -> bool:
     if operator == "$eq":
-        return attributeValue == conditionValue
+        try:
+            return compare(attributeValue, conditionValue) == 0
+        except Exception:
+            return False
     elif operator == "$ne":
-        return attributeValue != conditionValue
+        try:
+            return compare(attributeValue, conditionValue) != 0
+        except Exception:
+            return False
     elif operator == "$lt":
-        return attributeValue < conditionValue
+        try:
+            return compare(attributeValue, conditionValue) < 0
+        except Exception:
+            return False
     elif operator == "$lte":
-        return attributeValue <= conditionValue
+        try:
+            return compare(attributeValue, conditionValue) <= 0
+        except Exception:
+            return False
     elif operator == "$gt":
-        return attributeValue > conditionValue
+        try:
+            return compare(attributeValue, conditionValue) > 0
+        except Exception:
+            return False
     elif operator == "$gte":
-        return attributeValue >= conditionValue
+        try:
+            return compare(attributeValue, conditionValue) >= 0
+        except Exception:
+            return False
+    elif operator == "$veq":
+        return paddedVersionString(attributeValue) == paddedVersionString(conditionValue)
+    elif operator == "$vne":
+        return paddedVersionString(attributeValue) != paddedVersionString(conditionValue)
+    elif operator == "$vlt":
+        return paddedVersionString(attributeValue) < paddedVersionString(conditionValue)
+    elif operator == "$vlte":
+        return paddedVersionString(attributeValue) <= paddedVersionString(conditionValue)
+    elif operator == "$vgt":
+        return paddedVersionString(attributeValue) > paddedVersionString(conditionValue)
+    elif operator == "$vgte":
+        return paddedVersionString(attributeValue) >= paddedVersionString(conditionValue)
     elif operator == "$regex":
         try:
             r = re.compile(conditionValue)
@@ -244,9 +319,13 @@ def evalOperatorCondition(operator, attributeValue, conditionValue) -> bool:
         except Exception:
             return False
     elif operator == "$in":
-        return attributeValue in conditionValue
+        if not type(conditionValue) is list:
+            return False
+        return isIn(conditionValue, attributeValue)
     elif operator == "$nin":
-        return not (attributeValue in conditionValue)
+        if not type(conditionValue) is list:
+            return False
+        return not isIn(conditionValue, attributeValue)
     elif operator == "$elemMatch":
         return elemMatch(conditionValue, attributeValue)
     elif operator == "$size":
@@ -442,7 +521,25 @@ class Feature(object):
             if isinstance(rule, FeatureRule):
                 self.rules.append(rule)
             else:
-                self.rules.append(FeatureRule(**rule))
+                self.rules.append(FeatureRule(
+                    id=rule.get("id", None),
+                    key=rule.get("key", ""),
+                    variations=rule.get("variations", None),
+                    weights=rule.get("weights", None),
+                    coverage=rule.get("coverage", None),
+                    condition=rule.get("condition", None),
+                    namespace=rule.get("namespace", None),
+                    force=rule.get("force", None),
+                    hashAttribute=rule.get("hashAttribute", "id"),
+                    hashVersion=rule.get("hashVersion", None),
+                    range=rule.get("range", None),
+                    ranges=rule.get("ranges", None),
+                    meta=rule.get("meta", None),
+                    filters=rule.get("filters", None),
+                    seed=rule.get("seed", None),
+                    name=rule.get("name", None),
+                    phase=rule.get("phase", None),
+                ))
 
     def to_dict(self) -> dict:
         return {
@@ -755,7 +852,10 @@ class GrowthBook(object):
             if isinstance(feature, Feature):
                 self._features[key] = feature
             else:
-                self._features[key] = Feature(**feature)
+                self._features[key] = Feature(
+                    rules=feature.get("rules", []),
+                    defaultValue=feature.get("defaultValue", None),
+                )
 
     # @deprecated, use get_features
     def getFeatures(self) -> Dict[str, Feature]:

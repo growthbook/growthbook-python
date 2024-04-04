@@ -10,6 +10,7 @@ from growthbook import (
     getBucketRanges,
     gbhash,
     chooseVariation,
+    paddedVersionString,
     getQueryStringOverride,
     inNamespace,
     getEqualWeights,
@@ -32,7 +33,13 @@ def pytest_generate_tests(metafunc):
 
     for func, cases in data.items():
         key = func + "_data"
-        if key in metafunc.fixturenames:
+
+        if (func == "versionCompare"):
+            for method, cases in cases.items():
+                key = func + "_" + method + "_data"
+                if (key in metafunc.fixturenames):
+                    metafunc.parametrize(key, cases)
+        elif key in metafunc.fixturenames:
             metafunc.parametrize(key, cases)
 
 
@@ -92,6 +99,18 @@ def test_equal_weights(getEqualWeights_data):
 def test_conditions(evalCondition_data):
     _, condition, attributes, expected = evalCondition_data
     assert evalCondition(attributes, condition) == expected
+
+def test_version_lt(versionCompare_lt_data):
+    v1, v2, should_match = versionCompare_lt_data
+    assert (paddedVersionString(v1) < paddedVersionString(v2)) == should_match
+
+def test_version_gt(versionCompare_gt_data):
+    v1, v2, should_match = versionCompare_gt_data
+    assert (paddedVersionString(v1) > paddedVersionString(v2)) == should_match
+
+def test_version_eq(versionCompare_eq_data):
+    v1, v2, should_match = versionCompare_eq_data
+    assert (paddedVersionString(v1) == paddedVersionString(v2)) == should_match
 
 
 def test_decrypt(decrypt_data):
