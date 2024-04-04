@@ -556,6 +556,7 @@ class Feature(object):
                     namespace=rule.get("namespace", None),
                     force=rule.get("force", None),
                     hashAttribute=rule.get("hashAttribute", "id"),
+                    fallbackAttribute=rule.get("fallbackAttribute", None),
                     hashVersion=rule.get("hashVersion", None),
                     range=rule.get("range", None),
                     ranges=rule.get("ranges", None),
@@ -564,6 +565,10 @@ class Feature(object):
                     seed=rule.get("seed", None),
                     name=rule.get("name", None),
                     phase=rule.get("phase", None),
+                    disableStickyBucketing=rule.get("disableStickyBucketing", False),
+                    bucketVersion=rule.get("bucketVersion", None),
+                    minBucketVersion=rule.get("minBucketVersion", None),
+                    parentConditions=rule.get("parentConditions", None),
                 ))
 
     def to_dict(self) -> dict:
@@ -659,15 +664,15 @@ class FeatureRule(object):
         if self.phase is not None:
             data["phase"] = self.phase
         if self.fallbackAttribute:
-            obj["fallbackAttribute"] = self.fallbackAttribute
+            data["fallbackAttribute"] = self.fallbackAttribute
         if self.disableStickyBucketing:
-            obj["disableStickyBucketing"] = True
+            data["disableStickyBucketing"] = True
         if self.bucketVersion:
-            obj["bucketVersion"] = self.bucketVersion
+            data["bucketVersion"] = self.bucketVersion
         if self.minBucketVersion:
-            obj["minBucketVersion"] = self.minBucketVersion
+            data["minBucketVersion"] = self.minBucketVersion
         if self.parentConditions:
-            obj["parentConditions"] = self.parentConditions
+            data["parentConditions"] = self.parentConditions
 
         return data
 
@@ -961,8 +966,12 @@ class GrowthBook(object):
 
     def eval_prereqs(self, parentConditions: List[dict], stack: Set[str]) -> str:
         for parentCondition in parentConditions:
-            parentValue = self._eval_feature(parentCondition["feature"], stack).value
-            if not evalConditionValue(parentCondition["condition"], {'value': parentValue}):
+            parentRes = self._eval_feature(parentCondition.get("id", None), stack)
+
+            if parentRes.source == "cyclicPrerequisite":
+                return "cyclic"
+
+            if not evalCondition({'value': parentRes.value}, parentCondition.get("condition", None)):
                 if parentCondition.get("gate", False):
                     return "gate"
                 return "fail"
@@ -978,16 +987,23 @@ class GrowthBook(object):
             return FeatureResult(None, "unknownFeature")
 
         if key in stack:
+            logger.warning("Cyclic prerequisite detected, stack: %s", stack)
             return FeatureResult(None, "cyclicPrerequisite")
         stack.add(key)
 
         feature = self._features[key]
         for rule in feature.rules:
+            logger.debug("Evaluating feature %s, rule %s", key, rule.to_dict())
             if (rule.parentConditions):
                 prereq_res = self.eval_prereqs(rule.parentConditions, stack)
                 if prereq_res == "gate":
+                    logger.debug("Top-level prerequisite failed, return None, feature %s", key)
                     return FeatureResult(None, "prerequisite")
+                if prereq_res == "cyclic":
+                    # Warning already logged in this case
+                    return FeatureResult(None, "cyclicPrerequisite")
                 if prereq_res == "fail":
+                    logger.debug("Skip rule because of failing prerequisite, feature %s", key)
                     continue
 
             if rule.condition:
@@ -1029,6 +1045,7 @@ class GrowthBook(object):
                 coverage=rule.coverage,
                 weights=rule.weights,
                 hashAttribute=rule.hashAttribute,
+                fallbackAttribute=rule.fallbackAttribute,
                 namespace=rule.namespace,
                 hashVersion=rule.hashVersion,
                 meta=rule.meta,
@@ -1038,6 +1055,9 @@ class GrowthBook(object):
                 seed=rule.seed,
                 filters=rule.filters,
                 condition=rule.condition,
+                disableStickyBucketing=rule.disableStickyBucketing,
+                bucketVersion=rule.bucketVersion,
+                minBucketVersion=rule.minBucketVersion,
             )
 
             result = self._run(exp, key)
@@ -1237,6 +1257,16 @@ class GrowthBook(object):
             )
             return self._getExperimentResult(experiment, featureId=featureId)
 
+        # 8.05 Exclude if parent conditions are not met
+        if (experiment.parentConditions):
+            prereq_res = self.eval_prereqs(experiment.parentConditions, set())
+            if prereq_res == "gate" or prereq_res == "fail":
+                logger.debug("Skip experiment %s because of failing prerequisite", experiment.key)
+                return self._getExperimentResult(experiment, featureId=featureId)
+            if prereq_res == "cyclic":
+                logger.debug("Skip experiment %s because of cyclic prerequisite", experiment.key)
+                return self._getExperimentResult(experiment, featureId=featureId)
+
         # 8.1. Make sure user is in a matching group
         if experiment.groups and len(experiment.groups):
             expGroups = self._groups or {}
@@ -1250,6 +1280,7 @@ class GrowthBook(object):
                     experiment.key,
                 )
                 return self._getExperimentResult(experiment, featureId=featureId)
+    
         # 8.2. If experiment.url is set, see if it's valid
         if experiment.url:
             if not self._urlIsValid(experiment.url):
