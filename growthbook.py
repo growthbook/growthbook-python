@@ -383,6 +383,7 @@ class Experiment(object):
         groups: list = None,
         force: int = None,
         hashAttribute: str = "id",
+        fallbackAttribute: str = None,
         hashVersion: int = None,
         ranges: List[Tuple[float, float]] = None,
         meta: List[VariationMeta] = None,
@@ -390,6 +391,10 @@ class Experiment(object):
         seed: str = None,
         name: str = None,
         phase: str = None,
+        disableStickyBucketing: bool = False,
+        bucketVersion: int = None,
+        minBucketVersion: int = None,
+        parentConditions: List[dict] = None,
     ) -> None:
         self.key = key
         self.variations = variations
@@ -400,6 +405,7 @@ class Experiment(object):
         self.namespace = namespace
         self.force = force
         self.hashAttribute = hashAttribute
+        self.fallbackAttribute = fallbackAttribute
         self.hashVersion = hashVersion or 1
         self.ranges = ranges
         self.meta = meta
@@ -407,6 +413,10 @@ class Experiment(object):
         self.seed = seed
         self.name = name
         self.phase = phase
+        self.disableStickyBucketing = disableStickyBucketing
+        self.bucketVersion = bucketVersion
+        self.minBucketVersion = minBucketVersion
+        self.parentConditions = parentConditions
 
         # Deprecated properties
         self.status = status
@@ -433,6 +443,18 @@ class Experiment(object):
             "name": self.name,
             "phase": self.phase,
         }
+
+        if self.fallbackAttribute:
+            obj["fallbackAttribute"] = self.fallbackAttribute
+        if self.disableStickyBucketing:
+            obj["disableStickyBucketing"] = True
+        if self.bucketVersion:
+            obj["bucketVersion"] = self.bucketVersion
+        if self.minBucketVersion:
+            obj["minBucketVersion"] = self.minBucketVersion
+        if self.parentConditions:
+            obj["parentConditions"] = self.parentConditions
+
         return obj
 
     def update(self, data: dict) -> None:
@@ -469,6 +491,7 @@ class Result(object):
         featureId: Optional[str],
         meta: VariationMeta = None,
         bucket: float = None,
+        stickyBucketUsed: bool = False,
     ) -> None:
         self.variationId = variationId
         self.inExperiment = inExperiment
@@ -478,6 +501,7 @@ class Result(object):
         self.hashValue = hashValue
         self.featureId = featureId or None
         self.bucket = bucket
+        self.stickyBucketUsed = stickyBucketUsed
 
         self.key = str(variationId)
         self.name = ""
@@ -501,6 +525,7 @@ class Result(object):
             "hashAttribute": self.hashAttribute,
             "hashValue": self.hashValue,
             "key": self.key,
+            "stickyBucketUsed": self.stickyBucketUsed,
         }
 
         if self.bucket is not None:
@@ -560,6 +585,7 @@ class FeatureRule(object):
         namespace: Tuple[str, float, float] = None,
         force=None,
         hashAttribute: str = "id",
+        fallbackAttribute: str = None,
         hashVersion: int = None,
         range: Tuple[float, float] = None,
         ranges: List[Tuple[float, float]] = None,
@@ -568,6 +594,10 @@ class FeatureRule(object):
         seed: str = None,
         name: str = None,
         phase: str = None,
+        disableStickyBucketing: bool = False,
+        bucketVersion: int = None,
+        minBucketVersion: int = None,
+        parentConditions: List[dict] = None,
     ) -> None:
         self.id = id
         self.key = key
@@ -578,6 +608,7 @@ class FeatureRule(object):
         self.namespace = namespace
         self.force = force
         self.hashAttribute = hashAttribute
+        self.fallbackAttribute = fallbackAttribute
         self.hashVersion = hashVersion or 1
         self.range = range
         self.ranges = ranges
@@ -586,6 +617,10 @@ class FeatureRule(object):
         self.seed = seed
         self.name = name
         self.phase = phase
+        self.disableStickyBucketing = disableStickyBucketing
+        self.bucketVersion = bucketVersion
+        self.minBucketVersion = minBucketVersion
+        self.parentConditions = parentConditions
 
     def to_dict(self) -> dict:
         data: Dict[str, Any] = {}
@@ -623,6 +658,16 @@ class FeatureRule(object):
             data["name"] = self.name
         if self.phase is not None:
             data["phase"] = self.phase
+        if self.fallbackAttribute:
+            obj["fallbackAttribute"] = self.fallbackAttribute
+        if self.disableStickyBucketing:
+            obj["disableStickyBucketing"] = True
+        if self.bucketVersion:
+            obj["bucketVersion"] = self.bucketVersion
+        if self.minBucketVersion:
+            obj["minBucketVersion"] = self.minBucketVersion
+        if self.parentConditions:
+            obj["parentConditions"] = self.parentConditions
 
         return data
 
@@ -784,7 +829,6 @@ class FeatureRepository(object):
 # Singleton instance
 feature_repo = FeatureRepository()
 
-
 class GrowthBook(object):
     def __init__(
         self,
@@ -915,14 +959,37 @@ class GrowthBook(object):
     def evalFeature(self, key: str) -> FeatureResult:
         return self.eval_feature(key)
 
+    def eval_prereqs(self, parentConditions: List[dict], stack: Set[str]) -> str:
+        for parentCondition in parentConditions:
+            parentValue = self._eval_feature(parentCondition["feature"], stack).value
+            if not evalConditionValue(parentCondition["condition"], {'value': parentValue}):
+                if parentCondition.get("gate", False):
+                    return "gate"
+                return "fail"
+        return "pass"
+
     def eval_feature(self, key: str) -> FeatureResult:
+        return self._eval_feature(key, set())
+
+    def _eval_feature(self, key: str, stack: Set[str]) -> FeatureResult:
         logger.debug("Evaluating feature %s", key)
         if key not in self._features:
             logger.warning("Unknown feature %s", key)
             return FeatureResult(None, "unknownFeature")
 
+        if key in stack:
+            return FeatureResult(None, "cyclicPrerequisite")
+        stack.add(key)
+
         feature = self._features[key]
         for rule in feature.rules:
+            if (rule.parentConditions):
+                prereq_res = self.eval_prereqs(rule.parentConditions, stack)
+                if prereq_res == "gate":
+                    return FeatureResult(None, "prerequisite")
+                if prereq_res == "fail":
+                    continue
+
             if rule.condition:
                 if not evalCondition(self._attributes, rule.condition):
                     logger.debug(
@@ -970,6 +1037,7 @@ class GrowthBook(object):
                 phase=rule.phase,
                 seed=rule.seed,
                 filters=rule.filters,
+                condition=rule.condition,
             )
 
             result = self._run(exp, key)
