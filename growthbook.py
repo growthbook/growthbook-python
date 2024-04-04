@@ -50,20 +50,20 @@ def gbhash(seed: str, value: str, version: int) -> Optional[float]:
 
 
 def inRange(n: float, range: Tuple[float, float]) -> bool:
-    return n >= range[0] and n < range[1]
+    return range[0] <= n < range[1]
 
 
 def inNamespace(userId: str, namespace: Tuple[str, float, float]) -> bool:
     n = gbhash("__" + namespace[0], userId, 1)
     if n is None:
         return False
-    return n >= namespace[1] and n < namespace[2]
+    return namespace[1] <= n < namespace[2]
 
 
 def getEqualWeights(numVariations: int) -> List[float]:
     if numVariations < 1:
         return []
-    return [1 / numVariations for i in range(numVariations)]
+    return [1 / numVariations for _ in range(numVariations)]
 
 
 def getBucketRanges(
@@ -670,7 +670,8 @@ class FeatureRepository(object):
             logger.warning("GrowthBook API response missing features")
             return None
 
-    def _get_features_url(self, api_host: str, client_key: str) -> str:
+    @staticmethod
+    def _get_features_url(api_host: str, client_key: str) -> str:
         api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
         return api_host + "/api/features/" + client_key
 
