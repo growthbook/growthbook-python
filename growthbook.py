@@ -382,8 +382,6 @@ class StickyBucketServiceInterface:
                 docs[key] = doc
         return docs
 
-# TODO: example sticky bucket service using cookies in the same way as our JS SDK
-
 class Experiment(object):
     def __init__(
         self,
@@ -865,6 +863,9 @@ class GrowthBook(object):
         decryption_key: str = "",
         cache_ttl: int = 60,
         forced_variations: dict = {},
+        sticky_bucket_service: StickyBucketServiceInterface = None,
+        sticky_bucket_identifier_attributes: List[str] = None,
+        sticky_bucket_assignment_docs: Dict[str, dict] = {},
         # Deprecated args
         trackingCallback=None,
         qaMode: bool = False,
@@ -881,6 +882,9 @@ class GrowthBook(object):
         self._client_key = client_key
         self._decryption_key = decryption_key
         self._cache_ttl = cache_ttl
+        self.sticky_bucket_identifier_attributes = sticky_bucket_identifier_attributes
+        self.sticky_bucket_service = sticky_bucket_service
+        self.sticky_bucket_assignment_docs = sticky_bucket_assignment_docs
 
         if features:
             self.setFeatures(features)
@@ -897,6 +901,13 @@ class GrowthBook(object):
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Any] = set()
+
+    def refresh_sticky_buckets(self, data: List[Feature] = None) -> None:
+        if not self.sticky_bucket_service:
+            return
+        attributes = self._get_sticky_bucket_attributes(data)
+        docs = self.sticky_bucket_service.get_all_assignments(attributes)
+        self.sticky_bucket_assignment_docs = docs
 
     def load_features(self) -> None:
         if not self._client_key:
@@ -1423,3 +1434,100 @@ class GrowthBook(object):
             meta=meta,
             bucket=bucket,
         )
+
+    def _derive_sticky_bucket_identifier_attributes(self, data: List[Feature]) -> List[str]:
+        attributes = set()
+        for feature in data:
+            for rule in feature.rules:
+                if rule.variations:
+                    attributes.add(rule.hashAttribute or "id")
+                    if rule.fallbackAttribute:
+                        attributes.add(rule.fallbackAttribute)
+        return list(attributes)
+    
+    def _get_sticky_bucket_attributes(self, data: List[Feature] = None) -> dict:
+        attributes: Dict[str, str] = {}
+        if not self.sticky_bucket_identifier_attributes:
+            self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes(data or self.features)
+        for attr in self.sticky_bucket_identifier_attributes:
+            hash_value = self._getHashValue(attr)
+            if hash_value:
+                attributes[attr] = hash_value
+        return attributes
+
+    def _get_sticky_bucket_assignments(self) -> Dict[str, dict]:
+        merged_assignments: Dict[str, dict] = {}
+        for key, value in self.sticky_bucket_assignment_docs.items():
+            if value.get("assignments"):
+                for k, assignment in value["assignments"].items():
+                    merged_assignments[k] = assignment
+        return merged_assignments
+
+    def _get_sticky_bucket_variation(self, experiment_key: str, bucket_version: int = None, min_bucket_version: int = None, meta: List[dict] = None)  -> dict:
+        bucket_version = bucket_version or 0
+        min_bucket_version = min_bucket_version or 0
+        meta = meta or []
+
+        id = self._get_sticky_bucket_experiment_key(experiment_key, bucket_version)
+        assignments = self._get_sticky_bucket_assignments()
+
+        if min_bucket_version > 0:
+            for i in range(0, min_bucket_version):
+                blocked_key = self._get_sticky_bucket_experiment_key(experiment_key, i)
+                if blocked_key in assignments:
+                    return {
+                        'variation': -1,
+                        'versionIdBlocked': True
+                    }
+        
+        variation_key = assignments.get(id, None)
+        if not variation_key:
+            return {
+                'variation': -1
+            }
+        
+        # Find the key in meta
+        variation = -1
+        for i, v in enumerate(meta):
+            if v.get("key") == variation_key:
+                variation = i
+                break
+        if variation < 0:
+            return {
+                'variation': -1
+            }
+        
+        return { 'variation': variation}
+
+    def _get_sticky_bucket_experiment_key(self, experiment_key: str, bucket_version: int = 0) -> str:
+        return experiment_key + "__" + str(bucket_version)
+
+    def refresh_sticky_buckets(self, data: List[Feature] = None) -> None:
+        if not self.sticky_bucket_service:
+            return
+
+        attributes = self._get_sticky_bucket_attributes(data)
+        self.sticky_bucket_assignment_docs = self.sticky_bucket_service.get_all_assignments(attributes)
+
+    def _generate_sticky_bucket_assignment_doc(self, attribute_name: str, attribute_value: str, assignments: dict):
+        key = attribute_name + "||" + attribute_value
+        existing_assignments = {}
+        if key in self.sticky_bucket_assignment_docs:
+            existing_assignments = self.sticky_bucket_assignment_docs[key].get("assignments", {})
+
+        new_assignments = {**existing_assignments, **assignments}
+        
+        # Compare JSON strings to see if they have changed
+        existing_json = json.dumps(existing_assignments, sort_keys=True)
+        new_json = json.dumps(new_assignments, sort_keys=True)
+        changed = existing_json != new_json
+
+        return {
+            'key': key,
+            'doc': {
+                'attributeName': attribute_name,
+                'attributeValue': attribute_value,
+                'assignments': new_assignments
+            },
+            'changed': changed
+        }
