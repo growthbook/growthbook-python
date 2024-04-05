@@ -420,7 +420,6 @@ class Experiment(object):
         self.namespace = namespace
         self.force = force
         self.hashAttribute = hashAttribute
-        self.fallbackAttribute = fallbackAttribute
         self.hashVersion = hashVersion or 1
         self.ranges = ranges
         self.meta = meta
@@ -432,6 +431,10 @@ class Experiment(object):
         self.bucketVersion = bucketVersion
         self.minBucketVersion = minBucketVersion
         self.parentConditions = parentConditions
+
+        self.fallbackAttribute = None
+        if not self.disableStickyBucketing:
+            self.fallbackAttribute = fallbackAttribute
 
         # Deprecated properties
         self.status = status
@@ -619,6 +622,10 @@ class FeatureRule(object):
         minBucketVersion: int = None,
         parentConditions: List[dict] = None,
     ) -> None:
+
+        if disableStickyBucketing:
+            fallbackAttribute = None
+
         self.id = id
         self.key = key
         self.variations = variations
@@ -1050,6 +1057,7 @@ class GrowthBook(object):
                 if not self._isIncludedInRollout(
                     rule.seed or key,
                     rule.hashAttribute,
+                    rule.fallbackAttribute,
                     rule.range,
                     rule.coverage,
                     rule.hashVersion,
@@ -1116,21 +1124,37 @@ class GrowthBook(object):
     def get_all_results(self):
         return self._assigned.copy()
 
-    def _getOrigHashValue(self, attr: str = None):
+    def _getOrigHashValue(self, attr: str = None, fallbackAttr: str = None):
+            
         attr = attr or "id"
+        val = ""
         if attr in self._attributes:
-            return self._attributes[attr] or ""
-        if attr in self._user:
-            return self._user[attr] or ""
-        return ""
+            val = self._attributes[attr] or ""
+        elif attr in self._user:
+            val = self._user[attr] or ""
+        
+        # If no match, try fallback
+        if (not val or val == "") and fallbackAttr and self.sticky_bucket_service:
+            if fallbackAttr in self._attributes:
+                val = self._attributes[fallbackAttr] or ""
+            elif fallbackAttr in self._user:
+                val = self._user[fallbackAttr] or ""
 
-    def _getHashValue(self, attr: str = None) -> str:
-        return str(self._getOrigHashValue(attr))
+            if not val or val != "":
+                attr = fallbackAttr
+
+        return (attr, val)
+
+
+    def _getHashValue(self, attr: str = None, fallbackAttr: str = None) -> (str,str):
+        (attr, val) = self._getOrigHashValue(attr, fallbackAttr)
+        return (attr, str(val))
 
     def _isIncludedInRollout(
         self,
         seed: str,
         hashAttribute: str = None,
+        fallbackAttribute: str = None,
         range: Tuple[float, float] = None,
         coverage: float = None,
         hashVersion: int = None,
@@ -1138,7 +1162,7 @@ class GrowthBook(object):
         if coverage is None and range is None:
             return True
 
-        hash_value = self._getHashValue(hashAttribute or "id")
+        (_, hash_value) = self._getHashValue(hashAttribute, fallbackAttribute)
         if hash_value == "":
             return False
 
@@ -1155,7 +1179,7 @@ class GrowthBook(object):
 
     def _isFilteredOut(self, filters: List[Filter]) -> bool:
         for filter in filters:
-            hash_value = self._getHashValue(filter.get("attribute", "id"))
+            (_, hash_value) = self._getHashValue(filter.get("attribute", "id"))
             if hash_value == "":
                 return False
 
@@ -1239,9 +1263,9 @@ class GrowthBook(object):
         if experiment.status == "draft" or not experiment.active:
             logger.debug("Experiment %s is not active, skip", experiment.key)
             return self._getExperimentResult(experiment, featureId=featureId)
+        
         # 6. Get the user hash attribute and value
-        hashAttribute = experiment.hashAttribute or "id"
-        hashValue = self._getHashValue(hashAttribute)
+        (hashAttribute, hashValue) = self._getHashValue(experiment.hashAttribute, experiment.fallbackAttribute)
         if not hashValue:
             logger.debug(
                 "Skip experiment %s because user's hashAttribute value is empty",
@@ -1249,66 +1273,80 @@ class GrowthBook(object):
             )
             return self._getExperimentResult(experiment, featureId=featureId)
 
-        # 7. Filtered out / not in namespace
-        if experiment.filters:
-            if self._isFilteredOut(experiment.filters):
-                logger.debug(
-                    "Skip experiment %s because of filters/namespaces", experiment.key
-                )
-                return self._getExperimentResult(experiment, featureId=featureId)
-        elif experiment.namespace and not inNamespace(hashValue, experiment.namespace):
-            logger.debug("Skip experiment %s because of namespace", experiment.key)
-            return self._getExperimentResult(experiment, featureId=featureId)
+        assigned = -1
 
-        # 7.5. If experiment has an include property
-        if experiment.include:
-            try:
-                if not experiment.include():
+        found_sticky_bucket = False
+        sticky_bucket_version_is_blocked = False
+        if self.sticky_bucket_service and not experiment.disableStickyBucketing:
+            sticky_bucket = self._get_sticky_bucket_variation(experiment.key, experiment.bucketVersion, experiment.minBucketVersion, experiment.meta)
+            found_sticky_bucket = sticky_bucket.get('variation', 0) >= 0
+            assigned = sticky_bucket.get('variation', 0)
+            sticky_bucket_version_is_blocked = sticky_bucket.get('versionIsBlocked', False)
+
+        # Some checks are not needed if we already have a sticky bucket
+        if not found_sticky_bucket:
+            # 7. Filtered out / not in namespace
+            if experiment.filters:
+                if self._isFilteredOut(experiment.filters):
                     logger.debug(
-                        "Skip experiment %s because include() returned false",
+                        "Skip experiment %s because of filters/namespaces", experiment.key
+                    )
+                    return self._getExperimentResult(experiment, featureId=featureId)
+            elif experiment.namespace and not inNamespace(hashValue, experiment.namespace):
+                logger.debug("Skip experiment %s because of namespace", experiment.key)
+                return self._getExperimentResult(experiment, featureId=featureId)
+
+            # 7.5. If experiment has an include property
+            if experiment.include:
+                try:
+                    if not experiment.include():
+                        logger.debug(
+                            "Skip experiment %s because include() returned false",
+                            experiment.key,
+                        )
+                        return self._getExperimentResult(experiment, featureId=featureId)
+                except Exception:
+                    logger.warning(
+                        "Skip experiment %s because include() raised an Exception",
                         experiment.key,
                     )
                     return self._getExperimentResult(experiment, featureId=featureId)
-            except Exception:
-                logger.warning(
-                    "Skip experiment %s because include() raised an Exception",
-                    experiment.key,
-                )
-                return self._getExperimentResult(experiment, featureId=featureId)
 
-        # 8. Exclude if condition is false
-        if experiment.condition and not evalCondition(
-            self._attributes, experiment.condition
-        ):
-            logger.debug(
-                "Skip experiment %s because user failed the condition", experiment.key
-            )
-            return self._getExperimentResult(experiment, featureId=featureId)
-
-        # 8.05 Exclude if parent conditions are not met
-        if (experiment.parentConditions):
-            prereq_res = self.eval_prereqs(experiment.parentConditions, set())
-            if prereq_res == "gate" or prereq_res == "fail":
-                logger.debug("Skip experiment %s because of failing prerequisite", experiment.key)
-                return self._getExperimentResult(experiment, featureId=featureId)
-            if prereq_res == "cyclic":
-                logger.debug("Skip experiment %s because of cyclic prerequisite", experiment.key)
-                return self._getExperimentResult(experiment, featureId=featureId)
-
-        # 8.1. Make sure user is in a matching group
-        if experiment.groups and len(experiment.groups):
-            expGroups = self._groups or {}
-            matched = False
-            for group in experiment.groups:
-                if expGroups[group]:
-                    matched = True
-            if not matched:
+            # 8. Exclude if condition is false
+            if experiment.condition and not evalCondition(
+                self._attributes, experiment.condition
+            ):
                 logger.debug(
-                    "Skip experiment %s because user not in required group",
-                    experiment.key,
+                    "Skip experiment %s because user failed the condition", experiment.key
                 )
                 return self._getExperimentResult(experiment, featureId=featureId)
+
+            # 8.05 Exclude if parent conditions are not met
+            if (experiment.parentConditions):
+                prereq_res = self.eval_prereqs(experiment.parentConditions, set())
+                if prereq_res == "gate" or prereq_res == "fail":
+                    logger.debug("Skip experiment %s because of failing prerequisite", experiment.key)
+                    return self._getExperimentResult(experiment, featureId=featureId)
+                if prereq_res == "cyclic":
+                    logger.debug("Skip experiment %s because of cyclic prerequisite", experiment.key)
+                    return self._getExperimentResult(experiment, featureId=featureId)
+
+            # 8.1. Make sure user is in a matching group
+            if experiment.groups and len(experiment.groups):
+                expGroups = self._groups or {}
+                matched = False
+                for group in experiment.groups:
+                    if expGroups[group]:
+                        matched = True
+                if not matched:
+                    logger.debug(
+                        "Skip experiment %s because user not in required group",
+                        experiment.key,
+                    )
+                    return self._getExperimentResult(experiment, featureId=featureId)
     
+        # The following apply even when in a sticky bucket
+
         # 8.2. If experiment.url is set, see if it's valid
         if experiment.url:
             if not self._urlIsValid(experiment.url):
@@ -1319,10 +1357,6 @@ class GrowthBook(object):
                 return self._getExperimentResult(experiment, featureId=featureId)
 
         # 9. Get bucket ranges and choose variation
-        c = experiment.coverage
-        ranges = experiment.ranges or getBucketRanges(
-            len(experiment.variations), c if c is not None else 1, experiment.weights
-        )
         n = gbhash(
             experiment.seed or experiment.key, hashValue, experiment.hashVersion or 1
         )
@@ -1331,7 +1365,18 @@ class GrowthBook(object):
                 "Skip experiment %s because of invalid hashVersion", experiment.key
             )
             return self._getExperimentResult(experiment, featureId=featureId)
-        assigned = chooseVariation(n, ranges)
+        
+        if not found_sticky_bucket:
+            c = experiment.coverage
+            ranges = experiment.ranges or getBucketRanges(
+                len(experiment.variations), c if c is not None else 1, experiment.weights
+            )
+            assigned = chooseVariation(n, ranges)
+
+        # Unenroll if any prior sticky buckets are blocked by version
+        if sticky_bucket_version_is_blocked:
+            logger.debug("Skip experiment %s because sticky bucket version is blocked", experiment.key)
+            return self._getExperimentResult(experiment, featureId=featureId, stickyBucketUsed=True)
 
         # 10. Return if not in experiment
         if assigned < 0:
@@ -1362,8 +1407,27 @@ class GrowthBook(object):
 
         # 13. Build the result object
         result = self._getExperimentResult(
-            experiment, assigned, True, featureId=featureId, bucket=n
+            experiment, assigned, True, featureId=featureId, bucket=n, stickyBucketUsed=found_sticky_bucket
         )
+
+        # 13.5 Persist sticky bucket
+        if self.sticky_bucket_service and not experiment.disableStickyBucketing:
+            assignment = {}
+            assignment[self._get_sticky_bucket_experiment_key(
+                experiment.key,
+                experiment.bucketVersion
+            )] = result.key
+
+            doc = self._generate_sticky_bucket_assignment_doc(
+                hashAttribute,
+                hashValue,
+                assignment
+            )
+            if doc.get('changed', False):
+                if not self.sticky_bucket_assignment_docs:
+                    self.sticky_bucket_assignment_docs = {}
+                self.sticky_bucket_assignment_docs[doc.get('key')] = doc 
+                self.sticky_bucket_service.save_assignments(doc)
 
         # 14. Fire the tracking callback if set
         self._track(experiment, result)
@@ -1411,9 +1475,8 @@ class GrowthBook(object):
         hashUsed: bool = False,
         featureId: str = None,
         bucket: float = None,
+        stickyBucketUsed: bool = False
     ) -> Result:
-        hashAttribute = experiment.hashAttribute or "id"
-
         inExperiment = True
         if variationId < 0 or variationId > len(experiment.variations) - 1:
             variationId = 0
@@ -1423,6 +1486,8 @@ class GrowthBook(object):
         if experiment.meta:
             meta = experiment.meta[variationId]
 
+        (hashAttribute, hashValue) = self._getOrigHashValue(experiment.hashAttribute, experiment.fallbackAttribute)
+
         return Result(
             featureId=featureId,
             inExperiment=inExperiment,
@@ -1430,9 +1495,10 @@ class GrowthBook(object):
             value=experiment.variations[variationId],
             hashUsed=hashUsed,
             hashAttribute=hashAttribute,
-            hashValue=self._getOrigHashValue(hashAttribute),
+            hashValue=hashValue,
             meta=meta,
             bucket=bucket,
+            stickyBucketUsed=stickyBucketUsed
         )
 
     def _derive_sticky_bucket_identifier_attributes(self, data: List[Feature]) -> List[str]:
@@ -1450,7 +1516,7 @@ class GrowthBook(object):
         if not self.sticky_bucket_identifier_attributes:
             self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes(data or self.features)
         for attr in self.sticky_bucket_identifier_attributes:
-            hash_value = self._getHashValue(attr)
+            (_, hash_value) = self._getHashValue(attr)
             if hash_value:
                 attributes[attr] = hash_value
         return attributes
@@ -1477,7 +1543,7 @@ class GrowthBook(object):
                 if blocked_key in assignments:
                     return {
                         'variation': -1,
-                        'versionIdBlocked': True
+                        'versionIsBlocked': True
                     }
         
         variation_key = assignments.get(id, None)
@@ -1508,6 +1574,9 @@ class GrowthBook(object):
 
         attributes = self._get_sticky_bucket_attributes(data)
         self.sticky_bucket_assignment_docs = self.sticky_bucket_service.get_all_assignments(attributes)
+
+    def get_sticky_bucket_assignment_docs(self) -> Dict[str, dict]:
+        return self.sticky_bucket_assignment_docs
 
     def _generate_sticky_bucket_assignment_doc(self, attribute_name: str, attribute_value: str, assignments: dict):
         key = attribute_name + "||" + attribute_value

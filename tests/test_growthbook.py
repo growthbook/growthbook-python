@@ -7,6 +7,7 @@ from growthbook import (
     GrowthBook,
     Experiment,
     Feature,
+    StickyBucketServiceInterface,
     getBucketRanges,
     gbhash,
     chooseVariation,
@@ -143,6 +144,28 @@ def test_run(run_data):
     assert res.hashUsed == hashUsed
 
     gb.destroy()
+
+def test_stickyBucket(stickyBucket_data):
+    _, ctx, key, expected_result, expected_docs = stickyBucket_data
+
+    # Just use the interface directly, which passes and doesn't persist anywhere
+    ctx['sticky_bucket_service'] = StickyBucketServiceInterface()
+
+    if 'stickyBucketIdentifierAttributes' in ctx:
+        ctx['sticky_bucket_identifier_attributes'] = ctx['stickyBucketIdentifierAttributes']
+        ctx.pop('stickyBucketIdentifierAttributes')
+    
+    if 'stickyBucketAssignmentDocs' in ctx:
+        ctx['sticky_bucket_assignment_docs'] = ctx['stickyBucketAssignmentDocs']
+        ctx.pop('stickyBucketAssignmentDocs')
+
+    gb = GrowthBook(**ctx)
+    res = gb.eval_feature(key)
+
+    assert res.experimentResult != None
+    
+    assert res.experimentResult.to_dict() == expected_result
+    assert gb.get_sticky_bucket_assignment_docs() == expected_docs
 
 
 def getTrackingMock(gb: GrowthBook):
