@@ -909,13 +909,6 @@ class GrowthBook(object):
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Any] = set()
 
-    def refresh_sticky_buckets(self, data: List[Feature] = None) -> None:
-        if not self.sticky_bucket_service:
-            return
-        attributes = self._get_sticky_bucket_attributes(data)
-        docs = self.sticky_bucket_service.get_all_assignments(attributes)
-        self.sticky_bucket_assignment_docs = docs
-
     def load_features(self) -> None:
         if not self._client_key:
             raise ValueError("Must specify `client_key` to refresh features")
@@ -1124,7 +1117,7 @@ class GrowthBook(object):
     def get_all_results(self):
         return self._assigned.copy()
 
-    def _getOrigHashValue(self, attr: str = None, fallbackAttr: str = None):
+    def _getOrigHashValue(self, attr: str = None, fallbackAttr: str = None) -> Tuple[str, str]:
             
         attr = attr or "id"
         val = ""
@@ -1146,7 +1139,7 @@ class GrowthBook(object):
         return (attr, val)
 
 
-    def _getHashValue(self, attr: str = None, fallbackAttr: str = None) -> (str,str):
+    def _getHashValue(self, attr: str = None, fallbackAttr: str = None) -> Tuple[str,str]:
         (attr, val) = self._getOrigHashValue(attr, fallbackAttr)
         return (attr, str(val))
 
@@ -1502,9 +1495,10 @@ class GrowthBook(object):
             stickyBucketUsed=stickyBucketUsed
         )
 
-    def _derive_sticky_bucket_identifier_attributes(self, data: List[Feature]) -> List[str]:
+    def _derive_sticky_bucket_identifier_attributes(self, data: Dict[str, Feature]) -> List[str]:
         attributes = set()
-        for feature in data:
+        for key in data:
+            feature = data[key]
             for rule in feature.rules:
                 if rule.variations:
                     attributes.add(rule.hashAttribute or "id")
@@ -1512,10 +1506,10 @@ class GrowthBook(object):
                         attributes.add(rule.fallbackAttribute)
         return list(attributes)
     
-    def _get_sticky_bucket_attributes(self, data: List[Feature] = None) -> dict:
+    def _get_sticky_bucket_attributes(self, data: Dict[str, Feature] = None) -> dict:
         attributes: Dict[str, str] = {}
         if not self.sticky_bucket_identifier_attributes:
-            self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes(data or self.features)
+            self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes(data or self._features)
         for attr in self.sticky_bucket_identifier_attributes:
             (_, hash_value) = self._getHashValue(attr)
             if hash_value:
@@ -1530,7 +1524,7 @@ class GrowthBook(object):
                     merged_assignments[k] = assignment
         return merged_assignments
 
-    def _get_sticky_bucket_variation(self, experiment_key: str, bucket_version: int = None, min_bucket_version: int = None, meta: List[dict] = None)  -> dict:
+    def _get_sticky_bucket_variation(self, experiment_key: str, bucket_version: int = None, min_bucket_version: int = None, meta: List[VariationMeta] = None)  -> dict:
         bucket_version = bucket_version or 0
         min_bucket_version = min_bucket_version or 0
         meta = meta or []
@@ -1569,7 +1563,7 @@ class GrowthBook(object):
     def _get_sticky_bucket_experiment_key(self, experiment_key: str, bucket_version: int = 0) -> str:
         return experiment_key + "__" + str(bucket_version)
 
-    def refresh_sticky_buckets(self, data: List[Feature] = None) -> None:
+    def refresh_sticky_buckets(self, data: Dict[str, Feature] = None) -> None:
         if not self.sticky_bucket_service:
             return
 
