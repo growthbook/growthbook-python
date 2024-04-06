@@ -428,8 +428,8 @@ class Experiment(object):
         self.name = name
         self.phase = phase
         self.disableStickyBucketing = disableStickyBucketing
-        self.bucketVersion = bucketVersion
-        self.minBucketVersion = minBucketVersion
+        self.bucketVersion = bucketVersion or 0
+        self.minBucketVersion = minBucketVersion or 0
         self.parentConditions = parentConditions
 
         self.fallbackAttribute = None
@@ -645,8 +645,8 @@ class FeatureRule(object):
         self.name = name
         self.phase = phase
         self.disableStickyBucketing = disableStickyBucketing
-        self.bucketVersion = bucketVersion
-        self.minBucketVersion = minBucketVersion
+        self.bucketVersion = bucketVersion or 0
+        self.minBucketVersion = minBucketVersion or 0
         self.parentConditions = parentConditions
 
     def to_dict(self) -> dict:
@@ -1418,15 +1418,16 @@ class GrowthBook(object):
                 experiment.bucketVersion
             )] = result.key
 
-            doc = self._generate_sticky_bucket_assignment_doc(
+            data = self._generate_sticky_bucket_assignment_doc(
                 hashAttribute,
                 hashValue,
                 assignment
             )
-            if doc.get('changed', False):
+            doc = data.get("doc", None)
+            if doc and data.get('changed', False):
                 if not self.sticky_bucket_assignment_docs:
                     self.sticky_bucket_assignment_docs = {}
-                self.sticky_bucket_assignment_docs[doc.get('key')] = doc 
+                self.sticky_bucket_assignment_docs[data.get('key')] = doc
                 self.sticky_bucket_service.save_assignments(doc)
 
         # 14. Fire the tracking callback if set

@@ -162,9 +162,11 @@ def test_stickyBucket(stickyBucket_data):
     gb = GrowthBook(**ctx)
     res = gb.eval_feature(key)
 
-    assert res.experimentResult != None
+    if not res.experimentResult:
+      assert None == expected_result
+    else:
+        assert res.experimentResult.to_dict() == expected_result
     
-    assert res.experimentResult.to_dict() == expected_result
     assert gb.get_sticky_bucket_assignment_docs() == expected_docs
 
 
