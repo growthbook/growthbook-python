@@ -7,7 +7,7 @@ from growthbook import (
     GrowthBook,
     Experiment,
     Feature,
-    StickyBucketServiceInterface,
+    InMemoryStickyBucketService,
     getBucketRanges,
     gbhash,
     chooseVariation,
@@ -22,6 +22,7 @@ from growthbook import (
 )
 from time import time
 import pytest
+from typing import Optional, Dict
 
 logger.setLevel("DEBUG")
 
@@ -149,25 +150,31 @@ def test_stickyBucket(stickyBucket_data):
     _, ctx, key, expected_result, expected_docs = stickyBucket_data
 
     # Just use the interface directly, which passes and doesn't persist anywhere
-    ctx['sticky_bucket_service'] = StickyBucketServiceInterface()
+    service = InMemoryStickyBucketService()
+    ctx['sticky_bucket_service'] = service
 
     if 'stickyBucketIdentifierAttributes' in ctx:
         ctx['sticky_bucket_identifier_attributes'] = ctx['stickyBucketIdentifierAttributes']
         ctx.pop('stickyBucketIdentifierAttributes')
     
     if 'stickyBucketAssignmentDocs' in ctx:
-        ctx['sticky_bucket_assignment_docs'] = ctx['stickyBucketAssignmentDocs']
+        service.docs = ctx['stickyBucketAssignmentDocs']
         ctx.pop('stickyBucketAssignmentDocs')
 
     gb = GrowthBook(**ctx)
     res = gb.eval_feature(key)
+
+    print(service.docs)
 
     if not res.experimentResult:
       assert None == expected_result
     else:
         assert res.experimentResult.to_dict() == expected_result
     
-    assert gb.get_sticky_bucket_assignment_docs() == expected_docs
+    assert service.docs == expected_docs
+
+    service.destroy()
+    gb.destroy()
 
 
 def getTrackingMock(gb: GrowthBook):
@@ -739,4 +746,93 @@ def test_load_features(mocker):
     assert gb.get_features()["feature"].to_dict() == {"defaultValue": 5, "rules": []}
 
     feature_repo.clear_cache()
+    gb.destroy()
+
+def test_loose_unmarshalling(mocker):
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(
+        200, json.dumps({"features": {"feature": {"defaultValue": 5, "rules": [{"force": 3, "unknown": "foo"}], "unknown": "foo"}}, "unknown": "foo"})
+    )
+
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
+
+    assert m.call_count == 0
+
+    gb.load_features()
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+
+    assert gb.get_features()["feature"].to_dict() == {"defaultValue": 5, "rules": [{"force": 3, "hashVersion": 1}]}
+
+    feature_repo.clear_cache()
+    gb.destroy()
+
+def test_sticky_bucket_service(mocker):
+    # Start forcing everyone to variation1
+    features = {
+        "feature": {
+            "defaultValue": 5, 
+            "rules": [{
+                "key": "exp",
+                "variations": [0, 1],
+                "weights": [0, 1],
+                "meta": [
+                    {"key": "control"},
+                    {"key": "variation1"}
+                ]
+            }]
+        },
+    }
+
+    service = InMemoryStickyBucketService()
+    gb = GrowthBook(
+        sticky_bucket_service=service,
+        attributes={
+            "id": "1"
+        },
+        features=features
+    )
+
+    assert gb.get_feature_value("feature", -1) == 1
+    assert service.get_assignments("id", "1") == {
+        "attributeName": "id",
+        "attributeValue": "1",
+        "assignments": {
+            "exp__0": "variation1"
+        }
+    }
+
+    logger.debug("Change weights and ensure old user still gets variation")
+    features["feature"]["rules"][0]["weights"] = [1, 0]
+    gb.set_features(features)
+    assert gb.get_feature_value("feature", -1) == 1
+
+    logger.debug("New GrowthBook instance should also get variation")
+    gb2 = GrowthBook(
+        sticky_bucket_service=service,
+        attributes={
+            "id": "1"
+        },
+        features=features
+    )
+    assert gb2.get_feature_value("feature", -1) == 1
+    gb2.destroy()
+
+    logger.debug("New users should get control")
+    gb.set_attributes({"id": "2"})
+    assert gb.get_feature_value("feature", -1) == 0
+
+    logger.debug("Bumping bucketVersion, should reset sticky buckets")
+    gb.set_attributes({"id": "1"})
+    features["feature"]["rules"][0]["bucketVersion"] = 1
+    gb.set_features(features)
+    assert gb.get_feature_value("feature", -1) == 0
+
+    assert service.get_assignments("id", "1") == {
+        "attributeName": "id",
+        "attributeValue": "1",
+        "assignments": {
+            "exp__0": "variation1",
+            "exp__1": "control"
+        }
+    }
     gb.destroy()

@@ -4953,7 +4953,7 @@
       {
         "attributes": {
           "id": "i123",
-          "anonymousId": "ses123",
+          "anonymousId": "123",
           "foo": "bar",
           "country": "USA"
         },
@@ -4965,7 +4965,7 @@
                 "key": "feature-exp",
                 "seed": "feature-exp",
                 "hashAttribute": "id",
-                "fallbackAttribute": "deviceId",
+                "fallbackAttribute": "anonymousId",
                 "hashVersion": 2,
                 "bucketVersion": 0,
                 "condition": { "country": "USA" },

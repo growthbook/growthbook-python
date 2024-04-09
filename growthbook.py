@@ -366,22 +366,6 @@ class Filter(TypedDict):
     hashVersion: int
     attribute: str
 
-class StickyBucketServiceInterface:
-    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
-        pass
-    def save_assignments(self, doc: Dict) -> None:
-        pass
-    # By default, just loop through all attributes and call get_assignments
-    # Override this method in subclasses to perform a multi-query instead
-    def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
-        docs = {}
-        for attributeName, attributeValue in attributes.items():
-            doc = self.get_assignments(attributeName, attributeValue)
-            if doc:
-                key = f"{doc['attributeName']}||{doc['attributeValue']}"
-                docs[key] = doc
-        return docs
-
 class Experiment(object):
     def __init__(
         self,
@@ -777,6 +761,41 @@ class InMemoryFeatureCache(AbstractFeatureCache):
         self.cache.clear()
 
 
+class AbstractStickyBucketService(ABC):
+    @abstractmethod
+    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+        pass
+
+    @abstractmethod
+    def save_assignments(self, doc: Dict) -> None:
+        pass
+
+    def get_key(self, attributeName: str, attributeValue: str) -> str:
+        return f"{attributeName}||{attributeValue}"
+
+    # By default, just loop through all attributes and call get_assignments
+    # Override this method in subclasses to perform a multi-query instead
+    def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
+        docs = {}
+        for attributeName, attributeValue in attributes.items():
+            doc = self.get_assignments(attributeName, attributeValue)
+            if doc:
+                docs[self.get_key(attributeName, attributeValue)] = doc
+        return docs
+
+class InMemoryStickyBucketService(AbstractStickyBucketService):
+    def __init__(self) -> None:
+        self.docs: Dict[str, Dict] = {}
+
+    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+        return self.docs.get(self.get_key(attributeName, attributeValue), None)
+
+    def save_assignments(self, doc: Dict) -> None:
+        self.docs[self.get_key(doc["attributeName"], doc["attributeValue"])] = doc
+
+    def destroy(self) -> None:
+        self.docs.clear()
+
 class FeatureRepository(object):
     def __init__(self) -> None:
         self.cache: AbstractFeatureCache = InMemoryFeatureCache()
@@ -870,9 +889,8 @@ class GrowthBook(object):
         decryption_key: str = "",
         cache_ttl: int = 60,
         forced_variations: dict = {},
-        sticky_bucket_service: StickyBucketServiceInterface = None,
+        sticky_bucket_service: AbstractStickyBucketService = None,
         sticky_bucket_identifier_attributes: List[str] = None,
-        sticky_bucket_assignment_docs: Dict[str, dict] = {},
         # Deprecated args
         trackingCallback=None,
         qaMode: bool = False,
@@ -891,10 +909,9 @@ class GrowthBook(object):
         self._cache_ttl = cache_ttl
         self.sticky_bucket_identifier_attributes = sticky_bucket_identifier_attributes
         self.sticky_bucket_service = sticky_bucket_service
-        self.sticky_bucket_assignment_docs = sticky_bucket_assignment_docs
-
-        if features:
-            self.setFeatures(features)
+        self.sticky_bucket_assignment_docs: dict = {}
+        self._using_derived_sticky_bucket_attributes = not sticky_bucket_identifier_attributes
+        self._sticky_bucket_attributes: Optional[dict] = None
 
         self._qaMode = qa_mode or qaMode
         self._trackingCallback = on_experiment_viewed or trackingCallback
@@ -908,6 +925,9 @@ class GrowthBook(object):
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Any] = set()
+
+        if features:
+            self.setFeatures(features)
 
     def load_features(self) -> None:
         if not self._client_key:
@@ -933,6 +953,7 @@ class GrowthBook(object):
                     rules=feature.get("rules", []),
                     defaultValue=feature.get("defaultValue", None),
                 )
+        self.refresh_sticky_buckets()
 
     # @deprecated, use get_features
     def getFeatures(self) -> Dict[str, Feature]:
@@ -947,6 +968,7 @@ class GrowthBook(object):
 
     def set_attributes(self, attributes: dict) -> None:
         self._attributes = attributes
+        self.refresh_sticky_buckets()
 
     # @deprecated, use get_attributes
     def getAttributes(self) -> dict:
@@ -1275,6 +1297,9 @@ class GrowthBook(object):
             found_sticky_bucket = sticky_bucket.get('variation', 0) >= 0
             assigned = sticky_bucket.get('variation', 0)
             sticky_bucket_version_is_blocked = sticky_bucket.get('versionIsBlocked', False)
+        
+        if found_sticky_bucket:
+            logger.debug("Found sticky bucket for experiment %s, assigning sticky variation %s", experiment.key, assigned)
 
         # Some checks are not needed if we already have a sticky bucket
         if not found_sticky_bucket:
@@ -1495,10 +1520,10 @@ class GrowthBook(object):
             stickyBucketUsed=stickyBucketUsed
         )
 
-    def _derive_sticky_bucket_identifier_attributes(self, data: Dict[str, Feature]) -> List[str]:
+    def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
         attributes = set()
-        for key in data:
-            feature = data[key]
+        for key in self._features:
+            feature = self._features[key]
             for rule in feature.rules:
                 if rule.variations:
                     attributes.add(rule.hashAttribute or "id")
@@ -1506,10 +1531,14 @@ class GrowthBook(object):
                         attributes.add(rule.fallbackAttribute)
         return list(attributes)
     
-    def _get_sticky_bucket_attributes(self, data: Dict[str, Feature] = None) -> dict:
+    def _get_sticky_bucket_attributes(self) -> dict:
         attributes: Dict[str, str] = {}
+        if self._using_derived_sticky_bucket_attributes:
+            self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes()
+        
         if not self.sticky_bucket_identifier_attributes:
-            self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes(data or self._features)
+            return attributes
+
         for attr in self.sticky_bucket_identifier_attributes:
             (_, hash_value) = self._getHashValue(attr)
             if hash_value:
@@ -1563,15 +1592,17 @@ class GrowthBook(object):
     def _get_sticky_bucket_experiment_key(self, experiment_key: str, bucket_version: int = 0) -> str:
         return experiment_key + "__" + str(bucket_version)
 
-    def refresh_sticky_buckets(self, data: Dict[str, Feature] = None) -> None:
+    def refresh_sticky_buckets(self, force: bool = False) -> None:
         if not self.sticky_bucket_service:
             return
 
-        attributes = self._get_sticky_bucket_attributes(data)
-        self.sticky_bucket_assignment_docs = self.sticky_bucket_service.get_all_assignments(attributes)
+        attributes = self._get_sticky_bucket_attributes()
+        if not force and attributes == self._sticky_bucket_attributes:
+            logger.debug("Skipping refresh of sticky bucket assignments, no changes")
+            return
 
-    def get_sticky_bucket_assignment_docs(self) -> Dict[str, dict]:
-        return self.sticky_bucket_assignment_docs
+        self._sticky_bucket_attributes = attributes
+        self.sticky_bucket_assignment_docs = self.sticky_bucket_service.get_all_assignments(attributes)
 
     def _generate_sticky_bucket_assignment_doc(self, attribute_name: str, attribute_value: str, assignments: dict):
         key = attribute_name + "||" + attribute_value
