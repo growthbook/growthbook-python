@@ -156,7 +156,7 @@ def test_stickyBucket(stickyBucket_data):
     if 'stickyBucketIdentifierAttributes' in ctx:
         ctx['sticky_bucket_identifier_attributes'] = ctx['stickyBucketIdentifierAttributes']
         ctx.pop('stickyBucketIdentifierAttributes')
-    
+
     if 'stickyBucketAssignmentDocs' in ctx:
         service.docs = ctx['stickyBucketAssignmentDocs']
         ctx.pop('stickyBucketAssignmentDocs')
@@ -170,7 +170,7 @@ def test_stickyBucket(stickyBucket_data):
       assert None == expected_result
     else:
         assert res.experimentResult.to_dict() == expected_result
-    
+
     assert service.docs == expected_docs
 
     service.destroy()
@@ -750,9 +750,50 @@ def test_load_features(mocker):
 
 def test_loose_unmarshalling(mocker):
     m = mocker.patch.object(feature_repo, "_get")
-    m.return_value = MockHttpResp(
-        200, json.dumps({"features": {"feature": {"defaultValue": 5, "rules": [{"force": 3, "unknown": "foo"}], "unknown": "foo"}}, "unknown": "foo"})
-    )
+    m.return_value = MockHttpResp(200, json.dumps({
+        "features": {
+            "feature": {
+                "defaultValue": 5,
+                "rules": [
+                    {
+                        "condition": {"country": "US"},
+                        "force": 3,
+                        "hashVersion": 1,
+                        "unknown": "foo"
+                    },
+                    {
+                        "key": "my-exp",
+                        "hashVersion": 2,
+                        "variations": [0, 1],
+                        "meta": [
+                            {
+                                "key": "control",
+                                "unknown": "foo"
+                            },
+                            {
+                                "key": "variation1",
+                                "unknown": "foo"
+                            }
+                        ],
+                        "filters": [
+                            {
+                                "seed": "abc123",
+                                "ranges": [[0, 0.0001]],
+                                "hashVersion": 2,
+                                "attribute": "id",
+                                "unknown": "foo"
+                            }
+                        ]
+                    },
+                    {
+                        "unknownRuleType": "foo"
+                    }
+                ],
+                "unknown": "foo"
+            }
+        },
+        "unknown": "foo"
+    }))
 
     gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
 
@@ -761,7 +802,43 @@ def test_loose_unmarshalling(mocker):
     gb.load_features()
     m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
 
-    assert gb.get_features()["feature"].to_dict() == {"defaultValue": 5, "rules": [{"force": 3, "hashVersion": 1}]}
+    assert gb.get_features()["feature"].to_dict() == {
+        "defaultValue": 5,
+        "rules": [
+            {
+                "condition": {"country": "US"},
+                "force": 3,
+                "hashVersion": 1
+            },
+            {
+                "key": "my-exp",
+                "hashVersion": 2,
+                "variations": [0, 1],
+                "meta": [
+                    {
+                        "key": "control",
+                        "unknown": "foo"
+                    },
+                    {
+                        "key": "variation1",
+                        "unknown": "foo"
+                    }
+                ],
+                "filters": [
+                    {
+                        "seed": "abc123",
+                        "ranges": [[0, 0.0001]],
+                        "hashVersion": 2,
+                        "attribute": "id",
+                        "unknown": "foo"
+                    }
+                ]
+            },
+            {
+                "hashVersion": 1
+            }
+        ]
+    }
 
     feature_repo.clear_cache()
     gb.destroy()
@@ -770,7 +847,7 @@ def test_sticky_bucket_service(mocker):
     # Start forcing everyone to variation1
     features = {
         "feature": {
-            "defaultValue": 5, 
+            "defaultValue": 5,
             "rules": [{
                 "key": "exp",
                 "variations": [0, 1],
