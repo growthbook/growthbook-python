@@ -164,8 +164,6 @@ def test_stickyBucket(stickyBucket_data):
     gb = GrowthBook(**ctx)
     res = gb.eval_feature(key)
 
-    print(service.docs)
-
     if not res.experimentResult:
       assert None == expected_result
     else:
@@ -840,6 +838,9 @@ def test_loose_unmarshalling(mocker):
         ]
     }
 
+    value = gb.get_feature_value("feature", -1)
+    assert value == 5
+
     feature_repo.clear_cache()
     gb.destroy()
 
@@ -913,3 +914,4 @@ def test_sticky_bucket_service(mocker):
         }
     }
     gb.destroy()
+    service.destroy()
