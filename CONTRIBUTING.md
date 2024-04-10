@@ -7,19 +7,23 @@ We welcome all contributions!
 We use MyPy for type checking.
 
 ```bash
-mypy growthbook.py --implicit-optional
+make type-check
 ```
 
 ## Tests
 
-Run the test suite with `pytest`
+Run the test suite with
+
+```bash
+make test
+```
 
 ## Linting
 
-Lint the code with flake8 (note: we only use a subset of linting rules)
+Lint the code with flake8
 
 ```bash
-flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+make lint
 ```
 
 ## Releasing

@@ -22,7 +22,6 @@ from growthbook import (
 )
 from time import time
 import pytest
-from typing import Optional, Dict
 
 logger.setLevel("DEBUG")
 
@@ -102,13 +101,16 @@ def test_conditions(evalCondition_data):
     _, condition, attributes, expected = evalCondition_data
     assert evalCondition(attributes, condition) == expected
 
+
 def test_version_lt(versionCompare_lt_data):
     v1, v2, should_match = versionCompare_lt_data
     assert (paddedVersionString(v1) < paddedVersionString(v2)) == should_match
 
+
 def test_version_gt(versionCompare_gt_data):
     v1, v2, should_match = versionCompare_gt_data
     assert (paddedVersionString(v1) > paddedVersionString(v2)) == should_match
+
 
 def test_version_eq(versionCompare_eq_data):
     v1, v2, should_match = versionCompare_eq_data
@@ -145,6 +147,7 @@ def test_run(run_data):
     assert res.hashUsed == hashUsed
 
     gb.destroy()
+
 
 def test_stickyBucket(stickyBucket_data):
     _, ctx, key, expected_result, expected_docs = stickyBucket_data
@@ -746,6 +749,7 @@ def test_load_features(mocker):
     feature_repo.clear_cache()
     gb.destroy()
 
+
 def test_loose_unmarshalling(mocker):
     m = mocker.patch.object(feature_repo, "_get")
     m.return_value = MockHttpResp(200, json.dumps({
@@ -843,6 +847,7 @@ def test_loose_unmarshalling(mocker):
 
     feature_repo.clear_cache()
     gb.destroy()
+
 
 def test_sticky_bucket_service(mocker):
     # Start forcing everyone to variation1

@@ -130,6 +130,7 @@ def decrypt(encrypted_str: str, key_str: str) -> str:
 
     return bytestring.decode("utf-8")
 
+
 def paddedVersionString(input) -> str:
     # If input is a number, convert to a string
     if type(input) is int or type(input) is float:
@@ -137,7 +138,7 @@ def paddedVersionString(input) -> str:
 
     if not input or type(input) is not str:
         input = "0"
-    
+
     # Remove build info and leading `v` if any
     input = re.sub(r"(^v|\+.*$)", "", input)
     # Split version into parts (both core version numbers and pre-release tags)
@@ -152,10 +153,12 @@ def paddedVersionString(input) -> str:
     # Then, join back together into a single string
     return "-".join([v.rjust(5, " ") if re.match(r"^[0-9]+$", v) else v for v in parts])
 
+
 def isIn(conditionValue, attributeValue) -> bool:
     if type(attributeValue) is list:
         return bool(set(conditionValue) & set(attributeValue))
     return attributeValue in conditionValue
+
 
 def evalCondition(attributes: dict, condition: dict) -> bool:
     if "$or" in condition:
@@ -249,15 +252,16 @@ def elemMatch(condition, attributeValue) -> bool:
 
     return False
 
+
 def compare(val1, val2) -> int:
     if (type(val1) is int or type(val1) is float) and not (type(val2) is int or type(val2) is float):
-        if (val2 == None):
+        if (val2 is None):
             val2 = 0
         else:
             val2 = float(val2)
 
     if (type(val2) is int or type(val2) is float) and not (type(val1) is int or type(val1) is float):
-        if (val1 == None):
+        if (val1 is None):
             val1 = 0
         else:
             val1 = float(val1)
@@ -365,6 +369,7 @@ class Filter(TypedDict):
     ranges: List[Tuple[float, float]]
     hashVersion: int
     attribute: str
+
 
 class Experiment(object):
     def __init__(
@@ -783,6 +788,7 @@ class AbstractStickyBucketService(ABC):
                 docs[self.get_key(attributeName, attributeValue)] = doc
         return docs
 
+
 class InMemoryStickyBucketService(AbstractStickyBucketService):
     def __init__(self) -> None:
         self.docs: Dict[str, Dict] = {}
@@ -795,6 +801,7 @@ class InMemoryStickyBucketService(AbstractStickyBucketService):
 
     def destroy(self) -> None:
         self.docs.clear()
+
 
 class FeatureRepository(object):
     def __init__(self) -> None:
@@ -874,6 +881,7 @@ class FeatureRepository(object):
 
 # Singleton instance
 feature_repo = FeatureRepository()
+
 
 class GrowthBook(object):
     def __init__(
@@ -1140,14 +1148,14 @@ class GrowthBook(object):
         return self._assigned.copy()
 
     def _getOrigHashValue(self, attr: str = None, fallbackAttr: str = None) -> Tuple[str, str]:
-            
+
         attr = attr or "id"
         val = ""
         if attr in self._attributes:
             val = self._attributes[attr] or ""
         elif attr in self._user:
             val = self._user[attr] or ""
-        
+
         # If no match, try fallback
         if (not val or val == "") and fallbackAttr and self.sticky_bucket_service:
             if fallbackAttr in self._attributes:
@@ -1160,8 +1168,7 @@ class GrowthBook(object):
 
         return (attr, val)
 
-
-    def _getHashValue(self, attr: str = None, fallbackAttr: str = None) -> Tuple[str,str]:
+    def _getHashValue(self, attr: str = None, fallbackAttr: str = None) -> Tuple[str, str]:
         (attr, val) = self._getOrigHashValue(attr, fallbackAttr)
         return (attr, str(val))
 
@@ -1278,7 +1285,7 @@ class GrowthBook(object):
         if experiment.status == "draft" or not experiment.active:
             logger.debug("Experiment %s is not active, skip", experiment.key)
             return self._getExperimentResult(experiment, featureId=featureId)
-        
+
         # 6. Get the user hash attribute and value
         (hashAttribute, hashValue) = self._getHashValue(experiment.hashAttribute, experiment.fallbackAttribute)
         if not hashValue:
@@ -1293,11 +1300,18 @@ class GrowthBook(object):
         found_sticky_bucket = False
         sticky_bucket_version_is_blocked = False
         if self.sticky_bucket_service and not experiment.disableStickyBucketing:
-            sticky_bucket = self._get_sticky_bucket_variation(experiment.key, experiment.bucketVersion, experiment.minBucketVersion, experiment.meta)
+            sticky_bucket = self._get_sticky_bucket_variation(
+                experiment.key,
+                experiment.bucketVersion,
+                experiment.minBucketVersion,
+                experiment.meta,
+                hash_attribute=experiment.hashAttribute,
+                fallback_attribute=experiment.fallbackAttribute,
+            )
             found_sticky_bucket = sticky_bucket.get('variation', 0) >= 0
             assigned = sticky_bucket.get('variation', 0)
             sticky_bucket_version_is_blocked = sticky_bucket.get('versionIsBlocked', False)
-        
+
         if found_sticky_bucket:
             logger.debug("Found sticky bucket for experiment %s, assigning sticky variation %s", experiment.key, assigned)
 
@@ -1362,7 +1376,7 @@ class GrowthBook(object):
                         experiment.key,
                     )
                     return self._getExperimentResult(experiment, featureId=featureId)
-    
+
         # The following apply even when in a sticky bucket
 
         # 8.2. If experiment.url is set, see if it's valid
@@ -1383,7 +1397,7 @@ class GrowthBook(object):
                 "Skip experiment %s because of invalid hashVersion", experiment.key
             )
             return self._getExperimentResult(experiment, featureId=featureId)
-        
+
         if not found_sticky_bucket:
             c = experiment.coverage
             ranges = experiment.ranges or getBucketRanges(
@@ -1530,12 +1544,12 @@ class GrowthBook(object):
                     if rule.fallbackAttribute:
                         attributes.add(rule.fallbackAttribute)
         return list(attributes)
-    
+
     def _get_sticky_bucket_attributes(self) -> dict:
         attributes: Dict[str, str] = {}
         if self._using_derived_sticky_bucket_attributes:
             self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes()
-        
+
         if not self.sticky_bucket_identifier_attributes:
             return attributes
 
@@ -1545,37 +1559,66 @@ class GrowthBook(object):
                 attributes[attr] = hash_value
         return attributes
 
-    def _get_sticky_bucket_assignments(self) -> Dict[str, dict]:
-        merged_assignments: Dict[str, dict] = {}
-        for key, value in self.sticky_bucket_assignment_docs.items():
-            if value.get("assignments"):
-                for k, assignment in value["assignments"].items():
-                    merged_assignments[k] = assignment
-        return merged_assignments
+    def _get_sticky_bucket_assignments(self, attr: str = None, fallback: str = None) -> Dict[str, str]:
+        merged: Dict[str, str] = {}
 
-    def _get_sticky_bucket_variation(self, experiment_key: str, bucket_version: int = None, min_bucket_version: int = None, meta: List[VariationMeta] = None)  -> dict:
+        (_, hashValue) = self._getHashValue(attr)
+        key = f"{attr}||{hashValue}"
+        if key in self.sticky_bucket_assignment_docs:
+            merged = self.sticky_bucket_assignment_docs[key].get("assignments", {})
+
+        if fallback:
+            (_, hashValue) = self._getHashValue(fallback)
+            key = f"{fallback}||{hashValue}"
+            if key in self.sticky_bucket_assignment_docs:
+                # Merge the fallback assignments, but don't overwrite existing ones
+                for k, v in self.sticky_bucket_assignment_docs[key].get("assignments", {}).items():
+                    if k not in merged:
+                        merged[k] = v
+
+        return merged
+
+    def _is_blocked(
+        self,
+        assignments: Dict[str, str],
+        experiment_key: str,
+        min_bucket_version: int
+    ) -> bool:
+        if min_bucket_version > 0:
+            for i in range(0, min_bucket_version):
+                blocked_key = self._get_sticky_bucket_experiment_key(experiment_key, i)
+                if blocked_key in assignments:
+                    return True
+        return False
+
+    def _get_sticky_bucket_variation(
+        self,
+        experiment_key: str,
+        bucket_version: int = None,
+        min_bucket_version: int = None,
+        meta: List[VariationMeta] = None,
+        hash_attribute: str = None,
+        fallback_attribute: str = None
+    ) -> dict:
         bucket_version = bucket_version or 0
         min_bucket_version = min_bucket_version or 0
         meta = meta or []
 
         id = self._get_sticky_bucket_experiment_key(experiment_key, bucket_version)
-        assignments = self._get_sticky_bucket_assignments()
 
-        if min_bucket_version > 0:
-            for i in range(0, min_bucket_version):
-                blocked_key = self._get_sticky_bucket_experiment_key(experiment_key, i)
-                if blocked_key in assignments:
-                    return {
-                        'variation': -1,
-                        'versionIsBlocked': True
-                    }
-        
+        assignments = self._get_sticky_bucket_assignments(hash_attribute, fallback_attribute)
+        if self._is_blocked(assignments, experiment_key, min_bucket_version):
+            return {
+                'variation': -1,
+                'versionIsBlocked': True
+            }
+
         variation_key = assignments.get(id, None)
         if not variation_key:
             return {
                 'variation': -1
             }
-        
+
         # Find the key in meta
         variation = -1
         for i, v in enumerate(meta):
@@ -1586,8 +1629,8 @@ class GrowthBook(object):
             return {
                 'variation': -1
             }
-        
-        return { 'variation': variation}
+
+        return {'variation': variation}
 
     def _get_sticky_bucket_experiment_key(self, experiment_key: str, bucket_version: int = 0) -> str:
         return experiment_key + "__" + str(bucket_version)
@@ -1611,7 +1654,7 @@ class GrowthBook(object):
             existing_assignments = self.sticky_bucket_assignment_docs[key].get("assignments", {})
 
         new_assignments = {**existing_assignments, **assignments}
-        
+
         # Compare JSON strings to see if they have changed
         existing_json = json.dumps(existing_assignments, sort_keys=True)
         new_json = json.dumps(new_assignments, sort_keys=True)
