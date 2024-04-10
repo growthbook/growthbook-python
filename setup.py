@@ -29,6 +29,7 @@ setup(
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
+        'Programming Language :: Python :: 3.12',
     ],
     description="Powerful Feature flagging and A/B testing for Python apps",
     long_description=long_description,
