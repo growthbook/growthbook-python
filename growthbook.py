@@ -1536,8 +1536,7 @@ class GrowthBook(object):
 
     def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
         attributes = set()
-        for key in self._features:
-            feature = self._features[key]
+        for key, feature in self._features.items():
             for rule in feature.rules:
                 if rule.variations:
                     attributes.add(rule.hashAttribute or "id")
@@ -1554,7 +1553,7 @@ class GrowthBook(object):
             return attributes
 
         for attr in self.sticky_bucket_identifier_attributes:
-            (_, hash_value) = self._getHashValue(attr)
+            _, hash_value = self._getHashValue(attr)
             if hash_value:
                 attributes[attr] = hash_value
         return attributes
@@ -1562,13 +1561,13 @@ class GrowthBook(object):
     def _get_sticky_bucket_assignments(self, attr: str = None, fallback: str = None) -> Dict[str, str]:
         merged: Dict[str, str] = {}
 
-        (_, hashValue) = self._getHashValue(attr)
+        _, hashValue = self._getHashValue(attr)
         key = f"{attr}||{hashValue}"
         if key in self.sticky_bucket_assignment_docs:
             merged = self.sticky_bucket_assignment_docs[key].get("assignments", {})
 
         if fallback:
-            (_, hashValue) = self._getHashValue(fallback)
+            _, hashValue = self._getHashValue(fallback)
             key = f"{fallback}||{hashValue}"
             if key in self.sticky_bucket_assignment_docs:
                 # Merge the fallback assignments, but don't overwrite existing ones
@@ -1585,7 +1584,7 @@ class GrowthBook(object):
         min_bucket_version: int
     ) -> bool:
         if min_bucket_version > 0:
-            for i in range(0, min_bucket_version):
+            for i in range(min_bucket_version):
                 blocked_key = self._get_sticky_bucket_experiment_key(experiment_key, i)
                 if blocked_key in assignments:
                     return True
@@ -1620,11 +1619,7 @@ class GrowthBook(object):
             }
 
         # Find the key in meta
-        variation = -1
-        for i, v in enumerate(meta):
-            if v.get("key") == variation_key:
-                variation = i
-                break
+        variation = next((i for i, v in enumerate(meta) if v.get("key") == variation_key), -1)
         if variation < 0:
             return {
                 'variation': -1
@@ -1649,9 +1644,7 @@ class GrowthBook(object):
 
     def _generate_sticky_bucket_assignment_doc(self, attribute_name: str, attribute_value: str, assignments: dict):
         key = attribute_name + "||" + attribute_value
-        existing_assignments = {}
-        if key in self.sticky_bucket_assignment_docs:
-            existing_assignments = self.sticky_bucket_assignment_docs[key].get("assignments", {})
+        existing_assignments = self.sticky_bucket_assignment_docs.get(key, {}).get("assignments", {})
 
         new_assignments = {**existing_assignments, **assignments}
 
