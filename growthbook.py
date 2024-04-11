@@ -917,7 +917,7 @@ class GrowthBook(object):
         self._cache_ttl = cache_ttl
         self.sticky_bucket_identifier_attributes = sticky_bucket_identifier_attributes
         self.sticky_bucket_service = sticky_bucket_service
-        self.sticky_bucket_assignment_docs: dict = {}
+        self._sticky_bucket_assignment_docs: dict = {}
         self._using_derived_sticky_bucket_attributes = not sticky_bucket_identifier_attributes
         self._sticky_bucket_attributes: Optional[dict] = None
 
@@ -1457,9 +1457,9 @@ class GrowthBook(object):
             )
             doc = data.get("doc", None)
             if doc and data.get('changed', False):
-                if not self.sticky_bucket_assignment_docs:
-                    self.sticky_bucket_assignment_docs = {}
-                self.sticky_bucket_assignment_docs[data.get('key')] = doc
+                if not self._sticky_bucket_assignment_docs:
+                    self._sticky_bucket_assignment_docs = {}
+                self._sticky_bucket_assignment_docs[data.get('key')] = doc
                 self.sticky_bucket_service.save_assignments(doc)
 
         # 14. Fire the tracking callback if set
@@ -1563,15 +1563,15 @@ class GrowthBook(object):
 
         _, hashValue = self._getHashValue(attr)
         key = f"{attr}||{hashValue}"
-        if key in self.sticky_bucket_assignment_docs:
-            merged = self.sticky_bucket_assignment_docs[key].get("assignments", {})
+        if key in self._sticky_bucket_assignment_docs:
+            merged = self._sticky_bucket_assignment_docs[key].get("assignments", {})
 
         if fallback:
             _, hashValue = self._getHashValue(fallback)
             key = f"{fallback}||{hashValue}"
-            if key in self.sticky_bucket_assignment_docs:
+            if key in self._sticky_bucket_assignment_docs:
                 # Merge the fallback assignments, but don't overwrite existing ones
-                for k, v in self.sticky_bucket_assignment_docs[key].get("assignments", {}).items():
+                for k, v in self._sticky_bucket_assignment_docs[key].get("assignments", {}).items():
                     if k not in merged:
                         merged[k] = v
 
@@ -1640,11 +1640,11 @@ class GrowthBook(object):
             return
 
         self._sticky_bucket_attributes = attributes
-        self.sticky_bucket_assignment_docs = self.sticky_bucket_service.get_all_assignments(attributes)
+        self._sticky_bucket_assignment_docs = self.sticky_bucket_service.get_all_assignments(attributes)
 
     def _generate_sticky_bucket_assignment_doc(self, attribute_name: str, attribute_value: str, assignments: dict):
         key = attribute_name + "||" + attribute_value
-        existing_assignments = self.sticky_bucket_assignment_docs.get(key, {}).get("assignments", {})
+        existing_assignments = self._sticky_bucket_assignment_docs.get(key, {}).get("assignments", {})
 
         new_assignments = {**existing_assignments, **assignments}
 
