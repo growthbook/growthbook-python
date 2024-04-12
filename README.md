@@ -4,13 +4,13 @@ Powerful Feature flagging and A/B testing for Python apps.
 
 ![Build Status](https://github.com/growthbook/growthbook-python/workflows/Build/badge.svg)
 
--   **Lightweight and fast**
--   **Local evaluation**, no network requests required
--   Python 3.6+
--   100% test coverage
--   Flexible **targeting**
--   **Use your existing event tracking** (GA, Segment, Mixpanel, custom)
--   **Remote configuration** to change feature flags without deploying new code
+- **Lightweight and fast**
+- **Local evaluation**, no network requests required
+- Python 3.6+
+- 100% test coverage
+- Flexible **targeting**
+- **Use your existing event tracking** (GA, Segment, Mixpanel, custom)
+- **Remote configuration** to change feature flags without deploying new code
 
 ## Installation
 
@@ -155,17 +155,17 @@ Note: When doing this, you do not need to specify your `api_host` or `client_key
 
 The GrowthBook constructor has the following parameters:
 
--   **enabled** (`bool`) - Flag to globally disable all experiments. Default true.
--   **attributes** (`dict`) - Dictionary of user attributes that are used for targeting and to assign variations
--   **url** (`str`) - The URL of the current request (if applicable)
--   **qa_mode** (`boolean`) - If true, random assignment is disabled and only explicitly forced variations are used.
--   **on_experiment_viewed** (`callable`) - A function that takes `experiment` and `result` as arguments.
--   **api_host** (`str`) - The GrowthBook API host to fetch feature flags from. Defaults to `https://cdn.growthbook.io`
--   **client_key** (`str`) - The client key that will be passed to the API Host to fetch feature flags
--   **decryption_key** (`str`) - If the GrowthBook API endpoint has encryption enabled, specify the decryption key here
--   **cache_ttl** (`int`) - How long to cache features in-memory from the GrowthBook API (seconds, default `60`)
--   **features** (`dict`) - Feature definitions from the GrowthBook API (only required if `client_key` is not specified)
--   **forced_variations** (`dict`) - Dictionary of forced experiment variations (used for QA)
+- **enabled** (`bool`) - Flag to globally disable all experiments. Default true.
+- **attributes** (`dict`) - Dictionary of user attributes that are used for targeting and to assign variations
+- **url** (`str`) - The URL of the current request (if applicable)
+- **qa_mode** (`boolean`) - If true, random assignment is disabled and only explicitly forced variations are used.
+- **on_experiment_viewed** (`callable`) - A function that takes `experiment` and `result` as arguments.
+- **api_host** (`str`) - The GrowthBook API host to fetch feature flags from. Defaults to `https://cdn.growthbook.io`
+- **client_key** (`str`) - The client key that will be passed to the API Host to fetch feature flags
+- **decryption_key** (`str`) - If the GrowthBook API endpoint has encryption enabled, specify the decryption key here
+- **cache_ttl** (`int`) - How long to cache features in-memory from the GrowthBook API (seconds, default `60`)
+- **features** (`dict`) - Feature definitions from the GrowthBook API (only required if `client_key` is not specified)
+- **forced_variations** (`dict`) - Dictionary of forced experiment variations (used for QA)
 
 There are also getter and setter methods for features and attributes if you need to update them later in the request:
 
@@ -227,17 +227,64 @@ gb = GrowthBook(
 
 There are 3 main methods for interacting with features.
 
--   `gb.is_on("feature-key")` returns true if the feature is on
--   `gb.is_off("feature-key")` returns false if the feature is on
--   `gb.get_feature_value("feature-key", "default")` returns the value of the feature with a fallback
+- `gb.is_on("feature-key")` returns true if the feature is on
+- `gb.is_off("feature-key")` returns false if the feature is on
+- `gb.get_feature_value("feature-key", "default")` returns the value of the feature with a fallback
 
 In addition, you can use `gb.evalFeature("feature-key")` to get back a `FeatureResult` object with the following properties:
 
--   **value** - The JSON-decoded value of the feature (or `None` if not defined)
--   **on** and **off** - The JSON-decoded value cast to booleans
--   **source** - Why the value was assigned to the user. One of `unknownFeature`, `defaultValue`, `force`, or `experiment`
--   **experiment** - Information about the experiment (if any) which was used to assign the value to the user
--   **experimentResult** - The result of the experiment (if any) which was used to assign the value to the user
+- **value** - The JSON-decoded value of the feature (or `None` if not defined)
+- **on** and **off** - The JSON-decoded value cast to booleans
+- **source** - Why the value was assigned to the user. One of `unknownFeature`, `defaultValue`, `force`, or `experiment`
+- **experiment** - Information about the experiment (if any) which was used to assign the value to the user
+- **experimentResult** - The result of the experiment (if any) which was used to assign the value to the user
+
+## Sticky Bucketing
+
+By default GrowthBook does not persist assigned experiment variations for a user. We rely on deterministic hashing to ensure that the same user attributes always map to the same experiment variation. However, there are cases where this isn't good enough. For example, if you change targeting conditions in the middle of an experiment, users may stop being shown a variation even if they were previously bucketed into it.
+
+Sticky Bucketing is a solution to these issues. You can provide a Sticky Bucket Service to the GrowthBook instance to persist previously seen variations and ensure that the user experience remains consistent for your users.
+
+A sample `InMemoryStickyBucketService` implementation is provided for reference, but in production you will definitely want to implement your own version using a database, cookies, or similar for persistence.
+
+Sticky Bucket documents contain three fields
+
+- `attributeName` - The name of the attribute used to identify the user (e.g. `id`, `cookie_id`, etc.)
+- `attributeValue` - The value of the attribute (e.g. `123`)
+- `assignments` - A dictionary of persisted experiment assignments. For example: `{"exp1__0":"control"}`
+
+The attributeName/attributeValue combo is the primary key.
+
+Here's an example implementation using a theoretical `db` object:
+
+```python
+from growthbook import AbstractStickyBucketService, GrowthBook
+
+class MyStickyBucketService(AbstractStickyBucketService):
+    # Lookup a sticky bucket document
+    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+        return db.find({
+          "attributeName": attributeName,
+          "attributeValue": attributeValue
+        })
+
+    def save_assignments(self, doc: Dict) -> None:
+        # Insert new record if not exists, otherwise update
+        db.upsert({
+            "attributeName": doc["attributeName"],
+            "attributeValue": doc["attributeValue"]
+        }, {
+          "$set": {
+            "assignments": doc["assignments"]
+          }
+        })
+
+# Pass in an instance of this service to your GrowthBook constructor
+
+gb = GrowthBook(
+  sticky_bucket_service = MyStickyBucketService()
+)
+```
 
 ## Inline Experiments
 
@@ -259,16 +306,16 @@ As you can see, there are 2 required parameters for experiments, a string key, a
 
 There are a number of additional settings to control the experiment behavior:
 
--   **key** (`str`) - The globally unique tracking key for the experiment
--   **variations** (`any[]`) - The different variations to choose between
--   **seed** (`str`) - Added to the user id when hashing to determine a variation. Defaults to the experiment `key`
--   **weights** (`float[]`) - How to weight traffic between variations. Must add to 1.
--   **coverage** (`float`) - What percent of users should be included in the experiment (between 0 and 1, inclusive)
--   **condition** (`dict`) - Targeting conditions
--   **force** (`int`) - All users included in the experiment will be forced into the specified variation index
--   **hashAttribute** (`string`) - What user attribute should be used to assign variations (defaults to "id")
--   **hashVersion** (`int`) - What version of our hashing algorithm to use. We recommend using the latest version `2`.
--   **namespace** (`tuple[str,float,float]`) - Used to run mutually exclusive experiments.
+- **key** (`str`) - The globally unique tracking key for the experiment
+- **variations** (`any[]`) - The different variations to choose between
+- **seed** (`str`) - Added to the user id when hashing to determine a variation. Defaults to the experiment `key`
+- **weights** (`float[]`) - How to weight traffic between variations. Must add to 1.
+- **coverage** (`float`) - What percent of users should be included in the experiment (between 0 and 1, inclusive)
+- **condition** (`dict`) - Targeting conditions
+- **force** (`int`) - All users included in the experiment will be forced into the specified variation index
+- **hashAttribute** (`string`) - What user attribute should be used to assign variations (defaults to "id")
+- **hashVersion** (`int`) - What version of our hashing algorithm to use. We recommend using the latest version `2`.
+- **namespace** (`tuple[str,float,float]`) - Used to run mutually exclusive experiments.
 
 Here's an example that uses all of them:
 

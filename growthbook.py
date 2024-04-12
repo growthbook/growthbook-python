@@ -131,6 +131,35 @@ def decrypt(encrypted_str: str, key_str: str) -> str:
     return bytestring.decode("utf-8")
 
 
+def paddedVersionString(input) -> str:
+    # If input is a number, convert to a string
+    if type(input) is int or type(input) is float:
+        input = str(input)
+
+    if not input or type(input) is not str:
+        input = "0"
+
+    # Remove build info and leading `v` if any
+    input = re.sub(r"(^v|\+.*$)", "", input)
+    # Split version into parts (both core version numbers and pre-release tags)
+    # "v1.2.3-rc.1+build123" -> ["1","2","3","rc","1"]
+    parts = re.split(r"[-.]", input)
+    # If it's SemVer without a pre-release, add `~` to the end
+    # ["1","0","0"] -> ["1","0","0","~"]
+    # "~" is the largest ASCII character, so this will make "1.0.0" greater than "1.0.0-beta" for example
+    if len(parts) == 3:
+        parts.append("~")
+    # Left pad each numeric part with spaces so string comparisons will work ("9">"10", but " 9"<"10")
+    # Then, join back together into a single string
+    return "-".join([v.rjust(5, " ") if re.match(r"^[0-9]+$", v) else v for v in parts])
+
+
+def isIn(conditionValue, attributeValue) -> bool:
+    if type(attributeValue) is list:
+        return bool(set(conditionValue) & set(attributeValue))
+    return attributeValue in conditionValue
+
+
 def evalCondition(attributes: dict, condition: dict) -> bool:
     if "$or" in condition:
         return evalOr(attributes, condition["$or"])
@@ -224,19 +253,69 @@ def elemMatch(condition, attributeValue) -> bool:
     return False
 
 
+def compare(val1, val2) -> int:
+    if (type(val1) is int or type(val1) is float) and not (type(val2) is int or type(val2) is float):
+        if (val2 is None):
+            val2 = 0
+        else:
+            val2 = float(val2)
+
+    if (type(val2) is int or type(val2) is float) and not (type(val1) is int or type(val1) is float):
+        if (val1 is None):
+            val1 = 0
+        else:
+            val1 = float(val1)
+
+    if val1 > val2:
+        return 1
+    if val1 < val2:
+        return -1
+    return 0
+
+
 def evalOperatorCondition(operator, attributeValue, conditionValue) -> bool:
     if operator == "$eq":
-        return attributeValue == conditionValue
+        try:
+            return compare(attributeValue, conditionValue) == 0
+        except Exception:
+            return False
     elif operator == "$ne":
-        return attributeValue != conditionValue
+        try:
+            return compare(attributeValue, conditionValue) != 0
+        except Exception:
+            return False
     elif operator == "$lt":
-        return attributeValue < conditionValue
+        try:
+            return compare(attributeValue, conditionValue) < 0
+        except Exception:
+            return False
     elif operator == "$lte":
-        return attributeValue <= conditionValue
+        try:
+            return compare(attributeValue, conditionValue) <= 0
+        except Exception:
+            return False
     elif operator == "$gt":
-        return attributeValue > conditionValue
+        try:
+            return compare(attributeValue, conditionValue) > 0
+        except Exception:
+            return False
     elif operator == "$gte":
-        return attributeValue >= conditionValue
+        try:
+            return compare(attributeValue, conditionValue) >= 0
+        except Exception:
+            return False
+    elif operator == "$veq":
+        return paddedVersionString(attributeValue) == paddedVersionString(conditionValue)
+    elif operator == "$vne":
+        return paddedVersionString(attributeValue) != paddedVersionString(conditionValue)
+    elif operator == "$vlt":
+        return paddedVersionString(attributeValue) < paddedVersionString(conditionValue)
+    elif operator == "$vlte":
+        return paddedVersionString(attributeValue) <= paddedVersionString(conditionValue)
+    elif operator == "$vgt":
+        return paddedVersionString(attributeValue) > paddedVersionString(conditionValue)
+    elif operator == "$vgte":
+        return paddedVersionString(attributeValue) >= paddedVersionString(conditionValue)
     elif operator == "$regex":
         try:
             r = re.compile(conditionValue)
@@ -244,9 +323,13 @@ def evalOperatorCondition(operator, attributeValue, conditionValue) -> bool:
         except Exception:
             return False
     elif operator == "$in":
-        return attributeValue in conditionValue
+        if not type(conditionValue) is list:
+            return False
+        return isIn(conditionValue, attributeValue)
     elif operator == "$nin":
-        return not (attributeValue in conditionValue)
+        if not type(conditionValue) is list:
+            return False
+        return not isIn(conditionValue, attributeValue)
     elif operator == "$elemMatch":
         return elemMatch(conditionValue, attributeValue)
     elif operator == "$size":
@@ -304,6 +387,7 @@ class Experiment(object):
         groups: list = None,
         force: int = None,
         hashAttribute: str = "id",
+        fallbackAttribute: str = None,
         hashVersion: int = None,
         ranges: List[Tuple[float, float]] = None,
         meta: List[VariationMeta] = None,
@@ -311,6 +395,10 @@ class Experiment(object):
         seed: str = None,
         name: str = None,
         phase: str = None,
+        disableStickyBucketing: bool = False,
+        bucketVersion: int = None,
+        minBucketVersion: int = None,
+        parentConditions: List[dict] = None,
     ) -> None:
         self.key = key
         self.variations = variations
@@ -328,6 +416,14 @@ class Experiment(object):
         self.seed = seed
         self.name = name
         self.phase = phase
+        self.disableStickyBucketing = disableStickyBucketing
+        self.bucketVersion = bucketVersion or 0
+        self.minBucketVersion = minBucketVersion or 0
+        self.parentConditions = parentConditions
+
+        self.fallbackAttribute = None
+        if not self.disableStickyBucketing:
+            self.fallbackAttribute = fallbackAttribute
 
         # Deprecated properties
         self.status = status
@@ -354,6 +450,18 @@ class Experiment(object):
             "name": self.name,
             "phase": self.phase,
         }
+
+        if self.fallbackAttribute:
+            obj["fallbackAttribute"] = self.fallbackAttribute
+        if self.disableStickyBucketing:
+            obj["disableStickyBucketing"] = True
+        if self.bucketVersion:
+            obj["bucketVersion"] = self.bucketVersion
+        if self.minBucketVersion:
+            obj["minBucketVersion"] = self.minBucketVersion
+        if self.parentConditions:
+            obj["parentConditions"] = self.parentConditions
+
         return obj
 
     def update(self, data: dict) -> None:
@@ -390,6 +498,7 @@ class Result(object):
         featureId: Optional[str],
         meta: VariationMeta = None,
         bucket: float = None,
+        stickyBucketUsed: bool = False,
     ) -> None:
         self.variationId = variationId
         self.inExperiment = inExperiment
@@ -399,6 +508,7 @@ class Result(object):
         self.hashValue = hashValue
         self.featureId = featureId or None
         self.bucket = bucket
+        self.stickyBucketUsed = stickyBucketUsed
 
         self.key = str(variationId)
         self.name = ""
@@ -422,6 +532,7 @@ class Result(object):
             "hashAttribute": self.hashAttribute,
             "hashValue": self.hashValue,
             "key": self.key,
+            "stickyBucketUsed": self.stickyBucketUsed,
         }
 
         if self.bucket is not None:
@@ -442,7 +553,30 @@ class Feature(object):
             if isinstance(rule, FeatureRule):
                 self.rules.append(rule)
             else:
-                self.rules.append(FeatureRule(**rule))
+                self.rules.append(FeatureRule(
+                    id=rule.get("id", None),
+                    key=rule.get("key", ""),
+                    variations=rule.get("variations", None),
+                    weights=rule.get("weights", None),
+                    coverage=rule.get("coverage", None),
+                    condition=rule.get("condition", None),
+                    namespace=rule.get("namespace", None),
+                    force=rule.get("force", None),
+                    hashAttribute=rule.get("hashAttribute", "id"),
+                    fallbackAttribute=rule.get("fallbackAttribute", None),
+                    hashVersion=rule.get("hashVersion", None),
+                    range=rule.get("range", None),
+                    ranges=rule.get("ranges", None),
+                    meta=rule.get("meta", None),
+                    filters=rule.get("filters", None),
+                    seed=rule.get("seed", None),
+                    name=rule.get("name", None),
+                    phase=rule.get("phase", None),
+                    disableStickyBucketing=rule.get("disableStickyBucketing", False),
+                    bucketVersion=rule.get("bucketVersion", None),
+                    minBucketVersion=rule.get("minBucketVersion", None),
+                    parentConditions=rule.get("parentConditions", None),
+                ))
 
     def to_dict(self) -> dict:
         return {
@@ -463,6 +597,7 @@ class FeatureRule(object):
         namespace: Tuple[str, float, float] = None,
         force=None,
         hashAttribute: str = "id",
+        fallbackAttribute: str = None,
         hashVersion: int = None,
         range: Tuple[float, float] = None,
         ranges: List[Tuple[float, float]] = None,
@@ -471,7 +606,15 @@ class FeatureRule(object):
         seed: str = None,
         name: str = None,
         phase: str = None,
+        disableStickyBucketing: bool = False,
+        bucketVersion: int = None,
+        minBucketVersion: int = None,
+        parentConditions: List[dict] = None,
     ) -> None:
+
+        if disableStickyBucketing:
+            fallbackAttribute = None
+
         self.id = id
         self.key = key
         self.variations = variations
@@ -481,6 +624,7 @@ class FeatureRule(object):
         self.namespace = namespace
         self.force = force
         self.hashAttribute = hashAttribute
+        self.fallbackAttribute = fallbackAttribute
         self.hashVersion = hashVersion or 1
         self.range = range
         self.ranges = ranges
@@ -489,6 +633,10 @@ class FeatureRule(object):
         self.seed = seed
         self.name = name
         self.phase = phase
+        self.disableStickyBucketing = disableStickyBucketing
+        self.bucketVersion = bucketVersion or 0
+        self.minBucketVersion = minBucketVersion or 0
+        self.parentConditions = parentConditions
 
     def to_dict(self) -> dict:
         data: Dict[str, Any] = {}
@@ -526,6 +674,16 @@ class FeatureRule(object):
             data["name"] = self.name
         if self.phase is not None:
             data["phase"] = self.phase
+        if self.fallbackAttribute:
+            data["fallbackAttribute"] = self.fallbackAttribute
+        if self.disableStickyBucketing:
+            data["disableStickyBucketing"] = True
+        if self.bucketVersion:
+            data["bucketVersion"] = self.bucketVersion
+        if self.minBucketVersion:
+            data["minBucketVersion"] = self.minBucketVersion
+        if self.parentConditions:
+            data["parentConditions"] = self.parentConditions
 
         return data
 
@@ -606,6 +764,43 @@ class InMemoryFeatureCache(AbstractFeatureCache):
 
     def clear(self) -> None:
         self.cache.clear()
+
+
+class AbstractStickyBucketService(ABC):
+    @abstractmethod
+    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+        pass
+
+    @abstractmethod
+    def save_assignments(self, doc: Dict) -> None:
+        pass
+
+    def get_key(self, attributeName: str, attributeValue: str) -> str:
+        return f"{attributeName}||{attributeValue}"
+
+    # By default, just loop through all attributes and call get_assignments
+    # Override this method in subclasses to perform a multi-query instead
+    def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
+        docs = {}
+        for attributeName, attributeValue in attributes.items():
+            doc = self.get_assignments(attributeName, attributeValue)
+            if doc:
+                docs[self.get_key(attributeName, attributeValue)] = doc
+        return docs
+
+
+class InMemoryStickyBucketService(AbstractStickyBucketService):
+    def __init__(self) -> None:
+        self.docs: Dict[str, Dict] = {}
+
+    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+        return self.docs.get(self.get_key(attributeName, attributeValue), None)
+
+    def save_assignments(self, doc: Dict) -> None:
+        self.docs[self.get_key(doc["attributeName"], doc["attributeValue"])] = doc
+
+    def destroy(self) -> None:
+        self.docs.clear()
 
 
 class FeatureRepository(object):
@@ -702,6 +897,8 @@ class GrowthBook(object):
         decryption_key: str = "",
         cache_ttl: int = 60,
         forced_variations: dict = {},
+        sticky_bucket_service: AbstractStickyBucketService = None,
+        sticky_bucket_identifier_attributes: List[str] = None,
         # Deprecated args
         trackingCallback=None,
         qaMode: bool = False,
@@ -718,9 +915,11 @@ class GrowthBook(object):
         self._client_key = client_key
         self._decryption_key = decryption_key
         self._cache_ttl = cache_ttl
-
-        if features:
-            self.setFeatures(features)
+        self.sticky_bucket_identifier_attributes = sticky_bucket_identifier_attributes
+        self.sticky_bucket_service = sticky_bucket_service
+        self._sticky_bucket_assignment_docs: dict = {}
+        self._using_derived_sticky_bucket_attributes = not sticky_bucket_identifier_attributes
+        self._sticky_bucket_attributes: Optional[dict] = None
 
         self._qaMode = qa_mode or qaMode
         self._trackingCallback = on_experiment_viewed or trackingCallback
@@ -734,6 +933,9 @@ class GrowthBook(object):
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Any] = set()
+
+        if features:
+            self.setFeatures(features)
 
     def load_features(self) -> None:
         if not self._client_key:
@@ -755,7 +957,11 @@ class GrowthBook(object):
             if isinstance(feature, Feature):
                 self._features[key] = feature
             else:
-                self._features[key] = Feature(**feature)
+                self._features[key] = Feature(
+                    rules=feature.get("rules", []),
+                    defaultValue=feature.get("defaultValue", None),
+                )
+        self.refresh_sticky_buckets()
 
     # @deprecated, use get_features
     def getFeatures(self) -> Dict[str, Feature]:
@@ -770,6 +976,7 @@ class GrowthBook(object):
 
     def set_attributes(self, attributes: dict) -> None:
         self._attributes = attributes
+        self.refresh_sticky_buckets()
 
     # @deprecated, use get_attributes
     def getAttributes(self) -> dict:
@@ -815,14 +1022,48 @@ class GrowthBook(object):
     def evalFeature(self, key: str) -> FeatureResult:
         return self.eval_feature(key)
 
+    def eval_prereqs(self, parentConditions: List[dict], stack: Set[str]) -> str:
+        for parentCondition in parentConditions:
+            parentRes = self._eval_feature(parentCondition.get("id", None), stack)
+
+            if parentRes.source == "cyclicPrerequisite":
+                return "cyclic"
+
+            if not evalCondition({'value': parentRes.value}, parentCondition.get("condition", None)):
+                if parentCondition.get("gate", False):
+                    return "gate"
+                return "fail"
+        return "pass"
+
     def eval_feature(self, key: str) -> FeatureResult:
+        return self._eval_feature(key, set())
+
+    def _eval_feature(self, key: str, stack: Set[str]) -> FeatureResult:
         logger.debug("Evaluating feature %s", key)
         if key not in self._features:
             logger.warning("Unknown feature %s", key)
             return FeatureResult(None, "unknownFeature")
 
+        if key in stack:
+            logger.warning("Cyclic prerequisite detected, stack: %s", stack)
+            return FeatureResult(None, "cyclicPrerequisite")
+        stack.add(key)
+
         feature = self._features[key]
         for rule in feature.rules:
+            logger.debug("Evaluating feature %s, rule %s", key, rule.to_dict())
+            if (rule.parentConditions):
+                prereq_res = self.eval_prereqs(rule.parentConditions, stack)
+                if prereq_res == "gate":
+                    logger.debug("Top-level prerequisite failed, return None, feature %s", key)
+                    return FeatureResult(None, "prerequisite")
+                if prereq_res == "cyclic":
+                    # Warning already logged in this case
+                    return FeatureResult(None, "cyclicPrerequisite")
+                if prereq_res == "fail":
+                    logger.debug("Skip rule because of failing prerequisite, feature %s", key)
+                    continue
+
             if rule.condition:
                 if not evalCondition(self._attributes, rule.condition):
                     logger.debug(
@@ -839,6 +1080,7 @@ class GrowthBook(object):
                 if not self._isIncludedInRollout(
                     rule.seed or key,
                     rule.hashAttribute,
+                    rule.fallbackAttribute,
                     rule.range,
                     rule.coverage,
                     rule.hashVersion,
@@ -862,6 +1104,7 @@ class GrowthBook(object):
                 coverage=rule.coverage,
                 weights=rule.weights,
                 hashAttribute=rule.hashAttribute,
+                fallbackAttribute=rule.fallbackAttribute,
                 namespace=rule.namespace,
                 hashVersion=rule.hashVersion,
                 meta=rule.meta,
@@ -870,6 +1113,10 @@ class GrowthBook(object):
                 phase=rule.phase,
                 seed=rule.seed,
                 filters=rule.filters,
+                condition=rule.condition,
+                disableStickyBucketing=rule.disableStickyBucketing,
+                bucketVersion=rule.bucketVersion,
+                minBucketVersion=rule.minBucketVersion,
             )
 
             result = self._run(exp, key)
@@ -900,21 +1147,36 @@ class GrowthBook(object):
     def get_all_results(self):
         return self._assigned.copy()
 
-    def _getOrigHashValue(self, attr: str = None):
-        attr = attr or "id"
-        if attr in self._attributes:
-            return self._attributes[attr] or ""
-        if attr in self._user:
-            return self._user[attr] or ""
-        return ""
+    def _getOrigHashValue(self, attr: str = None, fallbackAttr: str = None) -> Tuple[str, str]:
 
-    def _getHashValue(self, attr: str = None) -> str:
-        return str(self._getOrigHashValue(attr))
+        attr = attr or "id"
+        val = ""
+        if attr in self._attributes:
+            val = self._attributes[attr] or ""
+        elif attr in self._user:
+            val = self._user[attr] or ""
+
+        # If no match, try fallback
+        if (not val or val == "") and fallbackAttr and self.sticky_bucket_service:
+            if fallbackAttr in self._attributes:
+                val = self._attributes[fallbackAttr] or ""
+            elif fallbackAttr in self._user:
+                val = self._user[fallbackAttr] or ""
+
+            if not val or val != "":
+                attr = fallbackAttr
+
+        return (attr, val)
+
+    def _getHashValue(self, attr: str = None, fallbackAttr: str = None) -> Tuple[str, str]:
+        (attr, val) = self._getOrigHashValue(attr, fallbackAttr)
+        return (attr, str(val))
 
     def _isIncludedInRollout(
         self,
         seed: str,
         hashAttribute: str = None,
+        fallbackAttribute: str = None,
         range: Tuple[float, float] = None,
         coverage: float = None,
         hashVersion: int = None,
@@ -922,7 +1184,7 @@ class GrowthBook(object):
         if coverage is None and range is None:
             return True
 
-        hash_value = self._getHashValue(hashAttribute or "id")
+        (_, hash_value) = self._getHashValue(hashAttribute, fallbackAttribute)
         if hash_value == "":
             return False
 
@@ -939,7 +1201,7 @@ class GrowthBook(object):
 
     def _isFilteredOut(self, filters: List[Filter]) -> bool:
         for filter in filters:
-            hash_value = self._getHashValue(filter.get("attribute", "id"))
+            (_, hash_value) = self._getHashValue(filter.get("attribute", "id"))
             if hash_value == "":
                 return False
 
@@ -1023,9 +1285,9 @@ class GrowthBook(object):
         if experiment.status == "draft" or not experiment.active:
             logger.debug("Experiment %s is not active, skip", experiment.key)
             return self._getExperimentResult(experiment, featureId=featureId)
+
         # 6. Get the user hash attribute and value
-        hashAttribute = experiment.hashAttribute or "id"
-        hashValue = self._getHashValue(hashAttribute)
+        (hashAttribute, hashValue) = self._getHashValue(experiment.hashAttribute, experiment.fallbackAttribute)
         if not hashValue:
             logger.debug(
                 "Skip experiment %s because user's hashAttribute value is empty",
@@ -1033,55 +1295,90 @@ class GrowthBook(object):
             )
             return self._getExperimentResult(experiment, featureId=featureId)
 
-        # 7. Filtered out / not in namespace
-        if experiment.filters:
-            if self._isFilteredOut(experiment.filters):
-                logger.debug(
-                    "Skip experiment %s because of filters/namespaces", experiment.key
-                )
-                return self._getExperimentResult(experiment, featureId=featureId)
-        elif experiment.namespace and not inNamespace(hashValue, experiment.namespace):
-            logger.debug("Skip experiment %s because of namespace", experiment.key)
-            return self._getExperimentResult(experiment, featureId=featureId)
+        assigned = -1
 
-        # 7.5. If experiment has an include property
-        if experiment.include:
-            try:
-                if not experiment.include():
+        found_sticky_bucket = False
+        sticky_bucket_version_is_blocked = False
+        if self.sticky_bucket_service and not experiment.disableStickyBucketing:
+            sticky_bucket = self._get_sticky_bucket_variation(
+                experiment.key,
+                experiment.bucketVersion,
+                experiment.minBucketVersion,
+                experiment.meta,
+                hash_attribute=experiment.hashAttribute,
+                fallback_attribute=experiment.fallbackAttribute,
+            )
+            found_sticky_bucket = sticky_bucket.get('variation', 0) >= 0
+            assigned = sticky_bucket.get('variation', 0)
+            sticky_bucket_version_is_blocked = sticky_bucket.get('versionIsBlocked', False)
+
+        if found_sticky_bucket:
+            logger.debug("Found sticky bucket for experiment %s, assigning sticky variation %s", experiment.key, assigned)
+
+        # Some checks are not needed if we already have a sticky bucket
+        if not found_sticky_bucket:
+            # 7. Filtered out / not in namespace
+            if experiment.filters:
+                if self._isFilteredOut(experiment.filters):
                     logger.debug(
-                        "Skip experiment %s because include() returned false",
+                        "Skip experiment %s because of filters/namespaces", experiment.key
+                    )
+                    return self._getExperimentResult(experiment, featureId=featureId)
+            elif experiment.namespace and not inNamespace(hashValue, experiment.namespace):
+                logger.debug("Skip experiment %s because of namespace", experiment.key)
+                return self._getExperimentResult(experiment, featureId=featureId)
+
+            # 7.5. If experiment has an include property
+            if experiment.include:
+                try:
+                    if not experiment.include():
+                        logger.debug(
+                            "Skip experiment %s because include() returned false",
+                            experiment.key,
+                        )
+                        return self._getExperimentResult(experiment, featureId=featureId)
+                except Exception:
+                    logger.warning(
+                        "Skip experiment %s because include() raised an Exception",
                         experiment.key,
                     )
                     return self._getExperimentResult(experiment, featureId=featureId)
-            except Exception:
-                logger.warning(
-                    "Skip experiment %s because include() raised an Exception",
-                    experiment.key,
-                )
-                return self._getExperimentResult(experiment, featureId=featureId)
 
-        # 8. Exclude if condition is false
-        if experiment.condition and not evalCondition(
-            self._attributes, experiment.condition
-        ):
-            logger.debug(
-                "Skip experiment %s because user failed the condition", experiment.key
-            )
-            return self._getExperimentResult(experiment, featureId=featureId)
-
-        # 8.1. Make sure user is in a matching group
-        if experiment.groups and len(experiment.groups):
-            expGroups = self._groups or {}
-            matched = False
-            for group in experiment.groups:
-                if expGroups[group]:
-                    matched = True
-            if not matched:
+            # 8. Exclude if condition is false
+            if experiment.condition and not evalCondition(
+                self._attributes, experiment.condition
+            ):
                 logger.debug(
-                    "Skip experiment %s because user not in required group",
-                    experiment.key,
+                    "Skip experiment %s because user failed the condition", experiment.key
                 )
                 return self._getExperimentResult(experiment, featureId=featureId)
+
+            # 8.05 Exclude if parent conditions are not met
+            if (experiment.parentConditions):
+                prereq_res = self.eval_prereqs(experiment.parentConditions, set())
+                if prereq_res == "gate" or prereq_res == "fail":
+                    logger.debug("Skip experiment %s because of failing prerequisite", experiment.key)
+                    return self._getExperimentResult(experiment, featureId=featureId)
+                if prereq_res == "cyclic":
+                    logger.debug("Skip experiment %s because of cyclic prerequisite", experiment.key)
+                    return self._getExperimentResult(experiment, featureId=featureId)
+
+            # 8.1. Make sure user is in a matching group
+            if experiment.groups and len(experiment.groups):
+                expGroups = self._groups or {}
+                matched = False
+                for group in experiment.groups:
+                    if expGroups[group]:
+                        matched = True
+                if not matched:
+                    logger.debug(
+                        "Skip experiment %s because user not in required group",
+                        experiment.key,
+                    )
+                    return self._getExperimentResult(experiment, featureId=featureId)
+
+        # The following apply even when in a sticky bucket
+
         # 8.2. If experiment.url is set, see if it's valid
         if experiment.url:
             if not self._urlIsValid(experiment.url):
@@ -1092,10 +1389,6 @@ class GrowthBook(object):
                 return self._getExperimentResult(experiment, featureId=featureId)
 
         # 9. Get bucket ranges and choose variation
-        c = experiment.coverage
-        ranges = experiment.ranges or getBucketRanges(
-            len(experiment.variations), c if c is not None else 1, experiment.weights
-        )
         n = gbhash(
             experiment.seed or experiment.key, hashValue, experiment.hashVersion or 1
         )
@@ -1104,7 +1397,18 @@ class GrowthBook(object):
                 "Skip experiment %s because of invalid hashVersion", experiment.key
             )
             return self._getExperimentResult(experiment, featureId=featureId)
-        assigned = chooseVariation(n, ranges)
+
+        if not found_sticky_bucket:
+            c = experiment.coverage
+            ranges = experiment.ranges or getBucketRanges(
+                len(experiment.variations), c if c is not None else 1, experiment.weights
+            )
+            assigned = chooseVariation(n, ranges)
+
+        # Unenroll if any prior sticky buckets are blocked by version
+        if sticky_bucket_version_is_blocked:
+            logger.debug("Skip experiment %s because sticky bucket version is blocked", experiment.key)
+            return self._getExperimentResult(experiment, featureId=featureId, stickyBucketUsed=True)
 
         # 10. Return if not in experiment
         if assigned < 0:
@@ -1135,8 +1439,28 @@ class GrowthBook(object):
 
         # 13. Build the result object
         result = self._getExperimentResult(
-            experiment, assigned, True, featureId=featureId, bucket=n
+            experiment, assigned, True, featureId=featureId, bucket=n, stickyBucketUsed=found_sticky_bucket
         )
+
+        # 13.5 Persist sticky bucket
+        if self.sticky_bucket_service and not experiment.disableStickyBucketing:
+            assignment = {}
+            assignment[self._get_sticky_bucket_experiment_key(
+                experiment.key,
+                experiment.bucketVersion
+            )] = result.key
+
+            data = self._generate_sticky_bucket_assignment_doc(
+                hashAttribute,
+                hashValue,
+                assignment
+            )
+            doc = data.get("doc", None)
+            if doc and data.get('changed', False):
+                if not self._sticky_bucket_assignment_docs:
+                    self._sticky_bucket_assignment_docs = {}
+                self._sticky_bucket_assignment_docs[data.get('key')] = doc
+                self.sticky_bucket_service.save_assignments(doc)
 
         # 14. Fire the tracking callback if set
         self._track(experiment, result)
@@ -1184,9 +1508,8 @@ class GrowthBook(object):
         hashUsed: bool = False,
         featureId: str = None,
         bucket: float = None,
+        stickyBucketUsed: bool = False
     ) -> Result:
-        hashAttribute = experiment.hashAttribute or "id"
-
         inExperiment = True
         if variationId < 0 or variationId > len(experiment.variations) - 1:
             variationId = 0
@@ -1196,6 +1519,8 @@ class GrowthBook(object):
         if experiment.meta:
             meta = experiment.meta[variationId]
 
+        (hashAttribute, hashValue) = self._getOrigHashValue(experiment.hashAttribute, experiment.fallbackAttribute)
+
         return Result(
             featureId=featureId,
             inExperiment=inExperiment,
@@ -1203,7 +1528,137 @@ class GrowthBook(object):
             value=experiment.variations[variationId],
             hashUsed=hashUsed,
             hashAttribute=hashAttribute,
-            hashValue=self._getOrigHashValue(hashAttribute),
+            hashValue=hashValue,
             meta=meta,
             bucket=bucket,
+            stickyBucketUsed=stickyBucketUsed
         )
+
+    def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
+        attributes = set()
+        for key, feature in self._features.items():
+            for rule in feature.rules:
+                if rule.variations:
+                    attributes.add(rule.hashAttribute or "id")
+                    if rule.fallbackAttribute:
+                        attributes.add(rule.fallbackAttribute)
+        return list(attributes)
+
+    def _get_sticky_bucket_attributes(self) -> dict:
+        attributes: Dict[str, str] = {}
+        if self._using_derived_sticky_bucket_attributes:
+            self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes()
+
+        if not self.sticky_bucket_identifier_attributes:
+            return attributes
+
+        for attr in self.sticky_bucket_identifier_attributes:
+            _, hash_value = self._getHashValue(attr)
+            if hash_value:
+                attributes[attr] = hash_value
+        return attributes
+
+    def _get_sticky_bucket_assignments(self, attr: str = None, fallback: str = None) -> Dict[str, str]:
+        merged: Dict[str, str] = {}
+
+        _, hashValue = self._getHashValue(attr)
+        key = f"{attr}||{hashValue}"
+        if key in self._sticky_bucket_assignment_docs:
+            merged = self._sticky_bucket_assignment_docs[key].get("assignments", {})
+
+        if fallback:
+            _, hashValue = self._getHashValue(fallback)
+            key = f"{fallback}||{hashValue}"
+            if key in self._sticky_bucket_assignment_docs:
+                # Merge the fallback assignments, but don't overwrite existing ones
+                for k, v in self._sticky_bucket_assignment_docs[key].get("assignments", {}).items():
+                    if k not in merged:
+                        merged[k] = v
+
+        return merged
+
+    def _is_blocked(
+        self,
+        assignments: Dict[str, str],
+        experiment_key: str,
+        min_bucket_version: int
+    ) -> bool:
+        if min_bucket_version > 0:
+            for i in range(min_bucket_version):
+                blocked_key = self._get_sticky_bucket_experiment_key(experiment_key, i)
+                if blocked_key in assignments:
+                    return True
+        return False
+
+    def _get_sticky_bucket_variation(
+        self,
+        experiment_key: str,
+        bucket_version: int = None,
+        min_bucket_version: int = None,
+        meta: List[VariationMeta] = None,
+        hash_attribute: str = None,
+        fallback_attribute: str = None
+    ) -> dict:
+        bucket_version = bucket_version or 0
+        min_bucket_version = min_bucket_version or 0
+        meta = meta or []
+
+        id = self._get_sticky_bucket_experiment_key(experiment_key, bucket_version)
+
+        assignments = self._get_sticky_bucket_assignments(hash_attribute, fallback_attribute)
+        if self._is_blocked(assignments, experiment_key, min_bucket_version):
+            return {
+                'variation': -1,
+                'versionIsBlocked': True
+            }
+
+        variation_key = assignments.get(id, None)
+        if not variation_key:
+            return {
+                'variation': -1
+            }
+
+        # Find the key in meta
+        variation = next((i for i, v in enumerate(meta) if v.get("key") == variation_key), -1)
+        if variation < 0:
+            return {
+                'variation': -1
+            }
+
+        return {'variation': variation}
+
+    def _get_sticky_bucket_experiment_key(self, experiment_key: str, bucket_version: int = 0) -> str:
+        return experiment_key + "__" + str(bucket_version)
+
+    def refresh_sticky_buckets(self, force: bool = False) -> None:
+        if not self.sticky_bucket_service:
+            return
+
+        attributes = self._get_sticky_bucket_attributes()
+        if not force and attributes == self._sticky_bucket_attributes:
+            logger.debug("Skipping refresh of sticky bucket assignments, no changes")
+            return
+
+        self._sticky_bucket_attributes = attributes
+        self._sticky_bucket_assignment_docs = self.sticky_bucket_service.get_all_assignments(attributes)
+
+    def _generate_sticky_bucket_assignment_doc(self, attribute_name: str, attribute_value: str, assignments: dict):
+        key = attribute_name + "||" + attribute_value
+        existing_assignments = self._sticky_bucket_assignment_docs.get(key, {}).get("assignments", {})
+
+        new_assignments = {**existing_assignments, **assignments}
+
+        # Compare JSON strings to see if they have changed
+        existing_json = json.dumps(existing_assignments, sort_keys=True)
+        new_json = json.dumps(new_assignments, sort_keys=True)
+        changed = existing_json != new_json
+
+        return {
+            'key': key,
+            'doc': {
+                'attributeName': attribute_name,
+                'attributeValue': attribute_value,
+                'assignments': new_assignments
+            },
+            'changed': changed
+        }

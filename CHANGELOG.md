@@ -1,5 +1,15 @@
 # Changelog
 
+## **1.1.0** - Apr 11, 2024
+
+- Support for prerequisite feature flags
+- Optional Sticky Bucketing for experiment variation assignments
+- SemVer targeting support
+- Fixed multiple bugs and edge cases when comparing different data types
+- Fixed bugs with the $in and $nin operators
+- Now, we ignore unknown fields in feature definitions instead of throwing Exceptions
+- Support for feature rule ids (for easier debugging)
+
 ## **1.0.0** - Apr 23, 2023
 
 - Update to the official 0.4.1 GrowthBook SDK spec version

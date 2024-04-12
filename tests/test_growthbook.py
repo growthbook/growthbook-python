@@ -7,9 +7,11 @@ from growthbook import (
     GrowthBook,
     Experiment,
     Feature,
+    InMemoryStickyBucketService,
     getBucketRanges,
     gbhash,
     chooseVariation,
+    paddedVersionString,
     getQueryStringOverride,
     inNamespace,
     getEqualWeights,
@@ -32,7 +34,13 @@ def pytest_generate_tests(metafunc):
 
     for func, cases in data.items():
         key = func + "_data"
-        if key in metafunc.fixturenames:
+
+        if (func == "versionCompare"):
+            for method, cases in cases.items():
+                key = func + "_" + method + "_data"
+                if (key in metafunc.fixturenames):
+                    metafunc.parametrize(key, cases)
+        elif key in metafunc.fixturenames:
             metafunc.parametrize(key, cases)
 
 
@@ -94,6 +102,21 @@ def test_conditions(evalCondition_data):
     assert evalCondition(attributes, condition) == expected
 
 
+def test_version_lt(versionCompare_lt_data):
+    v1, v2, should_match = versionCompare_lt_data
+    assert (paddedVersionString(v1) < paddedVersionString(v2)) == should_match
+
+
+def test_version_gt(versionCompare_gt_data):
+    v1, v2, should_match = versionCompare_gt_data
+    assert (paddedVersionString(v1) > paddedVersionString(v2)) == should_match
+
+
+def test_version_eq(versionCompare_eq_data):
+    v1, v2, should_match = versionCompare_eq_data
+    assert (paddedVersionString(v1) == paddedVersionString(v2)) == should_match
+
+
 def test_decrypt(decrypt_data):
     _, encrypted, key, expected = decrypt_data
     try:
@@ -123,6 +146,35 @@ def test_run(run_data):
     assert res.inExperiment == inExperiment
     assert res.hashUsed == hashUsed
 
+    gb.destroy()
+
+
+def test_stickyBucket(stickyBucket_data):
+    _, ctx, key, expected_result, expected_docs = stickyBucket_data
+
+    # Just use the interface directly, which passes and doesn't persist anywhere
+    service = InMemoryStickyBucketService()
+    ctx['sticky_bucket_service'] = service
+
+    if 'stickyBucketIdentifierAttributes' in ctx:
+        ctx['sticky_bucket_identifier_attributes'] = ctx['stickyBucketIdentifierAttributes']
+        ctx.pop('stickyBucketIdentifierAttributes')
+
+    if 'stickyBucketAssignmentDocs' in ctx:
+        service.docs = ctx['stickyBucketAssignmentDocs']
+        ctx.pop('stickyBucketAssignmentDocs')
+
+    gb = GrowthBook(**ctx)
+    res = gb.eval_feature(key)
+
+    if not res.experimentResult:
+      assert None == expected_result
+    else:
+        assert res.experimentResult.to_dict() == expected_result
+
+    assert service.docs == expected_docs
+
+    service.destroy()
     gb.destroy()
 
 
@@ -696,3 +748,175 @@ def test_load_features(mocker):
 
     feature_repo.clear_cache()
     gb.destroy()
+
+
+def test_loose_unmarshalling(mocker):
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(200, json.dumps({
+        "features": {
+            "feature": {
+                "defaultValue": 5,
+                "rules": [
+                    {
+                        "condition": {"country": "US"},
+                        "force": 3,
+                        "hashVersion": 1,
+                        "unknown": "foo"
+                    },
+                    {
+                        "key": "my-exp",
+                        "hashVersion": 2,
+                        "variations": [0, 1],
+                        "meta": [
+                            {
+                                "key": "control",
+                                "unknown": "foo"
+                            },
+                            {
+                                "key": "variation1",
+                                "unknown": "foo"
+                            }
+                        ],
+                        "filters": [
+                            {
+                                "seed": "abc123",
+                                "ranges": [[0, 0.0001]],
+                                "hashVersion": 2,
+                                "attribute": "id",
+                                "unknown": "foo"
+                            }
+                        ]
+                    },
+                    {
+                        "unknownRuleType": "foo"
+                    }
+                ],
+                "unknown": "foo"
+            }
+        },
+        "unknown": "foo"
+    }))
+
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
+
+    assert m.call_count == 0
+
+    gb.load_features()
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+
+    assert gb.get_features()["feature"].to_dict() == {
+        "defaultValue": 5,
+        "rules": [
+            {
+                "condition": {"country": "US"},
+                "force": 3,
+                "hashVersion": 1
+            },
+            {
+                "key": "my-exp",
+                "hashVersion": 2,
+                "variations": [0, 1],
+                "meta": [
+                    {
+                        "key": "control",
+                        "unknown": "foo"
+                    },
+                    {
+                        "key": "variation1",
+                        "unknown": "foo"
+                    }
+                ],
+                "filters": [
+                    {
+                        "seed": "abc123",
+                        "ranges": [[0, 0.0001]],
+                        "hashVersion": 2,
+                        "attribute": "id",
+                        "unknown": "foo"
+                    }
+                ]
+            },
+            {
+                "hashVersion": 1
+            }
+        ]
+    }
+
+    value = gb.get_feature_value("feature", -1)
+    assert value == 5
+
+    feature_repo.clear_cache()
+    gb.destroy()
+
+
+def test_sticky_bucket_service(mocker):
+    # Start forcing everyone to variation1
+    features = {
+        "feature": {
+            "defaultValue": 5,
+            "rules": [{
+                "key": "exp",
+                "variations": [0, 1],
+                "weights": [0, 1],
+                "meta": [
+                    {"key": "control"},
+                    {"key": "variation1"}
+                ]
+            }]
+        },
+    }
+
+    service = InMemoryStickyBucketService()
+    gb = GrowthBook(
+        sticky_bucket_service=service,
+        attributes={
+            "id": "1"
+        },
+        features=features
+    )
+
+    assert gb.get_feature_value("feature", -1) == 1
+    assert service.get_assignments("id", "1") == {
+        "attributeName": "id",
+        "attributeValue": "1",
+        "assignments": {
+            "exp__0": "variation1"
+        }
+    }
+
+    logger.debug("Change weights and ensure old user still gets variation")
+    features["feature"]["rules"][0]["weights"] = [1, 0]
+    gb.set_features(features)
+    assert gb.get_feature_value("feature", -1) == 1
+
+    logger.debug("New GrowthBook instance should also get variation")
+    gb2 = GrowthBook(
+        sticky_bucket_service=service,
+        attributes={
+            "id": "1"
+        },
+        features=features
+    )
+    assert gb2.get_feature_value("feature", -1) == 1
+    gb2.destroy()
+
+    logger.debug("New users should get control")
+    gb.set_attributes({"id": "2"})
+    assert gb.get_feature_value("feature", -1) == 0
+
+    logger.debug("Bumping bucketVersion, should reset sticky buckets")
+    gb.set_attributes({"id": "1"})
+    features["feature"]["rules"][0]["bucketVersion"] = 1
+    gb.set_features(features)
+    assert gb.get_feature_value("feature", -1) == 0
+
+    assert service.get_assignments("id", "1") == {
+        "attributeName": "id",
+        "attributeValue": "1",
+        "assignments": {
+            "exp__0": "variation1",
+            "exp__1": "control"
+        }
+    }
+    gb.destroy()
+    service.destroy()

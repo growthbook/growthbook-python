@@ -47,7 +47,10 @@ clean-test: ## remove test and coverage artifacts
 	rm -fr .pytest_cache
 
 lint: ## check style with flake8
-	flake8 growthbook tests
+	flake8 growthbook.py --max-line-length=150
+
+type-check:
+	mypy growthbook.py --implicit-optional
 
 test: ## run tests quickly with the default Python
 	pytest
