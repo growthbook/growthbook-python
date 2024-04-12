@@ -1,6 +1,6 @@
 # Changelog
 
-## **1.1.0** - Apr 9, 2024
+## **1.1.0** - Apr 11, 2024
 
 - Support for prerequisite feature flags
 - Optional Sticky Bucketing for experiment variation assignments
