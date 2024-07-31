@@ -34,7 +34,7 @@ jobs:
 
       - name: Static type checking with MyPy
         run: |
-          mypy growthbook.py --implicit-optional
+          mypy growthbook/growthbook.py --implicit-optional
 
       - name: Test with pytest
         run: |
