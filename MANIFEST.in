@@ -1,5 +1,6 @@
-include growthbook.py
+include growthbook/*.py
 include setup.py
 include README.md
 include LICENSE
 include tests/*.py
+include growthbook/py.typed

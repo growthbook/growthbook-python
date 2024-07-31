@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from setuptools import setup
+from setuptools import setup, find_packages
 from os import path
 
 this_directory = path.abspath(path.dirname(__file__))
@@ -37,9 +37,11 @@ setup(
     install_requires=requirements,
     license="MIT",
     include_package_data=True,
+    packages=find_packages(),
+    package_data={"growthbook": ["py.typed"]},
     keywords='growthbook',
     py_modules=['growthbook'],
-    scripts=['growthbook.py'],
+    scripts=['growthbook/growthbook.py'],
     test_suite='tests',
     tests_require=test_requirements,
     url='https://github.com/growthbook/growthbook-python',
