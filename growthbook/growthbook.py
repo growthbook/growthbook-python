@@ -1148,20 +1148,19 @@ class GrowthBook(object):
         return self._assigned.copy()
 
     def _getOrigHashValue(self, attr: str = None, fallbackAttr: str = None) -> Tuple[str, str]:
-
         attr = attr or "id"
         val = ""
         if attr in self._attributes:
-            val = self._attributes[attr] or ""
+            val = "" if self._attributes[attr] is None else self._attributes[attr]
         elif attr in self._user:
-            val = self._user[attr] or ""
+            val = "" if self._user[attr] is None else self._user[attr]
 
         # If no match, try fallback
         if (not val or val == "") and fallbackAttr and self.sticky_bucket_service:
             if fallbackAttr in self._attributes:
-                val = self._attributes[fallbackAttr] or ""
+                val = "" if self._attributes[fallbackAttr] is None else self._attributes[fallbackAttr]
             elif fallbackAttr in self._user:
-                val = self._user[fallbackAttr] or ""
+                val = "" if self._user[fallbackAttr] is None else self._user[fallbackAttr]
 
             if not val or val != "":
                 attr = fallbackAttr
