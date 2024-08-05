@@ -22,6 +22,8 @@ else:
 from urllib.parse import urlparse, parse_qs
 from base64 import b64decode
 from time import time
+import aiohttp
+
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from urllib3 import PoolManager
@@ -828,12 +830,26 @@ class FeatureRepository(object):
                 logger.debug("Fetched features from API, stored in cache")
                 return res
         return cached
+    
+    async def load_features_async(
+        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
+    ) -> Optional[Dict]:
+        key = api_host + "::" + client_key
+
+        cached = self.cache.get(key)
+        if not cached:
+            res = await self._fetch_features_async(api_host, client_key, decryption_key)
+            if res is not None:
+                self.cache.set(key, res, ttl)
+                logger.debug("Fetched features from API, stored in cache")
+                return res
+        return cached
 
     # Perform the GET request (separate method for easy mocking)
     def _get(self, url: str):
         self.http = self.http or PoolManager()
         return self.http.request("GET", url)
-
+    
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
         try:
             r = self._get(self._get_features_url(api_host, client_key))
@@ -847,12 +863,53 @@ class FeatureRepository(object):
         except Exception:
             logger.warning("Failed to decode feature JSON from GrowthBook API")
             return None
+        
+    async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
+        try:
+            url = self._get_features_url(api_host, client_key)
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url) as response:
+                    if response.status >= 400:
+                        logger.warning("Failed to fetch features, received status code %d", response.status)
+                        return None
+                    decoded = await response.json()
+                    return decoded
+        except aiohttp.ClientError as e:
+            logger.warning(f"HTTP request failed: {e}")
+            return None
+        except Exception as e:
+            logger.warning("Failed to decode feature JSON from GrowthBook API: %s", e)
+            return None
 
     # Fetch features from the GrowthBook API
     def _fetch_features(
         self, api_host: str, client_key: str, decryption_key: str = ""
     ) -> Optional[Dict]:
         decoded = self._fetch_and_decode(api_host, client_key)
+        if not decoded:
+            return None
+
+        if "encryptedFeatures" in decoded:
+            if not decryption_key:
+                raise ValueError("Must specify decryption_key")
+            try:
+                decrypted = decrypt(decoded["encryptedFeatures"], decryption_key)
+                return json.loads(decrypted)
+            except Exception:
+                logger.warning(
+                    "Failed to decrypt features from GrowthBook API response"
+                )
+                return None
+        elif "features" in decoded:
+            return decoded["features"]
+        else:
+            logger.warning("GrowthBook API response missing features")
+            return None
+        
+    async def _fetch_features_async(
+        self, api_host: str, client_key: str, decryption_key: str = ""
+    ) -> Optional[Dict]:
+        decoded = await self._fetch_and_decode_async(api_host, client_key)
         if not decoded:
             return None
 
@@ -942,6 +999,16 @@ class GrowthBook(object):
             raise ValueError("Must specify `client_key` to refresh features")
 
         features = feature_repo.load_features(
+            self._api_host, self._client_key, self._decryption_key, self._cache_ttl
+        )
+        if features is not None:
+            self.setFeatures(features)
+
+    async def load_features_async(self) -> None:
+        if not self._client_key:
+            raise ValueError("Must specify `client_key` to refresh features")
+
+        features = await feature_repo.load_features_async(
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
         )
         if features is not None:
