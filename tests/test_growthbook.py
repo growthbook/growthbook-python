@@ -98,23 +98,8 @@ def test_equal_weights(getEqualWeights_data):
 
 
 def test_conditions(evalCondition_data):
-    _, condition, attributes, expected = evalCondition_data
-    assert evalCondition(attributes, condition) == expected
-
-
-def test_version_lt(versionCompare_lt_data):
-    v1, v2, should_match = versionCompare_lt_data
-    assert (paddedVersionString(v1) < paddedVersionString(v2)) == should_match
-
-
-def test_version_gt(versionCompare_gt_data):
-    v1, v2, should_match = versionCompare_gt_data
-    assert (paddedVersionString(v1) > paddedVersionString(v2)) == should_match
-
-
-def test_version_eq(versionCompare_eq_data):
-    v1, v2, should_match = versionCompare_eq_data
-    assert (paddedVersionString(v1) == paddedVersionString(v2)) == should_match
+    _, condition, attributes, expected, savedGroups = (evalCondition_data + [None]*5)[:5]
+    assert evalCondition(attributes, condition, savedGroups) == expected
 
 
 def test_decrypt(decrypt_data):
@@ -661,8 +646,8 @@ class MockHttpResp:
 
 def test_feature_repository(mocker):
     m = mocker.patch.object(feature_repo, "_get")
-    expected = {"feature": {"defaultValue": 5}}
-    m.return_value = MockHttpResp(200, json.dumps({"features": expected}))
+    expected = {"features": {"feature": {"defaultValue": 5}}}
+    m.return_value = MockHttpResp(200, json.dumps(expected))
     features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
 
     m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")

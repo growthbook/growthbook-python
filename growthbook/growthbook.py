@@ -162,36 +162,36 @@ def isIn(conditionValue, attributeValue) -> bool:
     return attributeValue in conditionValue
 
 
-def evalCondition(attributes: dict, condition: dict) -> bool:
+def evalCondition(attributes: dict, condition: dict, savedGroups: dict = None) -> bool:
     if "$or" in condition:
-        return evalOr(attributes, condition["$or"])
+        return evalOr(attributes, condition["$or"], savedGroups)
     if "$nor" in condition:
-        return not evalOr(attributes, condition["$nor"])
+        return not evalOr(attributes, condition["$nor"], savedGroups)
     if "$and" in condition:
-        return evalAnd(attributes, condition["$and"])
+        return evalAnd(attributes, condition["$and"], savedGroups)
     if "$not" in condition:
-        return not evalCondition(attributes, condition["$not"])
+        return not evalCondition(attributes, condition["$not"], savedGroups)
 
     for key, value in condition.items():
-        if not evalConditionValue(value, getPath(attributes, key)):
+        if not evalConditionValue(value, getPath(attributes, key), savedGroups):
             return False
 
     return True
 
 
-def evalOr(attributes, conditions) -> bool:
+def evalOr(attributes, conditions, savedGroups) -> bool:
     if len(conditions) == 0:
         return True
 
     for condition in conditions:
-        if evalCondition(attributes, condition):
+        if evalCondition(attributes, condition, savedGroups):
             return True
     return False
 
 
-def evalAnd(attributes, conditions) -> bool:
+def evalAnd(attributes, conditions, savedGroups) -> bool:
     for condition in conditions:
-        if not evalCondition(attributes, condition):
+        if not evalCondition(attributes, condition, savedGroups):
             return False
     return True
 
@@ -231,25 +231,25 @@ def getPath(attributes, path):
     return current
 
 
-def evalConditionValue(conditionValue, attributeValue) -> bool:
+def evalConditionValue(conditionValue, attributeValue, savedGroups) -> bool:
     if type(conditionValue) is dict and isOperatorObject(conditionValue):
         for key, value in conditionValue.items():
-            if not evalOperatorCondition(key, attributeValue, value):
+            if not evalOperatorCondition(key, attributeValue, value, savedGroups):
                 return False
         return True
     return conditionValue == attributeValue
 
 
-def elemMatch(condition, attributeValue) -> bool:
+def elemMatch(condition, attributeValue, savedGroups) -> bool:
     if not type(attributeValue) is list:
         return False
 
     for item in attributeValue:
         if isOperatorObject(condition):
-            if evalConditionValue(condition, item):
+            if evalConditionValue(condition, item, savedGroups):
                 return True
         else:
-            if evalCondition(item, condition):
+            if evalCondition(item, condition, savedGroups):
                 return True
 
     return False
@@ -275,7 +275,7 @@ def compare(val1, val2) -> int:
     return 0
 
 
-def evalOperatorCondition(operator, attributeValue, conditionValue) -> bool:
+def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups) -> bool:
     if operator == "$eq":
         try:
             return compare(attributeValue, conditionValue) == 0
@@ -318,6 +318,18 @@ def evalOperatorCondition(operator, attributeValue, conditionValue) -> bool:
         return paddedVersionString(attributeValue) > paddedVersionString(conditionValue)
     elif operator == "$vgte":
         return paddedVersionString(attributeValue) >= paddedVersionString(conditionValue)
+    elif operator == "$inGroup":
+        if not type(conditionValue) is str:
+            return False
+        if not conditionValue in savedGroups:
+            return False
+        return isIn(savedGroups[conditionValue] or [], attributeValue)
+    elif operator == "$notInGroup":
+        if not type(conditionValue) is str:
+            return False
+        if not conditionValue in savedGroups:
+            return True
+        return not isIn(savedGroups[conditionValue] or [], attributeValue)
     elif operator == "$regex":
         try:
             r = re.compile(conditionValue)
@@ -333,18 +345,18 @@ def evalOperatorCondition(operator, attributeValue, conditionValue) -> bool:
             return False
         return not isIn(conditionValue, attributeValue)
     elif operator == "$elemMatch":
-        return elemMatch(conditionValue, attributeValue)
+        return elemMatch(conditionValue, attributeValue, savedGroups)
     elif operator == "$size":
         if not (type(attributeValue) is list):
             return False
-        return evalConditionValue(conditionValue, len(attributeValue))
+        return evalConditionValue(conditionValue, len(attributeValue), savedGroups)
     elif operator == "$all":
         if not (type(attributeValue) is list):
             return False
         for cond in conditionValue:
             passing = False
             for attr in attributeValue:
-                if evalConditionValue(cond, attr):
+                if evalConditionValue(cond, attr, savedGroups):
                     passing = True
             if not passing:
                 return False
@@ -356,7 +368,7 @@ def evalOperatorCondition(operator, attributeValue, conditionValue) -> bool:
     elif operator == "$type":
         return getType(attributeValue) == conditionValue
     elif operator == "$not":
-        return not evalConditionValue(conditionValue, attributeValue)
+        return not evalConditionValue(conditionValue, attributeValue, savedGroups)
     return False
 
 
@@ -893,7 +905,7 @@ class FeatureRepository(object):
             if not decryption_key:
                 raise ValueError("Must specify decryption_key")
             try:
-                decrypted = decrypt(decoded["encryptedFeatures"], decryption_key)
+                decrypted = decrypt(decoded['encryptedFeatures'], decryption_key)
                 return json.loads(decrypted)
             except Exception:
                 logger.warning(
@@ -901,7 +913,7 @@ class FeatureRepository(object):
                 )
                 return None
         elif "features" in decoded:
-            return decoded["features"]
+            return decoded
         else:
             logger.warning("GrowthBook API response missing features")
             return None
@@ -917,15 +929,17 @@ class FeatureRepository(object):
             if not decryption_key:
                 raise ValueError("Must specify decryption_key")
             try:
-                decrypted = decrypt(decoded["encryptedFeatures"], decryption_key)
-                return json.loads(decrypted)
+                decryptedFeatures = decrypt(decoded["encryptedFeatures"], decryption_key)
+                decoded['features'] = json.loads(decryptedFeatures)
+                del decoded['encryptedFeatures']
+                return decoded
             except Exception:
                 logger.warning(
                     "Failed to decrypt features from GrowthBook API response"
                 )
                 return None
         elif "features" in decoded:
-            return decoded["features"]
+            return decoded
         else:
             logger.warning("GrowthBook API response missing features")
             return None
@@ -956,6 +970,7 @@ class GrowthBook(object):
         forced_variations: dict = {},
         sticky_bucket_service: AbstractStickyBucketService = None,
         sticky_bucket_identifier_attributes: List[str] = None,
+        savedGroups: dict = {},
         # Deprecated args
         trackingCallback=None,
         qaMode: bool = False,
@@ -968,6 +983,7 @@ class GrowthBook(object):
         self._attributes = attributes
         self._url = url
         self._features: Dict[str, Feature] = {}
+        self._saved_groups = savedGroups
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
@@ -998,11 +1014,14 @@ class GrowthBook(object):
         if not self._client_key:
             raise ValueError("Must specify `client_key` to refresh features")
 
-        features = feature_repo.load_features(
+        response = feature_repo.load_features(
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
         )
-        if features is not None:
-            self.setFeatures(features)
+        if response is not None and "features" in response.keys():
+            self.setFeatures(response["features"])
+
+        if response is not None and "savedGroups" in response:
+            self._saved_groups = response["savedGroups"]
 
     async def load_features_async(self) -> None:
         if not self._client_key:
@@ -1011,8 +1030,11 @@ class GrowthBook(object):
         features = await feature_repo.load_features_async(
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
         )
-        if features is not None:
-            self.setFeatures(features)
+        if features is not None and "features" in features:
+            self.setFeatures(features["features"])
+
+        if features is not None and "savedGroups" in features:
+            self._saved_groups = features["savedGroups"]
 
     # @deprecated, use set_features
     def setFeatures(self, features: dict) -> None:
@@ -1096,7 +1118,7 @@ class GrowthBook(object):
             if parentRes.source == "cyclicPrerequisite":
                 return "cyclic"
 
-            if not evalCondition({'value': parentRes.value}, parentCondition.get("condition", None)):
+            if not evalCondition({'value': parentRes.value}, parentCondition.get("condition", None), self._saved_groups):
                 if parentCondition.get("gate", False):
                     return "gate"
                 return "fail"
@@ -1132,7 +1154,7 @@ class GrowthBook(object):
                     continue
 
             if rule.condition:
-                if not evalCondition(self._attributes, rule.condition):
+                if not evalCondition(self._attributes, rule.condition, self._saved_groups):
                     logger.debug(
                         "Skip rule because of failed condition, feature %s", key
                     )
@@ -1412,7 +1434,7 @@ class GrowthBook(object):
 
             # 8. Exclude if condition is false
             if experiment.condition and not evalCondition(
-                self._attributes, experiment.condition
+                self._attributes, experiment.condition, self._saved_groups
             ):
                 logger.debug(
                     "Skip experiment %s because user failed the condition", experiment.key
