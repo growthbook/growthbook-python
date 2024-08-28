@@ -1089,14 +1089,6 @@ class FeatureRepository(object):
     def stopAutoRefresh(self):
         self.sse_client.disconnect()
 
-
-    def startAutoRefresh(self, api_host, client_key, cb):
-        self.sse_client = self.sse_client or SSEClient(api_host=api_host, client_key=client_key, on_event=cb)
-        self.sse_client.connect()
-
-    def stopAutoRefresh(self):
-        self.sse_client.disconnect()
-
     @staticmethod
     def _get_features_url(api_host: str, client_key: str) -> str:
         api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
@@ -1197,7 +1189,7 @@ class GrowthBook(object):
                 self._saved_groups = features["savedGroups"]
             feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
 
-    def features_event_handler(self, features):
+    def _features_event_handler(self, features):
         decoded = json.loads(features)
         if not decoded:
             return None
@@ -1211,13 +1203,13 @@ class GrowthBook(object):
                 self._saved_groups = data["savedGroups"]
             feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
             
-    def dispatch_sse_event(self, event_data):
+    def _dispatch_sse_event(self, event_data):
         event_type = event_data['type']
         data = event_data['data']
         if event_type == 'features-updated':
             self.load_features()
         elif event_type == 'features':
-            self.features_event_handler(data)
+            self._features_event_handler(data)
 
 
     def startAutoRefresh(self):
@@ -1227,50 +1219,7 @@ class GrowthBook(object):
         feature_repo.startAutoRefresh(
             api_host=self._api_host, 
             client_key=self._client_key,
-            cb=self.dispatch_sse_event
-        )
-
-    def stopAutoRefresh(self):
-        feature_repo.stopAutoRefresh()
-
-    def features_event_handler(self, features):
-        decoded = json.loads(features)
-        if not decoded:
-            return None
-
-        if "encryptedFeatures" in decoded:
-            if not self._decryption_key:
-                raise ValueError("Must specify decryption_key")
-            try:
-                decrypted = decrypt(decoded["encryptedFeatures"], self._decryption_key)
-                return json.loads(decrypted)
-            except Exception:
-                logger.warning(
-                    "Failed to decrypt features from GrowthBook API response"
-                )
-                return None
-        elif "features" in decoded:
-            self.set_features(decoded["features"])
-        else:
-            logger.warning("GrowthBook API response missing features")
-            
-    def dispatch_sse_event(self, event_data):
-        event_type = event_data['type']
-        data = event_data['data']
-        if event_type == 'features-updated':
-            self.load_features()
-        elif event_type == 'features':
-            self.features_event_handler(data)
-
-
-    def startAutoRefresh(self):
-        if not self._client_key:
-            raise ValueError("Must specify `client_key` to start features streaming")
-       
-        feature_repo.startAutoRefresh(
-            api_host=self._api_host, 
-            client_key=self._client_key,
-            cb=self.dispatch_sse_event
+            cb=self._dispatch_sse_event
         )
 
     def stopAutoRefresh(self):
