@@ -9,6 +9,7 @@ import re
 import sys
 import json
 from abc import ABC, abstractmethod
+import threading
 import logging
 
 from typing import Optional, Any, Set, Tuple, List, Dict
@@ -23,7 +24,9 @@ from urllib.parse import urlparse, parse_qs
 from base64 import b64decode
 from time import time
 import aiohttp
+import asyncio
 
+from aiohttp.client_exceptions import ClientConnectorError, ClientResponseError, ClientPayloadError
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from urllib3 import PoolManager
@@ -817,16 +820,147 @@ class InMemoryStickyBucketService(AbstractStickyBucketService):
         self.docs.clear()
 
 
+class SSEClient:
+    def __init__(self, api_host, client_key, on_event, reconnect_delay=5, headers=None):
+        self.api_host = api_host
+        self.client_key = client_key
+
+        self.on_event = on_event
+        self.reconnect_delay = reconnect_delay
+
+        self._sse_session = None
+        self._sse_thread = None
+        self._loop = None
+
+        self.is_running = False
+
+        self.headers = {
+            "Accept": "application/json; q=0.5, text/event-stream",
+            "Cache-Control": "no-cache",
+        }
+
+        if headers:
+            self.headers.update(headers)
+
+    def connect(self):
+        if self.is_running:
+            logger.debug("Streaming session is already running.")
+            return
+
+        self.is_running = True
+        self._sse_thread = threading.Thread(target=self._run_sse_channel)
+        self._sse_thread.start()
+
+    def disconnect(self):
+        self.is_running = False
+        if self._loop and self._loop.is_running():
+            future = asyncio.run_coroutine_threadsafe(self._stop_session(), self._loop)
+            try:
+                future.result()
+            except Exception as e:
+                logger.error(f"Streaming disconnect error: {e}")
+
+        if self._sse_thread:
+            self._sse_thread.join(timeout=5)
+
+        logger.debug("Streaming session disconnected")
+
+    def _get_sse_url(self, api_host: str, client_key: str) -> str:
+        api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
+        return f"{api_host}/sub/{client_key}"
+
+    async def _init_session(self):
+        url = self._get_sse_url(self.api_host, self.client_key)
+        
+        while self.is_running:
+            try:
+                async with aiohttp.ClientSession(headers=self.headers) as session:
+                    self._sse_session = session
+
+                    async with session.get(url) as response:
+                        response.raise_for_status()
+                        await self._process_response(response)
+            except ClientResponseError as e:
+                logger.error(f"Streaming error, closing connection: {e.status} {e.message}")
+                self.is_running = False
+                break
+            except (ClientConnectorError, ClientPayloadError) as e:
+                logger.error(f"Streaming error: {e}")
+                if not self.is_running:
+                    break
+                await self._wait_for_reconnect()
+            except TimeoutError:
+                logger.warning(f"Streaming connection timed out after {self.timeout} seconds.")
+                await self._wait_for_reconnect()
+            except asyncio.CancelledError:
+                logger.debug("Streaming was cancelled.")
+                break
+            finally:
+                await self._close_session()
+
+    async def _process_response(self, response):
+        event_data = {}
+        async for line in response.content:
+            decoded_line = line.decode('utf-8').strip()
+            if decoded_line.startswith("event:"):
+                event_data['type'] = decoded_line[len("event:"):].strip()
+            elif decoded_line.startswith("data:"):
+                event_data['data'] = event_data.get('data', '') + f"\n{decoded_line[len('data:'):].strip()}"
+            elif not decoded_line:
+                if 'type' in event_data and 'data' in event_data:
+                    self.on_event(event_data)
+                event_data = {}
+
+        if 'type' in event_data and 'data' in event_data:
+            self.on_event(event_data)
+
+    async def _wait_for_reconnect(self):
+        logger.debug(f"Attempting to reconnect streaming in {self.reconnect_delay}")
+        await asyncio.sleep(self.reconnect_delay)
+
+    async def _close_session(self):
+        if self._sse_session:
+            await self._sse_session.close()
+            logger.debug("Streaming session closed.")
+
+    def _run_sse_channel(self):
+        self._loop = asyncio.new_event_loop()
+        
+        try:
+            self._loop.run_until_complete(self._init_session())
+        except asyncio.CancelledError:
+            pass
+        finally:
+            self._loop.run_until_complete(self._loop.shutdown_asyncgens())
+            self._loop.close()
+
+    async def _stop_session(self):
+        if self._sse_session:
+            await self._sse_session.close()
+
+        if self._loop and self._loop.is_running():
+            tasks = [task for task in asyncio.all_tasks(self._loop) if not task.done()]
+            for task in tasks:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
 class FeatureRepository(object):
     def __init__(self) -> None:
         self.cache: AbstractFeatureCache = InMemoryFeatureCache()
         self.http: Optional[PoolManager] = None
+        self.sse_client: Optional[SSEClient] = None
 
     def set_cache(self, cache: AbstractFeatureCache) -> None:
         self.cache = cache
 
     def clear_cache(self):
         self.cache.clear()
+
+    def save_in_cache(self, key: str, res, ttl: int = 60):
+        self.cache.set(key, res, ttl)
 
     # Loads features with an in-memory cache in front
     def load_features(
@@ -892,6 +1026,37 @@ class FeatureRepository(object):
         except Exception as e:
             logger.warning("Failed to decode feature JSON from GrowthBook API: %s", e)
             return None
+        
+    def decrypt_response(self, data, decryption_key: str):
+        if "encryptedFeatures" in data:
+            if not decryption_key:
+                raise ValueError("Must specify decryption_key")
+            try:
+                decryptedFeatures = decrypt(data["encryptedFeatures"], decryption_key)
+                data['features'] = json.loads(decryptedFeatures)
+                del data['encryptedFeatures']
+            except Exception:
+                logger.warning(
+                    "Failed to decrypt features from GrowthBook API response"
+                )
+                return None
+        elif "features" not in data:
+            logger.warning("GrowthBook API response missing features")
+        
+        if "encryptedSavedGroups" in data:
+            if not decryption_key:
+                raise ValueError("Must specify decryption_key")
+            try:
+                decryptedFeatures = decrypt(data["encryptedSavedGroups"], decryption_key)
+                data['savedGroups'] = json.loads(decryptedFeatures)
+                del data['encryptedSavedGroups']
+                return data
+            except Exception:
+                logger.warning(
+                    "Failed to decrypt saved groups from GrowthBook API response"
+                )
+            
+        return data
 
     # Fetch features from the GrowthBook API
     def _fetch_features(
@@ -901,22 +1066,9 @@ class FeatureRepository(object):
         if not decoded:
             return None
 
-        if "encryptedFeatures" in decoded:
-            if not decryption_key:
-                raise ValueError("Must specify decryption_key")
-            try:
-                decrypted = decrypt(decoded['encryptedFeatures'], decryption_key)
-                return json.loads(decrypted)
-            except Exception:
-                logger.warning(
-                    "Failed to decrypt features from GrowthBook API response"
-                )
-                return None
-        elif "features" in decoded:
-            return decoded
-        else:
-            logger.warning("GrowthBook API response missing features")
-            return None
+        data = self.decrypt_response(decoded, decryption_key)
+
+        return data
         
     async def _fetch_features_async(
         self, api_host: str, client_key: str, decryption_key: str = ""
@@ -925,24 +1077,17 @@ class FeatureRepository(object):
         if not decoded:
             return None
 
-        if "encryptedFeatures" in decoded:
-            if not decryption_key:
-                raise ValueError("Must specify decryption_key")
-            try:
-                decryptedFeatures = decrypt(decoded["encryptedFeatures"], decryption_key)
-                decoded['features'] = json.loads(decryptedFeatures)
-                del decoded['encryptedFeatures']
-                return decoded
-            except Exception:
-                logger.warning(
-                    "Failed to decrypt features from GrowthBook API response"
-                )
-                return None
-        elif "features" in decoded:
-            return decoded
-        else:
-            logger.warning("GrowthBook API response missing features")
-            return None
+        data = self.decrypt_response(decoded, decryption_key)
+
+        return data
+
+
+    def startAutoRefresh(self, api_host, client_key, cb):
+        self.sse_client = self.sse_client or SSEClient(api_host=api_host, client_key=client_key, on_event=cb)
+        self.sse_client.connect()
+
+    def stopAutoRefresh(self):
+        self.sse_client.disconnect()
 
     @staticmethod
     def _get_features_url(api_host: str, client_key: str) -> str:
@@ -952,7 +1097,6 @@ class FeatureRepository(object):
 
 # Singleton instance
 feature_repo = FeatureRepository()
-
 
 class GrowthBook(object):
     def __init__(
@@ -971,6 +1115,7 @@ class GrowthBook(object):
         sticky_bucket_service: AbstractStickyBucketService = None,
         sticky_bucket_identifier_attributes: List[str] = None,
         savedGroups: dict = {},
+        streaming: bool = False,
         # Deprecated args
         trackingCallback=None,
         qaMode: bool = False,
@@ -997,6 +1142,8 @@ class GrowthBook(object):
         self._qaMode = qa_mode or qaMode
         self._trackingCallback = on_experiment_viewed or trackingCallback
 
+        self._streaming = streaming
+
         # Deprecated args
         self._user = user
         self._groups = groups
@@ -1009,6 +1156,10 @@ class GrowthBook(object):
 
         if features:
             self.setFeatures(features)
+
+        if self._streaming:
+            self.load_features()
+            self.startAutoRefresh()
 
     def load_features(self) -> None:
         if not self._client_key:
@@ -1030,11 +1181,49 @@ class GrowthBook(object):
         features = await feature_repo.load_features_async(
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
         )
-        if features is not None and "features" in features:
-            self.setFeatures(features["features"])
 
-        if features is not None and "savedGroups" in features:
-            self._saved_groups = features["savedGroups"]
+        if features is not None:
+            if "features" in features:
+                self.setFeatures(features["features"])
+            if "savedGroups" in features:
+                self._saved_groups = features["savedGroups"]
+            feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
+
+    def features_event_handler(self, features):
+        decoded = json.loads(features)
+        if not decoded:
+            return None
+        
+        data = feature_repo.decrypt_response(decoded, self._decryption_key)
+
+        if data is not None:
+            if "features" in data:
+                self.setFeatures(data["features"])
+            if "savedGroups" in data:
+                self._saved_groups = data["savedGroups"]
+            feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
+            
+    def dispatch_sse_event(self, event_data):
+        event_type = event_data['type']
+        data = event_data['data']
+        if event_type == 'features-updated':
+            self.load_features()
+        elif event_type == 'features':
+            self.features_event_handler(data)
+
+
+    def startAutoRefresh(self):
+        if not self._client_key:
+            raise ValueError("Must specify `client_key` to start features streaming")
+       
+        feature_repo.startAutoRefresh(
+            api_host=self._api_host, 
+            client_key=self._client_key,
+            cb=self.dispatch_sse_event
+        )
+
+    def stopAutoRefresh(self):
+        feature_repo.stopAutoRefresh()
 
     # @deprecated, use set_features
     def setFeatures(self, features: dict) -> None:

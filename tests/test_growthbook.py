@@ -707,7 +707,7 @@ def test_feature_repository_encrypted(mocker):
     )
 
     m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
-    assert features == {"feature": {"defaultValue": True}}
+    assert features == {"features": {"feature": {"defaultValue": True}}}
 
     feature_repo.clear_cache()
 
