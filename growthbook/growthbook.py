@@ -966,6 +966,9 @@ class FeatureRepository(object):
     def load_features(
         self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
     ) -> Optional[Dict]:
+        if not client_key:
+            raise ValueError("Must specify `client_key` to refresh features")
+        
         key = api_host + "::" + client_key
 
         cached = self.cache.get(key)
@@ -1083,6 +1086,8 @@ class FeatureRepository(object):
 
 
     def startAutoRefresh(self, api_host, client_key, cb):
+        if not client_key:
+            raise ValueError("Must specify `client_key` to start features streaming")
         self.sse_client = self.sse_client or SSEClient(api_host=api_host, client_key=client_key, on_event=cb)
         self.sse_client.connect()
 
@@ -1162,8 +1167,6 @@ class GrowthBook(object):
             self.startAutoRefresh()
 
     def load_features(self) -> None:
-        if not self._client_key:
-            raise ValueError("Must specify `client_key` to refresh features")
 
         response = feature_repo.load_features(
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
