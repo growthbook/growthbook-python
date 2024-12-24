@@ -13,7 +13,7 @@ import threading
 import traceback
 from datetime import datetime
 from growthbook import AbstractStickyBucketService, FeatureRepository
-import weakref
+from weakref import WeakValueDictionary
 from contextlib import asynccontextmanager
 
 @dataclass
@@ -107,31 +107,32 @@ class BackoffStrategy:
         self.current_delay = self.initial_delay
         self.attempt = 0
 
+class WeakRefWrapper:
+    """A wrapper class to allow weak references for otherwise non-weak-referenceable objects."""
+    def __init__(self, obj):
+        self.obj = obj
+
 class FeatureCache:
-    """Memory-efficient feature cache using weak references"""
+    """Thread-safe feature cache"""
     def __init__(self):
-        self._features = weakref.WeakValueDictionary()
-        self._saved_groups = weakref.WeakValueDictionary()
+        self._cache = {
+            'features': {},
+            'savedGroups': {}
+        }
         self._lock = threading.Lock()
 
     def update(self, features: Dict[str, Any], saved_groups: Dict[str, Any]) -> None:
-        """Update cache with new values"""
+        """Simple thread-safe update of cache with new API data"""
         with self._lock:
-            self._features.clear()
-            self._saved_groups.clear()
-            
-            # Store dictionaries as weak references
-            for key, value in features.items():
-                self._features[key] = value
-            for key, value in saved_groups.items():
-                self._saved_groups[key] = value
+            self._cache['features'].update(features)
+            self._cache['savedGroups'].update(saved_groups)
 
     def get_current_state(self) -> Dict[str, Any]:
         """Get current cache state"""
         with self._lock:
             return {
-                "features": dict(self._features),
-                "savedGroups": dict(self._saved_groups)
+                "features": dict(self._cache['features']),
+                "savedGroups": self._cache['savedGroups']
             }
 
 class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
@@ -149,7 +150,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._stop_event = asyncio.Event()
         self._backoff = BackoffStrategy()
         self._feature_cache = FeatureCache()
-        self._callbacks = weakref.WeakSet()  # Use WeakSet for callbacks
+        self._callbacks = []
         self._last_successful_refresh = None
         self._refresh_in_progress = asyncio.Lock()
 
@@ -160,31 +161,50 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             yield False
             return
 
-        async with self._refresh_in_progress:
-            try:
-                yield True
-                self._backoff.reset()
-                self._last_successful_refresh = datetime.now()
-            except Exception as e:
-                delay = self._backoff.next_delay()
-                print(f"Refresh failed, next attempt in {delay:.2f}s: {str(e)}")
-                traceback.print_exc()
-                raise
+        # async with self._refresh_in_progress:
+        try:
+            await self._refresh_in_progress.acquire()
+            yield True
+            self._backoff.reset()
+            self._last_successful_refresh = datetime.now()
+        except Exception as e:
+            delay = self._backoff.next_delay()
+            print(f"Refresh failed, next attempt in {delay:.2f}s: {str(e)}")
+            traceback.print_exc()
+            raise
+        finally:
+            if self._refresh_in_progress.locked():
+                self._refresh_in_progress.release()
 
-    async def _handle_feature_update(self, features_data: Dict[str, Any]) -> None:
+    async def _handle_feature_update(self, data: Dict[str, Any]) -> None:
         """Update features with memory optimization"""
+        # Directly update with new features
         self._feature_cache.update(
-            features_data.get("features", {}),
-            features_data.get("savedGroups", {})
+            data.get("features", {}),
+            data.get("savedGroups", {})
         )
-        
-        # Notify callbacks
-        current_state = self._feature_cache.get_current_state()
-        for callback in list(self._callbacks):
+
+        # Create a copy of callbacks to avoid modification during iteration
+        with self._refresh_lock:
+            callbacks = self._callbacks.copy()
+
+        for callback in callbacks:
             try:
-                await callback(current_state)
+                await callback(dict(self._feature_cache.get_current_state()))
             except Exception:
                 traceback.print_exc()
+
+    def add_callback(self, callback: Callable) -> None:
+        """Add callback to the list"""
+        with self._refresh_lock:
+            if callback not in self._callbacks:
+                self._callbacks.append(callback)
+
+    def remove_callback(self, callback: Callable) -> None:
+        """Remove callback from the list"""
+        with self._refresh_lock:
+            if callback in self._callbacks:
+                self._callbacks.remove(callback)
 
     async def _start_sse_refresh(self) -> None:
         """Start SSE-based feature refresh"""
@@ -260,10 +280,6 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                 self._backoff.reset()
         self._stop_event.clear()
 
-    def add_callback(self, callback: Callable) -> None:
-        """Add callback using weak reference"""
-        self._callbacks.add(callback)
-
     async def __aenter__(self):
         return self
 
@@ -299,7 +315,8 @@ class GrowthBookClient:
         )
         
         self._global_context = None
-        self._context_lock = threading.Lock()
+        # Change to asyncio.Lock for async operations
+        self._context_lock = asyncio.Lock()  
     
     async def initialize(self) -> bool:
         """Initialize client with features and start refresh"""
@@ -336,7 +353,7 @@ class GrowthBookClient:
             print("Warning: Received empty features data")
             return
 
-        with self._context_lock:
+        async with self._context_lock:
             if self._global_context is None:
                 # Initial creation of global context
                 self._global_context = GlobalContext(
@@ -379,12 +396,12 @@ class GrowthBookClient:
                 stack=StackContext(evaluted_features=set())
             )
 
-    def eval_feature(self, key: str, user_context: Optional[Dict[str, Any]] = None) -> Any:
-        """Evaluate a feature with proper context management"""
+    async def eval_feature(self, key: str, user_context: Optional[Dict[str, Any]] = None) -> Any:
+        """Evaluate a feature with proper async context management"""
         if self._global_context is None:
             raise RuntimeError("GrowthBook client not properly initialized")
 
-        with self._context_lock:
+        async with self._context_lock:
             context = self.create_evaluation_context(
                 UserContext(**user_context) if user_context else UserContext()
             )
@@ -392,12 +409,12 @@ class GrowthBookClient:
             context.stack.evaluted_features.add(key)
             return result["value"]
 
-    def is_on(self, key: str, user_context: Optional[Dict[str, Any]] = None) -> bool:
-        """Check if a feature is enabled with proper context management"""
+    async def is_on(self, key: str, user_context: Optional[Dict[str, Any]] = None) -> bool:
+        """Check if a feature is enabled with proper async context management"""
         if self._global_context is None:
             raise RuntimeError("GrowthBook client not properly initialized")
 
-        with self._context_lock:
+        async with self._context_lock:
             context = self.create_evaluation_context(
                 UserContext(**user_context) if user_context else UserContext()
             )
