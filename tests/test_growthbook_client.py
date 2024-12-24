@@ -144,7 +144,6 @@ async def test_concurrent_feature_updates():
     assert cache_state["savedGroups"] == {}
 
 @pytest.mark.asyncio
-@pytest.mark.skip(reason="This test is flaky and fails intermittently")
 async def test_callback_thread_safety():
     """Verify callback invocations are thread-safe"""
     repo = EnhancedFeatureRepository(
