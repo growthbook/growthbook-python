@@ -173,7 +173,6 @@ async def test_http_refresh():
         client_key="test_key"
     )
     
-    print(f"BEFORE TEST: Current cache state: {repo._feature_cache.get_current_state()}")
     # Mock responses for load_features_async
     feature_updates = [
         {"features": {"feature1": {"defaultValue": 1}}, "savedGroups": {}},
@@ -181,21 +180,183 @@ async def test_http_refresh():
     ]
     
     mock_load = AsyncMock()
-    mock_load.side_effect = [feature_updates[0], feature_updates[1], *[feature_updates[1]] * 10]  # Provide more responses
+    mock_load.side_effect = [feature_updates[0], feature_updates[1], *[feature_updates[1]] * 10]
     
-    with patch('growthbook.FeatureRepository.load_features_async', mock_load):
-        # Start HTTP refresh with a short interval for testing
-        refresh_task = asyncio.create_task(repo._start_http_refresh(interval=0.1))
-        
-        # Wait for two refresh cycles
-        await asyncio.sleep(0.3)
-        
-        # Stop the refresh
+    try:
+        with patch('growthbook.FeatureRepository.load_features_async', mock_load):
+            # Start HTTP refresh with a short interval for testing
+            refresh_task = asyncio.create_task(repo._start_http_refresh(interval=0.1))
+            
+            # Wait for two refresh cycles
+            await asyncio.sleep(0.3)
+            
+            # Verify load_features_async was called at least twice
+            assert mock_load.call_count == 3
+            
+            # Verify the latest feature state
+            cache_state = repo._feature_cache.get_current_state()
+            assert cache_state["features"]["feature1"] == {"defaultValue": 2}
+    finally:
+        # Ensure cleanup happens even if test fails
         await repo.stop_refresh()
+        # Wait a bit to ensure task is fully cleaned up
+        await asyncio.sleep(0.1)
+
+@pytest.mark.asyncio
+async def test_initialization_state_verification(mock_options, mock_features_response):
+    """Verify feature state and callback registration after initialization"""
+    callback_called = False
+    features_received = None
+
+    async def test_callback(features):
+        nonlocal callback_called, features_received
+        callback_called = True
+        features_received = features
+
+    with patch('growthbook.FeatureRepository.load_features_async') as mock_load:
+        mock_load.return_value = mock_features_response
         
-        # Verify load_features_async was called at least twice
-        assert mock_load.call_count == 3
+        client = GrowthBookClient(mock_options)
+        client._features_repository.add_callback(test_callback)
         
-        # Verify the latest feature state
-        cache_state = repo._feature_cache.get_current_state()
-        assert cache_state["features"]["feature1"] == {"defaultValue": 2}
+        success = await client.initialize()
+        await asyncio.sleep(0)
+        
+        assert success == True
+        assert callback_called == True
+        assert features_received == mock_features_response
+        assert client._global_context.features == mock_features_response["features"]
+
+@pytest.mark.asyncio
+async def test_sse_event_handling(mock_options):
+    """Test SSE event handling and reconnection logic"""
+    events = [
+        {'type': 'features', 'data': {'features': {'feature1': {'defaultValue': 1}}}},
+        {'type': 'ping', 'data': {}},  # Should be ignored
+        {'type': 'features', 'data': {'features': {'feature1': {'defaultValue': 2}}}}
+    ]
+    
+    async def mock_sse_handler(event_data):
+        """Mock the SSE event handler to directly update feature cache"""
+        if event_data['type'] == 'features':
+            await client._features_repository._handle_feature_update(event_data['data'])
+
+    with patch('growthbook.FeatureRepository.load_features_async') as mock_load:
+        mock_load.return_value = {"features": {}, "savedGroups": {}}
+        
+        # Create options with SSE strategy
+        sse_options = Options(
+            api_host=mock_options.api_host,
+            client_key=mock_options.client_key,
+            refresh_strategy=FeatureRefreshStrategy.SERVER_SENT_EVENTS
+        )
+        
+        client = GrowthBookClient(sse_options)
+        
+        try:
+            await client.initialize()
+            
+            # Simulate SSE events directly
+            for event in events:
+                if event['type'] == 'features':
+                    await client._features_repository._handle_feature_update(event['data'])
+            
+            print(f"AFTER TEST: Current cache state: {client._features_repository._feature_cache.get_current_state()}")
+            # Verify feature update happened
+            assert client._features_repository._feature_cache.get_current_state()["features"]["feature1"]["defaultValue"] == 2
+        finally:
+            # Ensure we clean up the SSE connection
+            await client.close()
+
+@pytest.mark.asyncio
+async def test_http_refresh_backoff():
+    """Test HTTP refresh backoff strategy"""
+    repo = EnhancedFeatureRepository(
+        api_host="https://test.growthbook.io",
+        client_key="test_key"
+    )
+    
+    call_times = []
+    success_time = None
+    done = asyncio.Event()
+    
+    async def mock_load(*args, **kwargs):
+        current_time = asyncio.get_event_loop().time()
+        call_times.append(current_time)
+        if len(call_times) < 3:
+            raise ConnectionError("Network error")
+        nonlocal success_time
+        if not success_time:
+            success_time = current_time
+            if len(call_times) >= 4:
+                done.set()
+        return {"features": {}, "savedGroups": {}}
+    
+    try:
+        with patch('growthbook.FeatureRepository.load_features_async', side_effect=mock_load):
+            refresh_task = asyncio.create_task(repo._start_http_refresh(interval=0.1))
+            try:
+                await asyncio.wait_for(done.wait(), timeout=3.0)
+            except asyncio.TimeoutError:
+                pass
+            
+            # Verify backoff behavior
+            backoff_delays = [call_times[i] - call_times[i-1] for i in range(1, 3)]
+            assert all(backoff_delays[i] > backoff_delays[i-1] for i in range(1, len(backoff_delays)))
+            
+            assert len(call_times) >= 4
+            first_normal_delay = call_times[3] - call_times[2]
+            assert 0.09 <= first_normal_delay <= 0.11
+    finally:
+        # Ensure cleanup happens even if test fails
+        await repo.stop_refresh()
+        # Wait a bit to ensure task is fully cleaned up
+        await asyncio.sleep(0.1)
+
+@pytest.mark.asyncio
+async def test_concurrent_initialization():
+    """Test concurrent initialization attempts"""
+    # Single response that will be updated during concurrent access
+    shared_response = {
+        "features": {
+            "test-feature": {"defaultValue": 0}
+        },
+        "savedGroups": {}
+    }
+    loading_started = asyncio.Event()
+    loading_wait = asyncio.Event()
+    load_count = 0
+
+    async def mock_load(*args, **kwargs):
+        nonlocal load_count
+        load_count += 1
+        loading_started.set()
+        await loading_wait.wait()
+        # Simulate potential race condition by modifying the response
+        shared_response["features"]["test-feature"]["defaultValue"] += 1
+        return shared_response
+
+    with patch('growthbook.FeatureRepository.load_features_async', side_effect=mock_load):
+        client = GrowthBookClient(Options(
+            api_host="https://test.growthbook.io",
+            client_key="test_key"
+        ))
+        
+        # Start concurrent initializations
+        init_tasks = [asyncio.create_task(client.initialize()) for _ in range(5)]
+        
+        # Wait for the first load attempt to start
+        await loading_started.wait()
+        await asyncio.sleep(0.1)
+        loading_wait.set()
+        
+        results = await asyncio.gather(*init_tasks, return_exceptions=True)
+        
+        # Verify:
+        # 1. All initializations eventually succeed
+        assert all(r == True for r in results)
+        # 2. Verify the number of load attempts
+        assert load_count > 1, "Should have multiple load attempts due to concurrency"
+        # 3. Verify the final state is consistent
+        final_cache = client._features_repository._feature_cache.get_current_state()
+        assert final_cache["features"]["test-feature"]["defaultValue"] == 6, "Should reflect all concurrent updates"
