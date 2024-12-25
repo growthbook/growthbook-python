@@ -233,7 +233,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         """Maintain SSE connection with automatic reconnection"""
         while not self._stop_event.is_set():
             try:
-                await self.startAutoRefresh(self.api_host, self.client_key, handler)
+                await self.startAutoRefresh(self._api_host, self._client_key, handler)
             except Exception as e:
                 if not self._stop_event.is_set():
                     delay = self._backoff.next_delay()
@@ -246,14 +246,41 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             return
 
         async def refresh_loop() -> None:
-            while not self._stop_event.is_set():
-                async with self.refresh_operation() as should_refresh:
-                    if should_refresh:
-                        response = await self.load_features_async(
-                            self._api_host, self._client_key, self._decryption_key, self._cache_ttl
-                        )
-                        await self._handle_feature_update(response)
-                    await asyncio.sleep(interval)
+            try:
+                while not self._stop_event.is_set():
+                    async with self.refresh_operation() as should_refresh:
+                        if should_refresh:
+                            try:
+                                response = await self.load_features_async(
+                                    api_host=self._api_host,
+                                    client_key=self._client_key,
+                                    decryption_key=self._decryption_key,
+                                    ttl=self._cache_ttl
+                                )
+                                await self._handle_feature_update(response)
+                                # On success, reset backoff and use normal interval
+                                self._backoff.reset()
+                                try:
+                                    await asyncio.sleep(interval)
+                                except asyncio.CancelledError:
+                                    # Allow cancellation during sleep
+                                    raise
+                            except Exception as e:
+                                # On failure, use backoff delay
+                                delay = self._backoff.next_delay()
+                                print(f"Refresh failed, next attempt in {delay:.2f}s: {str(e)}")
+                                traceback.print_exc()
+                                try:
+                                    await asyncio.sleep(delay)
+                                except asyncio.CancelledError:
+                                    # Allow cancellation during sleep
+                                    raise
+            except asyncio.CancelledError:
+                # Clean exit on cancellation
+                raise
+            finally:
+                # Ensure we're marked as stopped
+                self._stop_event.set()
 
         self._refresh_task = asyncio.create_task(refresh_loop())
 
@@ -270,11 +297,15 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         """Clean shutdown of refresh tasks"""
         self._stop_event.set()
         if self._refresh_task:
+            # Cancel the task
             self._refresh_task.cancel()
             try:
+                # Wait for it to actually finish
                 await self._refresh_task
             except asyncio.CancelledError:
                 pass
+            except Exception as e:
+                print(f"Error during refresh task cleanup: {e}")
             finally:
                 self._refresh_task = None
                 self._backoff.reset()
