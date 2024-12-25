@@ -9,3 +9,4 @@ pytest
 pytest-mock
 mypy
 types-urllib3
+aiohttp-sse-client
