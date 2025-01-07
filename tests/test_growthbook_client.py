@@ -225,7 +225,12 @@ async def test_initialization_state_verification(mock_options, mock_features_res
         assert success == True
         assert callback_called == True
         assert features_received == mock_features_response
-        assert client._global_context.features == mock_features_response["features"]
+        # Convert Feature objects to dict for comparison
+        features_dict = {
+            key: {"defaultValue": feature.defaultValue, "rules": feature.rules}
+            for key, feature in client._global_context.features.items()
+        }
+        assert features_dict == mock_features_response["features"]
 
 @pytest.mark.asyncio
 async def test_sse_event_handling(mock_options):
@@ -313,10 +318,10 @@ async def test_http_refresh_backoff():
         # Wait a bit to ensure task is fully cleaned up
         await asyncio.sleep(0.1)
 
+# @pytest.mark.skip(reason="This test is not yet implemented")
 @pytest.mark.asyncio
 async def test_concurrent_initialization():
     """Test concurrent initialization attempts"""
-    # Single response that will be updated during concurrent access
     shared_response = {
         "features": {
             "test-feature": {"defaultValue": 0}
@@ -332,7 +337,6 @@ async def test_concurrent_initialization():
         load_count += 1
         loading_started.set()
         await loading_wait.wait()
-        # Simulate potential race condition by modifying the response
         shared_response["features"]["test-feature"]["defaultValue"] += 1
         return shared_response
 
@@ -342,21 +346,32 @@ async def test_concurrent_initialization():
             client_key="test_key"
         ))
         
-        # Start concurrent initializations
-        init_tasks = [asyncio.create_task(client.initialize()) for _ in range(5)]
-        
-        # Wait for the first load attempt to start
-        await loading_started.wait()
-        await asyncio.sleep(0.1)
-        loading_wait.set()
-        
-        results = await asyncio.gather(*init_tasks, return_exceptions=True)
-        
-        # Verify:
-        # 1. All initializations eventually succeed
-        assert all(r == True for r in results)
-        # 2. Verify the number of load attempts
-        assert load_count > 1, "Should have multiple load attempts due to concurrency"
-        # 3. Verify the final state is consistent
-        final_cache = client._features_repository._feature_cache.get_current_state()
-        assert final_cache["features"]["test-feature"]["defaultValue"] == 6, "Should reflect all concurrent updates"
+        try:
+            # Start concurrent initializations
+            init_tasks = [asyncio.create_task(client.initialize()) for _ in range(5)]
+            
+            # Wait for the first load attempt to start
+            await loading_started.wait()
+            await asyncio.sleep(0.1)
+            loading_wait.set()
+            
+            results = await asyncio.gather(*init_tasks, return_exceptions=True)
+            
+            # Verify results
+            assert all(r == True for r in results)
+            assert load_count > 1
+            final_cache = client._features_repository._feature_cache.get_current_state()
+            assert final_cache["features"]["test-feature"]["defaultValue"] == 6
+        finally:
+            # Ensure proper cleanup
+            await client.close()
+            # Wait for any pending tasks to complete
+            await asyncio.sleep(0.1)
+            # Get all tasks and cancel any remaining ones
+            for task in asyncio.all_tasks():
+                if not task.done() and task != asyncio.current_task():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
