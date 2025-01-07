@@ -12,7 +12,17 @@ from datetime import datetime
 from growthbook import FeatureRepository
 from contextlib import asynccontextmanager
 from .core import eval_feature as core_eval_feature, run_experiment
-from .common_types import *
+from .common_types import (
+    Feature,
+    GlobalContext,
+    Options,
+    UserContext,
+    EvaluationContext,
+    StackContext,
+    FeatureResult,
+    FeatureRefreshStrategy,
+    Experiment
+)
 
 logger = logging.getLogger("growthbook.growthbook_client")
 
@@ -334,25 +344,39 @@ class GrowthBookClient:
             return
 
         async with self._context_lock:
+            features = {}
+
+            for key, feature in features_data.get("features", {}).items():
+                if isinstance(feature, Feature):
+                    features[key] = feature
+                else:
+                    features[key] = Feature(
+                        rules=feature.get("rules", []),
+                        defaultValue=feature.get("defaultValue", None),
+                    )
+
             if self._global_context is None:
                 # Initial creation of global context
                 self._global_context = GlobalContext(
                         options=self.options,
-                        features=features_data.get("features", {}),
+                        features=features,
                         saved_groups=features_data.get("savedGroups", {})
                 )
             else:
                 # Update existing global context
-                self._global_context.features = features_data.get("features", {})
+                self._global_context.features = features
                 self._global_context.saved_groups = features_data.get("savedGroups", {})
     
     async def close(self) -> None:
         """Clean resource cleanup"""
         if self._features_repository:
+            # Stop refresh first
             await self._features_repository.stop_refresh()
+            # Wait for any pending tasks
+            await asyncio.sleep(0.1)
         
         # Clear context to help garbage collection
-        with self._context_lock:
+        async with self._context_lock:
             self._global_context = None
 
     async def __aenter__(self):

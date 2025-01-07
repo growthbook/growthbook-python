@@ -16,13 +16,12 @@ from typing import Optional, Any, Set, Tuple, List, Dict
 from .common_types import ( EvaluationContext, 
     Experiment, 
     FeatureResult, 
+    Feature,
     GlobalContext, 
     Options, 
     Result, StackContext, 
     UserContext, 
-    AbstractStickyBucketService, 
-    VariationMeta, 
-    Filter 
+    AbstractStickyBucketService
 )
 
 # Only require typing_extensions if using Python 3.7 or earlier
@@ -61,149 +60,6 @@ def decrypt(encrypted_str: str, key_str: str) -> str:
     bytestring = unpadder.update(decrypted) + unpadder.finalize()
 
     return bytestring.decode("utf-8")
-
-class Feature(object):
-    def __init__(self, defaultValue=None, rules: list = []) -> None:
-        self.defaultValue = defaultValue
-        self.rules: List[FeatureRule] = []
-        for rule in rules:
-            if isinstance(rule, FeatureRule):
-                self.rules.append(rule)
-            else:
-                self.rules.append(FeatureRule(
-                    id=rule.get("id", None),
-                    key=rule.get("key", ""),
-                    variations=rule.get("variations", None),
-                    weights=rule.get("weights", None),
-                    coverage=rule.get("coverage", None),
-                    condition=rule.get("condition", None),
-                    namespace=rule.get("namespace", None),
-                    force=rule.get("force", None),
-                    hashAttribute=rule.get("hashAttribute", "id"),
-                    fallbackAttribute=rule.get("fallbackAttribute", None),
-                    hashVersion=rule.get("hashVersion", None),
-                    range=rule.get("range", None),
-                    ranges=rule.get("ranges", None),
-                    meta=rule.get("meta", None),
-                    filters=rule.get("filters", None),
-                    seed=rule.get("seed", None),
-                    name=rule.get("name", None),
-                    phase=rule.get("phase", None),
-                    disableStickyBucketing=rule.get("disableStickyBucketing", False),
-                    bucketVersion=rule.get("bucketVersion", None),
-                    minBucketVersion=rule.get("minBucketVersion", None),
-                    parentConditions=rule.get("parentConditions", None),
-                ))
-
-    def to_dict(self) -> dict:
-        return {
-            "defaultValue": self.defaultValue,
-            "rules": [rule.to_dict() for rule in self.rules],
-        }
-
-
-class FeatureRule(object):
-    def __init__(
-        self,
-        id: str = None,
-        key: str = "",
-        variations: list = None,
-        weights: List[float] = None,
-        coverage: int = None,
-        condition: dict = None,
-        namespace: Tuple[str, float, float] = None,
-        force=None,
-        hashAttribute: str = "id",
-        fallbackAttribute: str = None,
-        hashVersion: int = None,
-        range: Tuple[float, float] = None,
-        ranges: List[Tuple[float, float]] = None,
-        meta: List[VariationMeta] = None,
-        filters: List[Filter] = None,
-        seed: str = None,
-        name: str = None,
-        phase: str = None,
-        disableStickyBucketing: bool = False,
-        bucketVersion: int = None,
-        minBucketVersion: int = None,
-        parentConditions: List[dict] = None,
-    ) -> None:
-
-        if disableStickyBucketing:
-            fallbackAttribute = None
-
-        self.id = id
-        self.key = key
-        self.variations = variations
-        self.weights = weights
-        self.coverage = coverage
-        self.condition = condition
-        self.namespace = namespace
-        self.force = force
-        self.hashAttribute = hashAttribute
-        self.fallbackAttribute = fallbackAttribute
-        self.hashVersion = hashVersion or 1
-        self.range = range
-        self.ranges = ranges
-        self.meta = meta
-        self.filters = filters
-        self.seed = seed
-        self.name = name
-        self.phase = phase
-        self.disableStickyBucketing = disableStickyBucketing
-        self.bucketVersion = bucketVersion or 0
-        self.minBucketVersion = minBucketVersion or 0
-        self.parentConditions = parentConditions
-
-    def to_dict(self) -> dict:
-        data: Dict[str, Any] = {}
-        if self.id:
-            data["id"] = self.id
-        if self.key:
-            data["key"] = self.key
-        if self.variations is not None:
-            data["variations"] = self.variations
-        if self.weights is not None:
-            data["weights"] = self.weights
-        if self.coverage and self.coverage != 1:
-            data["coverage"] = self.coverage
-        if self.condition is not None:
-            data["condition"] = self.condition
-        if self.namespace is not None:
-            data["namespace"] = self.namespace
-        if self.force is not None:
-            data["force"] = self.force
-        if self.hashAttribute != "id":
-            data["hashAttribute"] = self.hashAttribute
-        if self.hashVersion:
-            data["hashVersion"] = self.hashVersion
-        if self.range is not None:
-            data["range"] = self.range
-        if self.ranges is not None:
-            data["ranges"] = self.ranges
-        if self.meta is not None:
-            data["meta"] = self.meta
-        if self.filters is not None:
-            data["filters"] = self.filters
-        if self.seed is not None:
-            data["seed"] = self.seed
-        if self.name is not None:
-            data["name"] = self.name
-        if self.phase is not None:
-            data["phase"] = self.phase
-        if self.fallbackAttribute:
-            data["fallbackAttribute"] = self.fallbackAttribute
-        if self.disableStickyBucketing:
-            data["disableStickyBucketing"] = True
-        if self.bucketVersion:
-            data["bucketVersion"] = self.bucketVersion
-        if self.minBucketVersion:
-            data["minBucketVersion"] = self.minBucketVersion
-        if self.parentConditions:
-            data["parentConditions"] = self.parentConditions
-
-        return data
-
 
 class AbstractFeatureCache(ABC):
     @abstractmethod
