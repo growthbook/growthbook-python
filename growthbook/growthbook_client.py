@@ -298,6 +298,13 @@ class GrowthBookClient:
             else Options()
         )
         
+        # Add sticky bucket cache
+        self._sticky_bucket_cache = {
+            'attributes': {},
+            'assignments': {}
+        }
+        self._sticky_bucket_lock = asyncio.Lock()
+        
         self._features_repository = (
             EnhancedFeatureRepository(self.options.api_host, self.options.client_key, self.options.decryption_key)
             if self.options.client_key
@@ -305,9 +312,27 @@ class GrowthBookClient:
         )
         
         self._global_context = None
-        # Change to asyncio.Lock for async operations
-        self._context_lock = asyncio.Lock()  
-    
+        self._context_lock = asyncio.Lock()
+
+    async def _refresh_sticky_buckets(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
+        """Refresh sticky bucket assignments only if attributes have changed"""
+        if not self.options.sticky_bucket_service:
+            return {}
+
+        async with self._sticky_bucket_lock:
+            # Check if we need to refresh
+            if attributes == self._sticky_bucket_cache['attributes']:
+                return self._sticky_bucket_cache['assignments']
+
+            # Get new assignments
+            assignments = self.options.sticky_bucket_service.get_all_assignments(attributes)
+            
+            # Update cache
+            self._sticky_bucket_cache['attributes'] = attributes.copy()
+            self._sticky_bucket_cache['assignments'] = assignments
+            
+            return assignments
+
     async def initialize(self) -> bool:
         """Initialize client with features and start refresh"""
         if not self._features_repository:
@@ -386,11 +411,17 @@ class GrowthBookClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
 
-    def create_evaluation_context(self, user_context: UserContext) -> EvaluationContext:
+    async def create_evaluation_context(self, user_context: UserContext) -> EvaluationContext:
         """Create evaluation context for feature evaluation"""
-        with self._context_lock:
+        async with self._context_lock:
             if self._global_context is None:
                 raise RuntimeError("GrowthBook client not properly initialized")
+                
+            # Get sticky bucket assignments if needed
+            sticky_assignments = await self._refresh_sticky_buckets(user_context.attributes)
+            
+            # update user context with sticky bucket assignments
+            user_context.sticky_bucket_assignment_docs = sticky_assignments
                 
             return EvaluationContext(
                 user=user_context,
@@ -403,7 +434,7 @@ class GrowthBookClient:
         """Evaluate a feature with proper async context management"""
 
         async with self._context_lock:
-            context = self.create_evaluation_context(
+            context = await self.create_evaluation_context(
                 UserContext(**user_context) if user_context else UserContext()
             )
             return core_eval_feature(key=key, evalContext=context)
@@ -412,7 +443,7 @@ class GrowthBookClient:
         """Check if a feature is enabled with proper async context management"""
 
         async with self._context_lock:
-            context = self.create_evaluation_context(
+            context = await self.create_evaluation_context(
                 UserContext(**user_context) if user_context else UserContext()
             )
             return core_eval_feature(key=key, evalContext=context).on
@@ -421,7 +452,7 @@ class GrowthBookClient:
         """Check if a feature is set to off with proper async context management"""
 
         async with self._context_lock:
-            context = self.create_evaluation_context(
+            context = await self.create_evaluation_context(
                 UserContext(**user_context) if user_context else UserContext()
             )
             return core_eval_feature(key=key, evalContext=context).off
@@ -429,7 +460,7 @@ class GrowthBookClient:
     async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext = None) -> Any:
 
         async with self._context_lock:
-            context = self.create_evaluation_context(
+            context = await self.create_evaluation_context(
                 UserContext(**user_context) if user_context else UserContext()
             )
             result = core_eval_feature(key=key, evalContext=context)
@@ -438,7 +469,7 @@ class GrowthBookClient:
     async def run(self, experiment: Experiment, user_context: UserContext = None) -> None:
 
         async with self._context_lock:
-            context = self.create_evaluation_context(
+            context = await self.create_evaluation_context(
                 UserContext(**user_context) if user_context else UserContext()
             )
             result = run_experiment(experiment=experiment, 
