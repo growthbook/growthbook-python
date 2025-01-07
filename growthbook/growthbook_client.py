@@ -2,65 +2,19 @@
 
 from dataclasses import dataclass, field
 import random
+import logging
 from typing import Any, Dict, List, Optional, Union, Callable
-import json
-import hashlib
-import time
-from enum import Enum
 from typing import Set
 import asyncio
 import threading
 import traceback
 from datetime import datetime
-from growthbook import AbstractStickyBucketService, FeatureRepository
-from weakref import WeakValueDictionary
+from growthbook import FeatureRepository
 from contextlib import asynccontextmanager
+from .core import eval_feature as core_eval_feature
+from .common_types import *
 
-@dataclass
-class StackContext: 
-    id: Optional[str] = None
-    evaluted_features: Set[str] = field(default_factory=set)
-
-class FeatureRefreshStrategy(Enum):
-    STALE_WHILE_REVALIDATE = 'HTTP_REFRESH'
-    SERVER_SENT_EVENTS = 'SSE'
-
-@dataclass
-class Options:
-    url: Optional[str] = None
-    api_host: Optional[str] = "https://cdn.growthbook.io"
-    client_key: Optional[str] = None
-    decryption_key: Optional[str] = None
-    cache_ttl: int = 60
-    enabled: bool = True
-    qa_mode: bool = False
-    enable_dev_mode: bool = False
-    forced_variations: Dict[str, Any] = field(default_factory=dict)
-    refresh_strategy: Optional[FeatureRefreshStrategy] = FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
-    sticky_bucket_service: AbstractStickyBucketService = None
-    sticky_bucket_identifier_attributes: List[str] = None
-    on_experiment_viewed=None
-
-@dataclass
-class UserContext:
-    user_id: Optional[str] = None
-    attributes: Dict[str, Any] = field(default_factory=dict)
-    groups: Dict[str, str] = field(default_factory=dict)
-    forced_variations: Dict[str, Any] = field(default_factory=dict)
-
-@dataclass
-class GlobalContext:
-    options: Options
-    features: Dict[str, Any] = field(default_factory=dict)
-    saved_groups: Dict[str, Any] = field(default_factory=dict)
-    forced_variations: Dict[str, Any] = field(default_factory=dict)
-
-@dataclass
-class EvaluationContext:
-    user_context: UserContext
-    global_context: GlobalContext
-    options: Options
-    stack: StackContext
+logger = logging.getLogger("growthbook.growthbook_client")
 
 class SingletonMeta(type):
     """Thread-safe implementation of Singleton pattern"""
@@ -138,9 +92,6 @@ class FeatureCache:
 class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
     def __init__(self, api_host: str, client_key: str, decryption_key: str = "", cache_ttl: int = 60):
         FeatureRepository.__init__(self)
-        print(f"creating EnhancedFeatureRepository: {self}")
-        print(f"Arguments: {api_host}, {client_key}, {decryption_key}, {cache_ttl}")
-        print(f"Parent class: {FeatureRepository.__init__}")
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
@@ -169,7 +120,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             self._last_successful_refresh = datetime.now()
         except Exception as e:
             delay = self._backoff.next_delay()
-            print(f"Refresh failed, next attempt in {delay:.2f}s: {str(e)}")
+            logger.error(f"Refresh failed, next attempt in {delay:.2f}s: {str(e)}")
             traceback.print_exc()
             raise
         finally:
@@ -237,7 +188,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             except Exception as e:
                 if not self._stop_event.is_set():
                     delay = self._backoff.next_delay()
-                    print(f"SSE connection lost, reconnecting in {delay:.2f}s: {str(e)}")
+                    logger.error(f"SSE connection lost, reconnecting in {delay:.2f}s: {str(e)}")
                     await asyncio.sleep(delay)
 
     async def _start_http_refresh(self, interval: int = 60) -> None:
@@ -268,7 +219,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                             except Exception as e:
                                 # On failure, use backoff delay
                                 delay = self._backoff.next_delay()
-                                print(f"Refresh failed, next attempt in {delay:.2f}s: {str(e)}")
+                                logger.error(f"Refresh failed, next attempt in {delay:.2f}s: {str(e)}")
                                 traceback.print_exc()
                                 try:
                                     await asyncio.sleep(delay)
@@ -305,7 +256,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             except asyncio.CancelledError:
                 pass
             except Exception as e:
-                print(f"Error during refresh task cleanup: {e}")
+                logger.error(f"Error during refresh task cleanup: {e}")
             finally:
                 self._refresh_task = None
                 self._backoff.reset()
@@ -330,9 +281,7 @@ class GrowthBookClient:
     def __init__(
         self,
         options: Optional[Union[Dict[str, Any], Options]] = None
-    ):
-        print(f"creating GrowthBookClient: {self}")
-        
+    ):  
         self.options = (
             options if isinstance(options, Options)
             else Options(**options) if options
@@ -360,7 +309,7 @@ class GrowthBookClient:
                 self.options.api_host, self.options.client_key, self.options.decryption_key, self.options.cache_ttl
             )
             if not initial_features:
-                print("Failed to load initial features")
+                logger.error("Failed to load initial features")
                 return False
 
             # Create global context with initial features
@@ -374,14 +323,14 @@ class GrowthBookClient:
             return True
             
         except Exception as e:
-            print(f"Initialization failed: {str(e)}")
+            logger.error(f"Initialization failed: {str(e)}", exc_info=True)
             traceback.print_exc()
             return False
 
     async def _feature_update_callback(self, features_data: Dict[str, Any]) -> None:
         """Handle feature updates and manage global context"""
         if not features_data:
-            print("Warning: Received empty features data")
+            logger.warning("Warning: Received empty features data")
             return
 
         async with self._context_lock:
@@ -390,8 +339,7 @@ class GrowthBookClient:
                 self._global_context = GlobalContext(
                         options=self.options,
                         features=features_data.get("features", {}),
-                        saved_groups=features_data.get("savedGroups", {}),
-                        forced_variations=self.options.forced_variations
+                        saved_groups=features_data.get("savedGroups", {})
                 )
             else:
                 # Update existing global context
@@ -421,8 +369,8 @@ class GrowthBookClient:
                 raise RuntimeError("GrowthBook client not properly initialized")
                 
             return EvaluationContext(
-                user_context=user_context,
-                global_context=self._global_context,
+                user=user_context,
+                global_ctx=self._global_context,
                 options=self.options,
                 stack=StackContext(evaluted_features=set())
             )
@@ -455,30 +403,20 @@ class GrowthBookClient:
 
     def _get_feature_result(self, key: str, context: EvaluationContext) -> Dict[str, Any]:
         """Get feature evaluation result"""
-        if not self._global_context.options.enabled:
-            return {"value": None, "on": False, "off": True, "source": "defaultValue"}
-
-        feature = self._global_context.features.get(key)
-        if not feature:
-            return {"value": None, "on": False, "off": True, "source": "unknownFeature"}
-
-        # Check forced variations from context
-        if key in context.user_context.forced_variations:
-            forced_value = context.user_context.forced_variations[key]
-            return {
-                "value": forced_value,
-                "on": bool(forced_value),
-                "off": not bool(forced_value),
-                "source": "force"
-            }
-
-        # Use default value for now until we implement full evaluation logic
-        default_value = feature.get("defaultValue")
+        
+        # Use GrowthBook instance to evaluate
+        result = core_eval_feature(
+            key=key,
+            features=context.global_ctx.features,
+            attributes=context.user.attributes,
+            saved_groups=context.global_ctx.saved_groups,
+            stack=context.stack.evaluted_features
+        )
         return {
-            "value": default_value,
-            "on": bool(default_value),
-            "off": not bool(default_value),
-            "source": "defaultValue"
+            "value": result.value,
+            "on": result.on,
+            "off": result.off,
+            "source": result.source
         }
 
     async def close(self) -> None:
