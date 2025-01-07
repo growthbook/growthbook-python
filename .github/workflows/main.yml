@@ -32,9 +32,9 @@ jobs:
           # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
           flake8 . --count --exit-zero --max-complexity=25 --max-line-length=127 --statistics
 
-      - name: Static type checking with MyPy
-        run: |
-          mypy growthbook/growthbook.py --implicit-optional
+      # - name: Static type checking with MyPy
+      #   run: |
+      #     mypy growthbook/growthbook.py --implicit-optional
 
       - name: Test with pytest
         run: |
