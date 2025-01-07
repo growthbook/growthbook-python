@@ -269,7 +269,6 @@ class Feature(object):
             "rules": [rule.to_dict() for rule in self.rules],
         }
 
-
 class FeatureRule(object):
     def __init__(
         self,
@@ -427,13 +426,13 @@ class UserContext:
     groups: Dict[str, str] = field(default_factory=dict)
     forced_variations: Dict[str, Any] = field(default_factory=dict)
     overrides: Dict[str, Any] = field(default_factory=dict)
+    sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class GlobalContext:
     options: Options
     features: Dict[str, Any] = field(default_factory=dict)
     saved_groups: Dict[str, Any] = field(default_factory=dict)
-    sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class EvaluationContext:

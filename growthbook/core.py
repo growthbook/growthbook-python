@@ -540,16 +540,16 @@ def _get_sticky_bucket_assignments(attr: str = None, fallback: str = None,
     # Search for docs stored for attribute(id)
     _, hashValue = _getHashValue(attr=attr, eval_context=evalContext)
     key = f"{attr}||{hashValue}"
-    if key in evalContext.global_ctx.sticky_bucket_assignment_docs:
-        merged = evalContext.global_ctx.sticky_bucket_assignment_docs[key].get("assignments", {})
+    if key in evalContext.user.sticky_bucket_assignment_docs:
+        merged = evalContext.user.sticky_bucket_assignment_docs[key].get("assignments", {})
 
     # Search for docs stored for fallback attribute
     if fallback:
         _, hashValue = _getHashValue(fallbackAttr=fallback, eval_context=evalContext)
         key = f"{fallback}||{hashValue}"
-        if key in evalContext.global_ctx.sticky_bucket_assignment_docs:
+        if key in evalContext.user.sticky_bucket_assignment_docs:
             # Merge the fallback assignments, but don't overwrite existing ones
-            for k, v in evalContext.global_ctx.sticky_bucket_assignment_docs[key].get("assignments", {}).items():
+            for k, v in evalContext.user.sticky_bucket_assignment_docs[key].get("assignments", {}).items():
                 if k not in merged:
                     merged[k] = v
 
@@ -825,9 +825,9 @@ def run_experiment(experiment: Experiment,
         )
         doc = data.get("doc", None)
         if doc and data.get('changed', False):
-            if not evalContext.global_ctx.sticky_bucket_assignment_docs:
-                evalContext.global_ctx.sticky_bucket_assignment_docs = {}
-            evalContext.global_ctx.sticky_bucket_assignment_docs[data.get('key')] = doc
+            if not evalContext.user.sticky_bucket_assignment_docs:
+                evalContext.user.sticky_bucket_assignment_docs = {}
+            evalContext.user.sticky_bucket_assignment_docs[data.get('key')] = doc
             evalContext.global_ctx.options.sticky_bucket_service.save_assignments(doc)
 
     # 14. Fire the tracking callback if set
@@ -840,7 +840,7 @@ def run_experiment(experiment: Experiment,
 
 def _generate_sticky_bucket_assignment_doc(attribute_name: str, attribute_value: str, assignments: dict, evalContext: EvaluationContext):
     key = attribute_name + "||" + attribute_value
-    existing_assignments = evalContext.global_ctx.sticky_bucket_assignment_docs.get(key, {}).get("assignments", {})
+    existing_assignments = evalContext.user.sticky_bucket_assignment_docs.get(key, {}).get("assignments", {})
 
     new_assignments = {**existing_assignments, **assignments}
 
