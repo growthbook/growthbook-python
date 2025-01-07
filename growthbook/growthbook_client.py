@@ -11,7 +11,7 @@ import traceback
 from datetime import datetime
 from growthbook import FeatureRepository
 from contextlib import asynccontextmanager
-from .core import eval_feature as core_eval_feature
+from .core import eval_feature as core_eval_feature, run_experiment
 from .common_types import *
 
 logger = logging.getLogger("growthbook.growthbook_client")
@@ -375,50 +375,55 @@ class GrowthBookClient:
                 stack=StackContext(evaluted_features=set())
             )
 
-    async def eval_feature(self, key: str, user_context: Optional[Dict[str, Any]] = None) -> Any:
+    async def eval_feature(self, key: str, user_context: UserContext = None) -> FeatureResult:
         """Evaluate a feature with proper async context management"""
-        if self._global_context is None:
-            raise RuntimeError("GrowthBook client not properly initialized")
 
         async with self._context_lock:
             context = self.create_evaluation_context(
                 UserContext(**user_context) if user_context else UserContext()
             )
-            result = self._get_feature_result(key, context)
-            context.stack.evaluted_features.add(key)
-            return result["value"]
+            return core_eval_feature(key=key, evalContext=context)
 
-    async def is_on(self, key: str, user_context: Optional[Dict[str, Any]] = None) -> bool:
+    async def is_on(self, key: str, user_context: UserContext = None) -> bool:
         """Check if a feature is enabled with proper async context management"""
-        if self._global_context is None:
-            raise RuntimeError("GrowthBook client not properly initialized")
 
         async with self._context_lock:
             context = self.create_evaluation_context(
                 UserContext(**user_context) if user_context else UserContext()
             )
-            result = self._get_feature_result(key, context)
-            context.stack.evaluted_features.add(key)
-            return result["on"]
+            return core_eval_feature(key=key, evalContext=context).on
+    
+    async def is_off(self, key: str, user_context: UserContext = None) -> bool:
+        """Check if a feature is set to off with proper async context management"""
 
-    def _get_feature_result(self, key: str, context: EvaluationContext) -> Dict[str, Any]:
-        """Get feature evaluation result"""
+        async with self._context_lock:
+            context = self.create_evaluation_context(
+                UserContext(**user_context) if user_context else UserContext()
+            )
+            return core_eval_feature(key=key, evalContext=context).off
+    
+    async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext = None) -> Any:
+
+        async with self._context_lock:
+            context = self.create_evaluation_context(
+                UserContext(**user_context) if user_context else UserContext()
+            )
+            result = core_eval_feature(key=key, evalContext=context)
+            return result.value if result.value is not None else fallback
+
+    async def run(self, experiment: Experiment, user_context: UserContext = None) -> None:
+
+        async with self._context_lock:
+            context = self.create_evaluation_context(
+                UserContext(**user_context) if user_context else UserContext()
+            )
+            result = run_experiment(experiment=experiment, 
+                                evalContext=context,
+                                tracking_cb=None
+                                )
+            # self._fireSubscriptions(experiment, result)
+            return result
         
-        # Use GrowthBook instance to evaluate
-        result = core_eval_feature(
-            key=key,
-            features=context.global_ctx.features,
-            attributes=context.user.attributes,
-            saved_groups=context.global_ctx.saved_groups,
-            stack=context.stack.evaluted_features
-        )
-        return {
-            "value": result.value,
-            "on": result.on,
-            "off": result.off,
-            "source": result.source
-        }
-
     async def close(self) -> None:
         """Clean shutdown"""
         if self._features_repository:
