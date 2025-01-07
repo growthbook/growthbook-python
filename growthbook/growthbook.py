@@ -21,7 +21,8 @@ from .common_types import ( EvaluationContext,
     Options, 
     Result, StackContext, 
     UserContext, 
-    AbstractStickyBucketService
+    AbstractStickyBucketService,
+    FeatureRule
 )
 
 # Only require typing_extensions if using Python 3.7 or earlier
@@ -470,7 +471,8 @@ class GrowthBook(object):
                 qa_mode=self._qaMode
             ),
             features={},
-            saved_groups=self._saved_groups
+            saved_groups=self._saved_groups,
+            sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs
         )       
         # Create a user context for the current user
         self._user_ctx: UserContext = UserContext(
@@ -478,8 +480,7 @@ class GrowthBook(object):
             attributes=self._attributes,
             groups=self._groups,
             forced_variations=self._forcedVariations,
-            overrides=self._overrides,
-            sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs
+            overrides=self._overrides
         )
 
         if features:
@@ -742,4 +743,4 @@ class GrowthBook(object):
         self._sticky_bucket_attributes = attributes
         self._sticky_bucket_assignment_docs = self.sticky_bucket_service.get_all_assignments(attributes)
         # Update the user context with the new sticky bucket assignment docs
-        self._user_ctx.sticky_bucket_assignment_docs = self._sticky_bucket_assignment_docs
+        self._global_ctx.sticky_bucket_assignment_docs = self._sticky_bucket_assignment_docs
