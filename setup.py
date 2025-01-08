@@ -7,7 +7,12 @@ this_directory = path.abspath(path.dirname(__file__))
 with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
 
-requirements = ['cryptography', 'typing_extensions', 'urllib3', ]
+requirements = [
+    'cryptography', 
+    'typing_extensions', 
+    'urllib3',
+    'dataclasses;python_version<"3.7"',  # Add dataclasses backport for Python 3.6
+]
 
 test_requirements = [
     'pytest>=3',

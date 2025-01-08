@@ -23,6 +23,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements_dev.txt
           pip install -r requirements.txt
+          pip install 'dataclasses;python_version<"3.7"'  # Add dataclasses backport for Python 3.6
           python -m pip install .
 
       - name: Lint with flake8
