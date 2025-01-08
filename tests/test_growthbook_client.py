@@ -4,7 +4,10 @@ try:
     from unittest.mock import AsyncMock
 except ImportError:
     # For Python 3.7 compatibility
-    from mock import AsyncMock
+    from unittest.mock import MagicMock
+    class AsyncMock(MagicMock):
+        async def __call__(self, *args, **kwargs):
+            return super(AsyncMock, self).__call__(*args, **kwargs)
 
 import pytest
 import asyncio
