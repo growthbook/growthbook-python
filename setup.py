@@ -12,10 +12,14 @@ requirements = [
     'typing_extensions', 
     'urllib3',
     'dataclasses;python_version<"3.7"',  # Add dataclasses backport for Python 3.6
+    'async-generator;python_version<"3.7"',  # For asynccontextmanager in Python 3.6
+    'aiohttp>=3.6.0',  # For async HTTP support
+    'importlib-metadata;python_version<"3.8"',  # For metadata in Python 3.6-3.7
 ]
 
 test_requirements = [
     'pytest>=3',
+    'pytest-asyncio>=0.10.0',
     'mock;python_version<"3.8"',  # Only install mock for Python < 3.8
 ]
 
