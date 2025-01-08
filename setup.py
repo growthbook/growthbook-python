@@ -9,7 +9,10 @@ with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
 
 requirements = ['cryptography', 'typing_extensions', 'urllib3', ]
 
-test_requirements = ['pytest>=3', ]
+test_requirements = [
+    'pytest>=3',
+    'mock;python_version<"3.8"',  # Only install mock for Python < 3.8
+]
 
 setup(
     name='growthbook',

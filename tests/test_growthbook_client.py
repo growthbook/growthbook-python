@@ -1,5 +1,11 @@
 from datetime import datetime 
-from unittest.mock import patch, AsyncMock
+from unittest.mock import patch
+try:
+    from unittest.mock import AsyncMock
+except ImportError:
+    # For Python 3.7 compatibility
+    from mock import AsyncMock
+
 import pytest
 import asyncio
 import os
