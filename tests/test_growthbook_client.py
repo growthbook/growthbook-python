@@ -1,5 +1,7 @@
 from datetime import datetime 
 from unittest.mock import patch
+
+
 try:
     from unittest.mock import AsyncMock
 except ImportError:
@@ -12,13 +14,14 @@ except ImportError:
 import pytest
 import asyncio
 import os
+import json
+
+from growthbook.common_types import Experiment, Options
 from growthbook.growthbook_client import (
     GrowthBookClient, 
-    Options, 
-    UserContext, 
+    UserContext,
     FeatureRefreshStrategy,
-    EnhancedFeatureRepository,
-    WeakRefWrapper
+    EnhancedFeatureRepository
 )
 
 @pytest.fixture
@@ -56,6 +59,14 @@ def mock_sse_data():
             }
         }
     }
+
+@pytest.fixture(autouse=True)
+async def cleanup_singleton():
+    """Clean up singleton instance between tests"""
+    yield
+    # Clear singleton instances after each test
+    EnhancedFeatureRepository._instances = {}
+    await asyncio.sleep(0.1)  # Allow tasks to clean up
 
 @pytest.mark.asyncio
 async def test_initialization_for_failure(mock_options):
@@ -384,3 +395,194 @@ async def test_concurrent_initialization():
                         await task
                     except asyncio.CancelledError:
                         pass
+
+def pytest_generate_tests(metafunc):
+    """Generate test cases from cases.json"""
+    # Skip if the test doesn't need case data
+    if not any(x.endswith('_data') for x in metafunc.fixturenames):
+        return
+
+    folder = os.path.abspath(os.path.dirname(__file__))
+    jsonfile = os.path.join(folder, "cases.json")
+    with open(jsonfile) as file:
+        data = json.load(file)
+
+    # Map test functions to their data
+    test_data_map = {
+        'test_eval_feature': 'feature',
+        'test_experiment_run': 'run'
+    }
+
+    for func, data_key in test_data_map.items():
+        fixture_name = f"{func}_data"
+        if fixture_name in metafunc.fixturenames:
+            metafunc.parametrize(fixture_name, data.get(data_key, []))
+
+@pytest.mark.asyncio
+async def test_eval_feature(test_eval_feature_data):
+    """Test feature evaluation similar to test_feature in test_growthbook.py"""
+    _, ctx, key, expected = test_eval_feature_data
+   
+    # Separate client options from user context
+    user_attrs = {
+        "attributes": ctx.get("attributes", {}),
+        "url": ctx.get("url", ""),
+        "groups": ctx.get("groups", {}),
+        "forced_variations": ctx.get("forcedVariations", {})
+    }
+    
+    # Simple client options
+    client_opts = {
+        'api_host': "https://localhost.growthbook.io",
+        'client_key': "test-key",
+        'enabled':  ctx.get("enabled", True),
+        'qa_mode': ctx.get("qaMode", False)
+    }
+
+    # Create features data structure
+    features_data = {
+        "features": ctx.get("features", {}),
+        "savedGroups": ctx.get("savedGroups", {})
+    }
+
+    # Clear any existing singleton instances
+    EnhancedFeatureRepository._instances = {}
+    
+    try:
+        # Set up mocks for both FeatureRepository and EnhancedFeatureRepository
+        with patch('growthbook.FeatureRepository.load_features_async', 
+                  new_callable=AsyncMock, return_value=features_data), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+                  new_callable=AsyncMock), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+                  new_callable=AsyncMock):
+            
+            # Create and initialize client
+            async with GrowthBookClient(Options(**client_opts)) as client:
+                # Evaluate feature
+                result = await client.eval_feature(key, UserContext(**user_attrs))
+                
+                # Convert experiment to dict if present
+                if "experiment" in expected:
+                    expected["experiment"] = Experiment(**expected["experiment"]).to_dict()
+                
+                # Verify result
+                assert result.to_dict() == expected
+        
+    except Exception as e:
+        print(f"Error during test execution: {str(e)}")
+        raise
+    finally:
+        # Ensure cleanup happens even if test fails
+        await client.close()
+        await asyncio.sleep(0.1)
+
+@pytest.mark.asyncio
+async def test_experiment_run(test_experiment_run_data):
+    """Test experiment running similar to test_run in test_growthbook.py"""
+    _, ctx, exp, value, inExperiment, hashUsed = test_experiment_run_data
+    
+    # Extract user-specific attributes
+    user_attrs = {
+        "attributes": ctx.get("attributes", {}),
+        "url": ctx.get("url", ""),
+        "groups": ctx.get("groups", {}),
+        "forced_variations": ctx.get("forcedVariations", {})
+    }
+    
+    # Simple client options
+    client_opts = {
+        'api_host': "https://localhost.growthbook.io",
+        'client_key': "test-key",
+        'enabled':  ctx.get("enabled", True),
+        'qa_mode': ctx.get("qaMode", False)
+    }
+
+    # Create features data structure
+    features_data = {
+        "features": ctx.get("features", {}),
+        "savedGroups": ctx.get("savedGroups", {})
+    }
+
+    # Clear any existing singleton instances
+    EnhancedFeatureRepository._instances = {}
+    
+    try:
+        # Set up mocks for both FeatureRepository and EnhancedFeatureRepository
+        with patch('growthbook.FeatureRepository.load_features_async', 
+                  new_callable=AsyncMock, return_value=features_data), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+                  new_callable=AsyncMock), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+                  new_callable=AsyncMock):
+            
+            # Create and initialize client
+            async with GrowthBookClient(Options(**client_opts)) as client:
+                result = await client.run(Experiment(**exp), UserContext(**user_attrs))
+            
+                # Verify experiment results
+                assert result.value == value
+                assert result.inExperiment == inExperiment
+                assert result.hashUsed == hashUsed
+    except Exception as e:
+        print(f"Error during test execution: {str(e)}")
+        raise
+    finally:
+        await client.close()
+        await asyncio.sleep(0.1)
+
+@pytest.mark.asyncio
+async def test_feature_methods():
+    """Test feature helper methods (isOn, isOff, getFeatureValue)"""
+    features_data = {
+        "features": {
+            "featureOn": {"defaultValue": 12},
+            "featureNone": {"defaultValue": None},
+            "featureOff": {"defaultValue": 0}
+        },
+        "savedGroups": {}
+    }
+    
+    # Simple client options
+    client_opts = {
+        'api_host': "https://localhost.growthbook.io",
+        'client_key': "test-key",
+        'enabled': True
+    }
+
+    # Clear any existing singleton instances
+    EnhancedFeatureRepository._instances = {}
+    user_context = UserContext(attributes={"id": "user-1"})
+
+    try:
+        # Set up mocks for both FeatureRepository and EnhancedFeatureRepository
+        with patch('growthbook.FeatureRepository.load_features_async', 
+                  new_callable=AsyncMock, return_value=features_data), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+                  new_callable=AsyncMock), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+                  new_callable=AsyncMock):
+            
+            # Create and initialize client
+            async with GrowthBookClient(Options(**client_opts)) as client:
+                # Test isOn
+                assert await client.is_on("featureOn", user_context) is True
+                assert await client.is_on("featureOff", user_context) is False
+                assert await client.is_on("featureNone", user_context) is False
+
+                # Test isOff
+                assert await client.is_off("featureOn", user_context) is False
+                assert await client.is_off("featureOff", user_context) is True
+                assert await client.is_off("featureNone", user_context) is True
+
+                # Test getFeatureValue
+                assert await client.get_feature_value("featureOn", 15, user_context) == 12
+                assert await client.get_feature_value("featureOff", 10, user_context) == 0
+                assert await client.get_feature_value("featureNone", 10, user_context) == 10
+                assert await client.get_feature_value("nonexistent", "default", user_context) == "default"
+    except Exception as e:
+        print(f"Error during test execution: {str(e)}")
+        raise
+    finally:
+        await client.close()
+        await asyncio.sleep(0.1)
