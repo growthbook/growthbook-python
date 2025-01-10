@@ -3,7 +3,7 @@
 from dataclasses import dataclass, field
 import random
 import logging
-from typing import Any, Dict, List, Optional, Union, Callable
+from typing import Any, Dict, List, Optional, Union, Callable, Awaitable
 from typing import Set
 import asyncio
 import threading
@@ -21,6 +21,7 @@ from .common_types import (
     Feature,
     GlobalContext,
     Options,
+    Result,
     UserContext,
     EvaluationContext,
     StackContext,
@@ -303,6 +304,14 @@ class GrowthBookClient:
             else Options()
         )
         
+        # Thread-safe tracking state
+        self._tracked: Dict[str, bool] = {}  # Access only within async context
+        self._tracked_lock = threading.Lock()
+        
+        # Thread-safe subscription management
+        self._subscriptions: Set[Callable[[Experiment, Result], None]] = set()
+        self._subscriptions_lock = threading.Lock()
+
         # Add sticky bucket cache
         self._sticky_bucket_cache = {
             'attributes': {},
@@ -318,6 +327,47 @@ class GrowthBookClient:
         
         self._global_context = None
         self._context_lock = asyncio.Lock()
+
+    def _track(self, experiment: Experiment, result: Result) -> None:
+        """Thread-safe tracking implementation"""
+        if not self.options.on_experiment_viewed:
+            return
+
+        # Create unique key for this tracking event
+        key = (
+            result.hashAttribute
+            + str(result.hashValue)
+            + experiment.key
+            + str(result.variationId)
+        )
+
+        with self._tracked_lock:
+            if not self._tracked.get(key):
+                try:
+                    self.options.on_experiment_viewed(experiment=experiment, result=result)
+                    self._tracked[key] = True
+                except Exception:
+                    logger.exception("Error in tracking callback")
+
+    def subscribe(self, callback: Callable[[Experiment, Result], None]) -> Callable[[], None]:
+        """Thread-safe subscription management"""
+        with self._subscriptions_lock:
+            self._subscriptions.add(callback)
+            def unsubscribe():
+                with self._subscriptions_lock:
+                    self._subscriptions.discard(callback)
+            return unsubscribe
+
+    def _fire_subscriptions(self, experiment: Experiment, result: Result) -> None:
+        """Thread-safe subscription notifications"""
+        with self._subscriptions_lock:
+            subscriptions = self._subscriptions.copy()
+
+        for callback in subscriptions:
+            try:
+                callback(experiment, result)
+            except Exception:
+                logger.exception("Error in subscription callback")
 
     async def _refresh_sticky_buckets(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
         """Refresh sticky bucket assignments only if attributes have changed"""
@@ -459,17 +509,30 @@ class GrowthBookClient:
             result = core_eval_feature(key=key, evalContext=context)
             return result.value if result.value is not None else fallback
 
-    async def run(self, experiment: Experiment, user_context: UserContext) -> None:
+    async def run(self, experiment: Experiment, user_context: UserContext) -> Result:
+        """Run experiment with tracking"""
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
-            result = run_experiment(experiment=experiment, 
-                                evalContext=context,
-                                tracking_cb=None
-                                )
-            # self._fireSubscriptions(experiment, result)
+            result = run_experiment(
+                experiment=experiment, 
+                evalContext=context,
+                tracking_cb=self._track
+            )
+            # Fire subscriptions synchronously
+            self._fire_subscriptions(experiment, result)
             return result
         
     async def close(self) -> None:
-        """Clean shutdown"""
+        """Clean shutdown with proper cleanup"""
         if self._features_repository:
             await self._features_repository.stop_refresh()
+
+        # Clear tracking and subscription state
+        with self._tracked_lock:
+            self._tracked.clear()
+        with self._subscriptions_lock:
+            self._subscriptions.clear()
+
+        # Clear context
+        async with self._context_lock:
+            self._global_context = None
