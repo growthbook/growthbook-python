@@ -238,8 +238,8 @@ def isIn(conditionValue, attributeValue) -> bool:
         return bool(set(conditionValue) & set(attributeValue))
     return attributeValue in conditionValue
 
-def _getOrigHashValue(attr: str = None, 
-                      fallbackAttr: str = None, 
+def _getOrigHashValue(attr: Optional[str] = None, 
+                      fallbackAttr: Optional[str] = None, 
                       eval_context: EvaluationContext = None
                     ) -> Tuple[str, str]:
     # attr = attr or "id" -- Fix for the flaky behavior of sticky bucket assignment
@@ -408,7 +408,6 @@ def eval_feature(
     callback_subscription: Callable[[Experiment, Result], None] = None
 ) -> FeatureResult:
     """Core feature evaluation logic as a standalone function"""
-    logger.debug("Evaluating feature %s", key)
 
     if evalContext is None:
         raise ValueError("evalContext is required - eval_feature")
@@ -424,8 +423,8 @@ def eval_feature(
     evalContext.stack.evaluted_features.add(key)
 
     feature = evalContext.global_ctx.features[key]
+
     for rule in feature.rules:
-        logger.debug("Evaluating feature %s, rule %s", key, rule.to_dict())
         if (rule.parentConditions):
             prereq_res = eval_prereqs(parentConditions=rule.parentConditions, evalContext=evalContext)
             if prereq_res == "gate":
