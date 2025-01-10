@@ -11,6 +11,7 @@ except ImportError:
         async def __call__(self, *args, **kwargs):
             return super(AsyncMock, self).__call__(*args, **kwargs)
 
+from growthbook import InMemoryStickyBucketService
 import pytest
 import asyncio
 import os
@@ -338,7 +339,6 @@ async def test_http_refresh_backoff():
         # Wait a bit to ensure task is fully cleaned up
         await asyncio.sleep(0.1)
 
-# @pytest.mark.skip(reason="This test is not yet implemented")
 @pytest.mark.asyncio
 async def test_concurrent_initialization():
     """Test concurrent initialization attempts"""
@@ -410,7 +410,8 @@ def pytest_generate_tests(metafunc):
     # Map test functions to their data
     test_data_map = {
         'test_eval_feature': 'feature',
-        'test_experiment_run': 'run'
+        'test_experiment_run': 'run',
+        'test_sticky_bucket': 'stickyBucket'
     }
 
     for func, data_key in test_data_map.items():
@@ -419,31 +420,12 @@ def pytest_generate_tests(metafunc):
             metafunc.parametrize(fixture_name, data.get(data_key, []))
 
 @pytest.mark.asyncio
-async def test_eval_feature(test_eval_feature_data):
+async def test_eval_feature(test_eval_feature_data, base_client_setup):
     """Test feature evaluation similar to test_feature in test_growthbook.py"""
     _, ctx, key, expected = test_eval_feature_data
    
-    # Separate client options from user context
-    user_attrs = {
-        "attributes": ctx.get("attributes", {}),
-        "url": ctx.get("url", ""),
-        "groups": ctx.get("groups", {}),
-        "forced_variations": ctx.get("forcedVariations", {})
-    }
-    
-    # Simple client options
-    client_opts = {
-        'api_host': "https://localhost.growthbook.io",
-        'client_key': "test-key",
-        'enabled':  ctx.get("enabled", True),
-        'qa_mode': ctx.get("qaMode", False)
-    }
-
-    # Create features data structure
-    features_data = {
-        "features": ctx.get("features", {}),
-        "savedGroups": ctx.get("savedGroups", {})
-    }
+    # Get base setup
+    user_attrs, client_opts, features_data = base_client_setup(ctx)
 
     # Clear any existing singleton instances
     EnhancedFeatureRepository._instances = {}
@@ -459,50 +441,26 @@ async def test_eval_feature(test_eval_feature_data):
             
             # Create and initialize client
             async with GrowthBookClient(Options(**client_opts)) as client:
-                # Evaluate feature
                 result = await client.eval_feature(key, UserContext(**user_attrs))
                 
-                # Convert experiment to dict if present
                 if "experiment" in expected:
                     expected["experiment"] = Experiment(**expected["experiment"]).to_dict()
                 
-                # Verify result
                 assert result.to_dict() == expected
-        
     except Exception as e:
         print(f"Error during test execution: {str(e)}")
         raise
     finally:
-        # Ensure cleanup happens even if test fails
         await client.close()
         await asyncio.sleep(0.1)
 
 @pytest.mark.asyncio
-async def test_experiment_run(test_experiment_run_data):
+async def test_experiment_run(test_experiment_run_data, base_client_setup):
     """Test experiment running similar to test_run in test_growthbook.py"""
     _, ctx, exp, value, inExperiment, hashUsed = test_experiment_run_data
     
-    # Extract user-specific attributes
-    user_attrs = {
-        "attributes": ctx.get("attributes", {}),
-        "url": ctx.get("url", ""),
-        "groups": ctx.get("groups", {}),
-        "forced_variations": ctx.get("forcedVariations", {})
-    }
-    
-    # Simple client options
-    client_opts = {
-        'api_host': "https://localhost.growthbook.io",
-        'client_key': "test-key",
-        'enabled':  ctx.get("enabled", True),
-        'qa_mode': ctx.get("qaMode", False)
-    }
-
-    # Create features data structure
-    features_data = {
-        "features": ctx.get("features", {}),
-        "savedGroups": ctx.get("savedGroups", {})
-    }
+    # Get base setup
+    user_attrs, client_opts, features_data = base_client_setup(ctx)
 
     # Clear any existing singleton instances
     EnhancedFeatureRepository._instances = {}
@@ -580,6 +538,84 @@ async def test_feature_methods():
                 assert await client.get_feature_value("featureOff", 10, user_context) == 0
                 assert await client.get_feature_value("featureNone", 10, user_context) == 10
                 assert await client.get_feature_value("nonexistent", "default", user_context) == "default"
+    except Exception as e:
+        print(f"Error during test execution: {str(e)}")
+        raise
+    finally:
+        await client.close()
+        await asyncio.sleep(0.1)
+
+@pytest.fixture
+def base_client_setup():
+    """Common setup for client tests"""
+    def _setup(ctx):
+        # Separate client options from user context
+        user_attrs = {
+            "attributes": ctx.get("attributes", {}),
+            "url": ctx.get("url", ""),
+            "groups": ctx.get("groups", {}),
+            "forced_variations": ctx.get("forcedVariations", {})
+        }
+        
+        # Base client options
+        client_opts = {
+            'api_host': "https://localhost.growthbook.io",
+            'client_key': "test-key",
+            'enabled': ctx.get("enabled", True),
+            'qa_mode': ctx.get("qaMode", False)
+        }
+        
+        # Features data structure
+        features_data = {
+            "features": ctx.get("features", {}),
+            "savedGroups": ctx.get("savedGroups", {})
+        }
+        
+        return user_attrs, client_opts, features_data
+    return _setup
+
+@pytest.mark.asyncio
+async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup):
+    """Test sticky bucket functionality in GrowthBookClient"""
+    _, ctx, key, expected_result, expected_docs = test_sticky_bucket_data
+
+    # Initialize sticky bucket service with test data
+    service = InMemoryStickyBucketService()
+    if 'stickyBucketAssignmentDocs' in ctx:
+        service.docs = ctx['stickyBucketAssignmentDocs']
+        ctx.pop('stickyBucketAssignmentDocs')
+    
+    # Get base setup
+    user_attrs, client_opts, features_data = base_client_setup(ctx)
+    
+    # Add sticky bucket service to client options
+    client_opts['sticky_bucket_service'] = service
+    
+    # Clear any existing singleton instances
+    EnhancedFeatureRepository._instances = {}
+    
+    try:
+        # Set up mocks
+        with patch('growthbook.FeatureRepository.load_features_async', 
+                  new_callable=AsyncMock, return_value=features_data), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+                  new_callable=AsyncMock), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+                  new_callable=AsyncMock):
+             
+            # Create and initialize client
+            async with GrowthBookClient(Options(**client_opts)) as client:
+                # Evaluate feature
+                result = await client.eval_feature(key, UserContext(**user_attrs))
+                
+                # Verify experiment result
+                if not result.experimentResult:
+                    assert None == expected_result
+                else:
+                    assert result.experimentResult.to_dict() == expected_result
+  
+                # Verify sticky bucket assignments
+                assert client._global_context.options.sticky_bucket_service.docs == expected_docs
     except Exception as e:
         print(f"Error during test execution: {str(e)}")
         raise
