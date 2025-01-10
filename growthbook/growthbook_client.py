@@ -308,7 +308,7 @@ class GrowthBookClient:
             'attributes': {},
             'assignments': {}
         }
-        self._sticky_bucket_lock = asyncio.Lock()
+        self._sticky_bucket_cache_lock = False
         
         self._features_repository = (
             EnhancedFeatureRepository(self.options.api_host, self.options.client_key, self.options.decryption_key)
@@ -324,19 +324,19 @@ class GrowthBookClient:
         if not self.options.sticky_bucket_service:
             return {}
 
-        async with self._sticky_bucket_lock:
-            # Check if we need to refresh
+        # Use compare-and-swap pattern
+        while not self._sticky_bucket_cache_lock:
             if attributes == self._sticky_bucket_cache['attributes']:
                 return self._sticky_bucket_cache['assignments']
-
-            # Get new assignments
-            assignments = self.options.sticky_bucket_service.get_all_assignments(attributes)
             
-            # Update cache
-            self._sticky_bucket_cache['attributes'] = attributes.copy()
-            self._sticky_bucket_cache['assignments'] = assignments
-            
-            return assignments
+            self._sticky_bucket_cache_lock = True
+            try:
+                assignments = self.options.sticky_bucket_service.get_all_assignments(attributes)
+                self._sticky_bucket_cache['attributes'] = attributes.copy()
+                self._sticky_bucket_cache['assignments'] = assignments
+                return assignments
+            finally:
+                self._sticky_bucket_cache_lock = False
 
     async def initialize(self) -> bool:
         """Initialize client with features and start refresh"""
