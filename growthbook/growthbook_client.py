@@ -13,7 +13,9 @@ from growthbook import FeatureRepository
 try:
     from contextlib import asynccontextmanager
 except ImportError:
+    # to support python 3.6
     from async_generator import asynccontextmanager
+
 from .core import eval_feature as core_eval_feature, run_experiment
 from .common_types import (
     Feature,
@@ -339,6 +341,7 @@ class GrowthBookClient:
     async def initialize(self) -> bool:
         """Initialize client with features and start refresh"""
         if not self._features_repository:
+            logger.error("No features repository available")
             return False
 
         try:
@@ -416,65 +419,49 @@ class GrowthBookClient:
 
     async def create_evaluation_context(self, user_context: UserContext) -> EvaluationContext:
         """Create evaluation context for feature evaluation"""
-        async with self._context_lock:
-            if self._global_context is None:
-                raise RuntimeError("GrowthBook client not properly initialized")
-                
-            # Get sticky bucket assignments if needed
-            sticky_assignments = await self._refresh_sticky_buckets(user_context.attributes)
+        if self._global_context is None:
+            raise RuntimeError("GrowthBook client not properly initialized")
             
-            # update user context with sticky bucket assignments
-            user_context.sticky_bucket_assignment_docs = sticky_assignments
-                
-            return EvaluationContext(
-                user=user_context,
-                global_ctx=self._global_context,
-                options=self.options,
-                stack=StackContext(evaluted_features=set())
-            )
+        # Get sticky bucket assignments if needed
+        sticky_assignments = await self._refresh_sticky_buckets(user_context.attributes)
+        
+        # update user context with sticky bucket assignments
+        user_context.sticky_bucket_assignment_docs = sticky_assignments
 
-    async def eval_feature(self, key: str, user_context: UserContext = None) -> FeatureResult:
+        return EvaluationContext(
+            user=user_context,
+            global_ctx=self._global_context,
+            stack=StackContext(evaluted_features=set())
+        )
+
+    async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult:
         """Evaluate a feature with proper async context management"""
-
         async with self._context_lock:
-            context = await self.create_evaluation_context(
-                UserContext(**user_context) if user_context else UserContext()
-            )
-            return core_eval_feature(key=key, evalContext=context)
+            context = await self.create_evaluation_context(user_context)
+            result = core_eval_feature(key=key, evalContext=context)
+            return result
 
-    async def is_on(self, key: str, user_context: UserContext = None) -> bool:
+    async def is_on(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is enabled with proper async context management"""
-
         async with self._context_lock:
-            context = await self.create_evaluation_context(
-                UserContext(**user_context) if user_context else UserContext()
-            )
+            context = await self.create_evaluation_context(user_context)
             return core_eval_feature(key=key, evalContext=context).on
     
-    async def is_off(self, key: str, user_context: UserContext = None) -> bool:
+    async def is_off(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is set to off with proper async context management"""
-
         async with self._context_lock:
-            context = await self.create_evaluation_context(
-                UserContext(**user_context) if user_context else UserContext()
-            )
+            context = await self.create_evaluation_context(user_context)
             return core_eval_feature(key=key, evalContext=context).off
     
-    async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext = None) -> Any:
-
+    async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext) -> Any:
         async with self._context_lock:
-            context = await self.create_evaluation_context(
-                UserContext(**user_context) if user_context else UserContext()
-            )
+            context = await self.create_evaluation_context(user_context)
             result = core_eval_feature(key=key, evalContext=context)
             return result.value if result.value is not None else fallback
 
-    async def run(self, experiment: Experiment, user_context: UserContext = None) -> None:
-
+    async def run(self, experiment: Experiment, user_context: UserContext) -> None:
         async with self._context_lock:
-            context = await self.create_evaluation_context(
-                UserContext(**user_context) if user_context else UserContext()
-            )
+            context = await self.create_evaluation_context(user_context)
             result = run_experiment(experiment=experiment, 
                                 evalContext=context,
                                 tracking_cb=None
