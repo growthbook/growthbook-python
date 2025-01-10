@@ -622,3 +622,110 @@ async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup):
     finally:
         await client.close()
         await asyncio.sleep(0.1)
+
+async def getTrackingMock(client: GrowthBookClient):
+    """Helper function to mock tracking for tests"""
+    calls = []
+
+    def track(experiment, result):
+        calls.append([experiment, result])
+
+    client.options.on_experiment_viewed = track
+    return lambda: calls
+
+@pytest.mark.asyncio
+async def test_tracking():
+    """Test experiment tracking behavior"""
+    # Create client with minimal options
+    client = GrowthBookClient(Options(
+        api_host="https://localhost.growthbook.io",
+        client_key="test-key",
+        enabled=True
+    ))
+
+    getMockedCalls = await getTrackingMock(client)
+
+    # Create test experiments
+    exp1 = Experiment(
+        key="my-tracked-test",
+        variations=[0, 1],
+    )
+    exp2 = Experiment(
+        key="my-other-tracked-test",
+        variations=[0, 1],
+    )
+
+    # Create user context
+    user_context = UserContext(attributes={"id": "1"})
+
+    try:
+        # Set up mocks for feature repository
+        with patch('growthbook.FeatureRepository.load_features_async', 
+                  new_callable=AsyncMock, return_value={"features": {}, "savedGroups": {}}), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+                  new_callable=AsyncMock), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+                  new_callable=AsyncMock):
+            
+            # Initialize client
+            await client.initialize()
+
+            # Run experiments
+            res1 = await client.run(exp1, user_context)
+            await client.run(exp1, user_context)  # Should not track duplicate
+            await client.run(exp1, user_context)  # Should not track duplicate
+            res4 = await client.run(exp2, user_context)
+            
+            # Change user attributes
+            user_context.attributes = {"id": "2"}
+            res5 = await client.run(exp2, user_context)
+
+            # Verify tracking calls
+            calls = getMockedCalls()
+            assert len(calls) == 3, "Expected exactly 3 tracking calls"
+            assert calls[0] == [exp1, res1], "First tracking call mismatch"
+            assert calls[1] == [exp2, res4], "Second tracking call mismatch"
+            assert calls[2] == [exp2, res5], "Third tracking call mismatch"
+
+    finally:
+        await client.close()
+
+@pytest.mark.asyncio
+async def test_handles_tracking_errors():
+    """Test graceful handling of tracking callback errors"""
+    client = GrowthBookClient(Options(
+        api_host="https://localhost.growthbook.io",
+        client_key="test-key",
+        enabled=True
+    ))
+
+    # Set up tracking callback that raises an error
+    def failing_track(experiment, result):
+        raise Exception("Tracking failed")
+
+    client.options.on_experiment_viewed = failing_track
+
+    # Create test experiment
+    exp = Experiment(
+        key="error-test",
+        variations=[0, 1],
+    )
+    user_context = UserContext(attributes={"id": "1"})
+
+    try:
+        # Set up mocks
+        with patch('growthbook.FeatureRepository.load_features_async', 
+                  new_callable=AsyncMock, return_value={"features": {}, "savedGroups": {}}), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+                  new_callable=AsyncMock), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+                  new_callable=AsyncMock):
+            
+            await client.initialize()
+
+            # Should not raise exception despite tracking error
+            result = await client.run(exp, user_context)
+            assert result is not None, "Experiment should run despite tracking error"
+
+    finally:
+        await client.close()
