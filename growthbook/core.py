@@ -238,15 +238,17 @@ def isIn(conditionValue, attributeValue) -> bool:
         return bool(set(conditionValue) & set(attributeValue))
     return attributeValue in conditionValue
 
-def _getOrigHashValue(attr: Optional[str] = None, 
-                      fallbackAttr: Optional[str] = None, 
-                      eval_context: EvaluationContext = None
-                    ) -> Tuple[str, str]:
+def _getOrigHashValue(
+    eval_context: EvaluationContext,
+    attr: Optional[str] = "id",
+    fallbackAttr: Optional[str] = None
+) -> Tuple[str, str]:
     # attr = attr or "id" -- Fix for the flaky behavior of sticky bucket assignment
+    actual_attr: str = attr if attr is not None else ""
     val = ""
 
-    if attr in eval_context.user.attributes:
-        val = "" if eval_context.user.attributes[attr] is None else eval_context.user.attributes[attr]
+    if actual_attr in eval_context.user.attributes:
+        val = "" if eval_context.user.attributes[actual_attr] is None else eval_context.user.attributes[actual_attr]
 
     # If no match, try fallback
     if (not val or val == "") and fallbackAttr and eval_context.global_ctx.options.sticky_bucket_service:
@@ -254,22 +256,22 @@ def _getOrigHashValue(attr: Optional[str] = None,
             val = "" if eval_context.user.attributes[fallbackAttr] is None else eval_context.user.attributes[fallbackAttr]
 
         if not val or val != "":
-            attr = fallbackAttr
+            actual_attr = fallbackAttr
 
-    return (attr, val)
+    return (actual_attr, val)
 
-def _getHashValue(attr: str = None, fallbackAttr: str = None, eval_context: EvaluationContext = None) -> Tuple[str, str]:
+def _getHashValue(eval_context: EvaluationContext, attr: str = None, fallbackAttr: str = None) -> Tuple[str, str]:
     (attr, val) = _getOrigHashValue(attr=attr, fallbackAttr=fallbackAttr, eval_context=eval_context)
     return (attr, str(val))
 
 def _isIncludedInRollout(
     seed: str,
+    eval_context: EvaluationContext,
     hashAttribute: str = None,
     fallbackAttribute: str = None,
     range: Tuple[float, float] = None,
     coverage: float = None,
-    hashVersion: int = None,
-    eval_context: EvaluationContext = None
+    hashVersion: int = None
 ) -> bool:
     if coverage is None and range is None:
         return True
@@ -357,7 +359,7 @@ def getQueryStringOverride(id: str, url: str, numVariations: int) -> Optional[in
         return None
     return varId
 
-def _urlIsValid(url: str, pattern: str) -> bool:
+def _urlIsValid(url: Optional[str], pattern: str) -> bool:
     if not url: # it was self._url! Ignored the param passed in.
         return False
 
@@ -532,8 +534,9 @@ def eval_prereqs(parentConditions: List[dict], evalContext: EvaluationContext) -
 def _get_sticky_bucket_experiment_key(experiment_key: str, bucket_version: int = 0) -> str:
     return experiment_key + "__" + str(bucket_version)
     
-def _get_sticky_bucket_assignments(attr: str = None, fallback: str = None,
-                                    evalContext: EvaluationContext = None) -> Dict[str, str]:
+def _get_sticky_bucket_assignments(evalContext: EvaluationContext,
+                                    attr: str = None,
+                                    fallback: str = None) -> Dict[str, str]:
     merged: Dict[str, str] = {}
 
     # Search for docs stored for attribute(id)
@@ -568,12 +571,12 @@ def _is_blocked(
 
 def _get_sticky_bucket_variation(
     experiment_key: str,
+    evalContext: EvaluationContext,
     bucket_version: int = None,
     min_bucket_version: int = None,
     meta: List[VariationMeta] = None,
     hash_attribute: str = None,
     fallback_attribute: str = None,
-    evalContext: EvaluationContext = None
 ) -> dict:
     bucket_version = bucket_version or 0
     min_bucket_version = min_bucket_version or 0
@@ -666,10 +669,10 @@ def run_experiment(experiment: Experiment,
     sticky_bucket_version_is_blocked = False
     if evalContext.global_ctx.options.sticky_bucket_service and not experiment.disableStickyBucketing:
         sticky_bucket = _get_sticky_bucket_variation(
-            experiment.key,
-            experiment.bucketVersion,
-            experiment.minBucketVersion,
-            experiment.meta,
+            experiment_key=experiment.key,
+            bucket_version=experiment.bucketVersion,
+            min_bucket_version=experiment.minBucketVersion,
+            meta=experiment.meta,
             hash_attribute=experiment.hashAttribute,
             fallback_attribute=experiment.fallbackAttribute,
             evalContext=evalContext
@@ -860,12 +863,12 @@ def _generate_sticky_bucket_assignment_doc(attribute_name: str, attribute_value:
     
 def _getExperimentResult(
     experiment: Experiment,
+    evalContext: EvaluationContext,
     variationId: int = -1,
     hashUsed: bool = False,
     featureId: str = None,
     bucket: float = None,
-    stickyBucketUsed: bool = False,
-    evalContext: EvaluationContext = None
+    stickyBucketUsed: bool = False
 ) -> Result:
     inExperiment = True
     if variationId < 0 or variationId > len(experiment.variations) - 1:
@@ -876,7 +879,9 @@ def _getExperimentResult(
     if experiment.meta:
         meta = experiment.meta[variationId]
 
-    (hashAttribute, hashValue) = _getOrigHashValue(attr=experiment.hashAttribute, fallbackAttr=experiment.fallbackAttribute, eval_context=evalContext)
+    (hashAttribute, hashValue) = _getOrigHashValue(attr=experiment.hashAttribute,
+                                                    fallbackAttr=experiment.fallbackAttribute,
+                                                    eval_context=evalContext)
 
     return Result(
         featureId=featureId,

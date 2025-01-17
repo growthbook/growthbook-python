@@ -421,7 +421,7 @@ class Options:
 @dataclass
 class UserContext:
     # user_id: Optional[str] = None
-    url: Optional[str] = ""
+    url: str = ""
     attributes: Dict[str, Any] = field(default_factory=dict)
     groups: Dict[str, str] = field(default_factory=dict)
     forced_variations: Dict[str, Any] = field(default_factory=dict)
