@@ -8,5 +8,6 @@ twine
 pytest
 pytest-mock
 mypy
+types-dataclasses;python_version<"3.7"
 types-urllib3
 aiohttp-sse-client
