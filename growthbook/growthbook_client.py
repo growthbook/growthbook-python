@@ -447,18 +447,6 @@ class GrowthBookClient:
                 # Update existing global context
                 self._global_context.features = features
                 self._global_context.saved_groups = features_data.get("savedGroups", {})
-    
-    async def close(self) -> None:
-        """Clean resource cleanup"""
-        if self._features_repository:
-            # Stop refresh first
-            await self._features_repository.stop_refresh()
-            # Wait for any pending tasks
-            await asyncio.sleep(0.1)
-        
-        # Clear context to help garbage collection
-        async with self._context_lock:
-            self._global_context = None
 
     async def __aenter__(self):
         await self.initialize()
