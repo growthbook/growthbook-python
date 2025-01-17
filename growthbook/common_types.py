@@ -414,8 +414,8 @@ class Options:
     enable_dev_mode: bool = False
     # forced_variations: Dict[str, Any] = field(default_factory=dict)
     refresh_strategy: Optional[FeatureRefreshStrategy] = FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
-    sticky_bucket_service: Union[AbstractStickyBucketService, None] = None
-    sticky_bucket_identifier_attributes: Union[List[str], None] = None
+    sticky_bucket_service: Optional[AbstractStickyBucketService] = None
+    sticky_bucket_identifier_attributes: Optional[List[str]] = None
     on_experiment_viewed=None
 
 @dataclass
