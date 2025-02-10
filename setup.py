@@ -13,7 +13,7 @@ test_requirements = ['pytest>=3', ]
 
 setup(
     name='growthbook',
-    version='1.2.0',
+    version='1.3.0',
     author="GrowthBook",
     author_email='hello@growthbook.io',
     python_requires='>=3.6',
@@ -41,7 +41,7 @@ setup(
     package_data={"growthbook": ["py.typed"]},
     keywords='growthbook',
     py_modules=['growthbook'],
-    scripts=['growthbook/growthbook.py'],
+    # scripts=['growthbook/growthbook.py', 'growthbook/growthbook_asyncio.py'],
     test_suite='tests',
     tests_require=test_requirements,
     url='https://github.com/growthbook/growthbook-python',

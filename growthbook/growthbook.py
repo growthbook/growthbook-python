@@ -4,7 +4,7 @@ This is the Python client library for GrowthBook, the open-source
 feature flagging and A/B testing platform.
 More info at https://www.growthbook.io
 """
-
+import inspect
 import re
 import sys
 import json
@@ -72,7 +72,7 @@ def getEqualWeights(numVariations: int) -> List[float]:
 
 
 def getBucketRanges(
-    numVariations: int, coverage: float = 1, weights: List[float] = None
+    numVariations: int, coverage: float = 1, weights: Optional[List[float]] = None
 ) -> List[Tuple[float, float]]:
     if coverage < 0:
         coverage = 0
@@ -165,7 +165,7 @@ def isIn(conditionValue, attributeValue) -> bool:
     return attributeValue in conditionValue
 
 
-def evalCondition(attributes: dict, condition: dict, savedGroups: dict = None) -> bool:
+def evalCondition(attributes: dict, condition: dict, savedGroups: Optional[dict] = None) -> bool:
     if "$or" in condition:
         return evalOr(attributes, condition["$or"], savedGroups)
     if "$nor" in condition:
@@ -393,29 +393,29 @@ class Experiment(object):
         self,
         key: str,
         variations: list,
-        weights: List[float] = None,
+        weights: Optional[List[float]] = None,
         active: bool = True,
         status: str = "running",
-        coverage: int = None,
-        condition: dict = None,
-        namespace: Tuple[str, float, float] = None,
+        coverage: Optional[int] = None,
+        condition: Optional[dict] = None,
+        namespace: Optional[Tuple[str, float, float]] = None,
         url: str = "",
         include=None,
-        groups: list = None,
-        force: int = None,
+        groups: Optional[list] = None,
+        force: Optional[int] = None,
         hashAttribute: str = "id",
-        fallbackAttribute: str = None,
-        hashVersion: int = None,
-        ranges: List[Tuple[float, float]] = None,
-        meta: List[VariationMeta] = None,
-        filters: List[Filter] = None,
-        seed: str = None,
-        name: str = None,
-        phase: str = None,
+        fallbackAttribute: Optional[str] = None,
+        hashVersion: Optional[int] = None,
+        ranges: Optional[List[Tuple[float, float]]] = None,
+        meta: Optional[List[VariationMeta]] = None,
+        filters: Optional[List[Filter]] = None,
+        seed: Optional[str] = None,
+        name: Optional[str] = None,
+        phase: Optional[str] = None,
         disableStickyBucketing: bool = False,
-        bucketVersion: int = None,
-        minBucketVersion: int = None,
-        parentConditions: List[dict] = None,
+        bucketVersion: Optional[int] = None,
+        minBucketVersion: Optional[int] = None,
+        parentConditions: Optional[List[dict]] = None,
     ) -> None:
         self.key = key
         self.variations = variations
@@ -513,8 +513,8 @@ class Result(object):
         hashAttribute: str,
         hashValue: str,
         featureId: Optional[str],
-        meta: VariationMeta = None,
-        bucket: float = None,
+        meta: Optional[VariationMeta] = None,
+        bucket: Optional[float] = None,
         stickyBucketUsed: bool = False,
     ) -> None:
         self.variationId = variationId
@@ -605,28 +605,28 @@ class Feature(object):
 class FeatureRule(object):
     def __init__(
         self,
-        id: str = None,
+        id: Optional[str] = None,
         key: str = "",
-        variations: list = None,
-        weights: List[float] = None,
-        coverage: int = None,
-        condition: dict = None,
-        namespace: Tuple[str, float, float] = None,
+        variations: Optional[list] = None,
+        weights: Optional[List[float]] = None,
+        coverage: Optional[int] = None,
+        condition: Optional[dict] = None,
+        namespace: Optional[Tuple[str, float, float]] = None,
         force=None,
         hashAttribute: str = "id",
-        fallbackAttribute: str = None,
-        hashVersion: int = None,
-        range: Tuple[float, float] = None,
-        ranges: List[Tuple[float, float]] = None,
-        meta: List[VariationMeta] = None,
-        filters: List[Filter] = None,
-        seed: str = None,
-        name: str = None,
-        phase: str = None,
+        fallbackAttribute: Optional[str] = None,
+        hashVersion: Optional[int] = None,
+        range: Optional[Tuple[float, float]] = None,
+        ranges: Optional[List[Tuple[float, float]]] = None,
+        meta: Optional[List[VariationMeta]] = None,
+        filters: Optional[List[Filter]] = None,
+        seed: Optional[str] = None,
+        name: Optional[str] = None,
+        phase: Optional[str] = None,
         disableStickyBucketing: bool = False,
-        bucketVersion: int = None,
-        minBucketVersion: int = None,
-        parentConditions: List[dict] = None,
+        bucketVersion: Optional[int] = None,
+        minBucketVersion: Optional[int] = None,
+        parentConditions: Optional[List[dict]] = None,
     ) -> None:
 
         if disableStickyBucketing:
@@ -710,9 +710,9 @@ class FeatureResult(object):
         self,
         value,
         source: str,
-        experiment: Experiment = None,
-        experimentResult: Result = None,
-        ruleId: str = None,
+        experiment: Optional[Experiment] = None,
+        experimentResult: Optional[Result] = None,
+        ruleId: Optional[str] = None,
     ) -> None:
         self.value = value
         self.source = source
@@ -830,6 +830,7 @@ class SSEClient:
 
         self._sse_session = None
         self._sse_thread = None
+        self._sse_task = None
         self._loop = None
 
         self.is_running = False
@@ -851,6 +852,15 @@ class SSEClient:
         self._sse_thread = threading.Thread(target=self._run_sse_channel)
         self._sse_thread.start()
 
+    async def connect_async(self):
+        if self.is_running:
+            logger.debug("Streaming session is already running.")
+            return
+
+        self.is_running = True
+        self._loop = asyncio.get_running_loop()
+        self._sse_task = asyncio.create_task(self._init_session())
+
     def disconnect(self):
         self.is_running = False
         if self._loop and self._loop.is_running():
@@ -865,13 +875,24 @@ class SSEClient:
 
         logger.debug("Streaming session disconnected")
 
+    async def disconnect_async(self):
+        self.is_running = False
+        if self._loop and self._loop.is_running():
+            await self._stop_session()
+
+        if self._sse_task:
+            async with asyncio.timeout(5):
+                await self._sse_task
+
+        logger.debug("Streaming session disconnected")
+
     def _get_sse_url(self, api_host: str, client_key: str) -> str:
         api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
         return f"{api_host}/sub/{client_key}"
 
     async def _init_session(self):
         url = self._get_sse_url(self.api_host, self.client_key)
-        
+
         while self.is_running:
             try:
                 async with aiohttp.ClientSession(headers=self.headers) as session:
@@ -908,11 +929,15 @@ class SSEClient:
                 event_data['data'] = event_data.get('data', '') + f"\n{decoded_line[len('data:'):].strip()}"
             elif not decoded_line:
                 if 'type' in event_data and 'data' in event_data:
-                    self.on_event(event_data)
+                    res = self.on_event(event_data)
+                    if inspect.isawaitable(res):
+                        await res
                 event_data = {}
 
         if 'type' in event_data and 'data' in event_data:
-            self.on_event(event_data)
+            res = self.on_event(event_data)
+            if inspect.isawaitable(res):
+                await res
 
     async def _wait_for_reconnect(self):
         logger.debug(f"Attempting to reconnect streaming in {self.reconnect_delay}")
@@ -925,7 +950,7 @@ class SSEClient:
 
     def _run_sse_channel(self):
         self._loop = asyncio.new_event_loop()
-        
+
         try:
             self._loop.run_until_complete(self._init_session())
         except asyncio.CancelledError:
@@ -976,7 +1001,7 @@ class FeatureRepository(object):
                 logger.debug("Fetched features from API, stored in cache")
                 return res
         return cached
-    
+
     async def load_features_async(
         self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
     ) -> Optional[Dict]:
@@ -995,7 +1020,7 @@ class FeatureRepository(object):
     def _get(self, url: str):
         self.http = self.http or PoolManager()
         return self.http.request("GET", url)
-    
+
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
         try:
             r = self._get(self._get_features_url(api_host, client_key))
@@ -1009,7 +1034,7 @@ class FeatureRepository(object):
         except Exception:
             logger.warning("Failed to decode feature JSON from GrowthBook API")
             return None
-        
+
     async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
         try:
             url = self._get_features_url(api_host, client_key)
@@ -1026,7 +1051,7 @@ class FeatureRepository(object):
         except Exception as e:
             logger.warning("Failed to decode feature JSON from GrowthBook API: %s", e)
             return None
-        
+
     def decrypt_response(self, data, decryption_key: str):
         if "encryptedFeatures" in data:
             if not decryption_key:
@@ -1042,7 +1067,7 @@ class FeatureRepository(object):
                 return None
         elif "features" not in data:
             logger.warning("GrowthBook API response missing features")
-        
+
         if "encryptedSavedGroups" in data:
             if not decryption_key:
                 raise ValueError("Must specify decryption_key")
@@ -1055,7 +1080,7 @@ class FeatureRepository(object):
                 logger.warning(
                     "Failed to decrypt saved groups from GrowthBook API response"
                 )
-            
+
         return data
 
     # Fetch features from the GrowthBook API
@@ -1069,7 +1094,7 @@ class FeatureRepository(object):
         data = self.decrypt_response(decoded, decryption_key)
 
         return data
-        
+
     async def _fetch_features_async(
         self, api_host: str, client_key: str, decryption_key: str = ""
     ) -> Optional[Dict]:
@@ -1098,7 +1123,291 @@ class FeatureRepository(object):
 # Singleton instance
 feature_repo = FeatureRepository()
 
-class GrowthBook(object):
+
+class AgnosticGrowthBookBase(ABC):
+    def __init__(
+        self,
+        attributes: Dict[str, str],
+        url: str,
+        using_sticky_buckets: bool = False,
+        sticky_bucket_identifier_attributes: Optional[List[str]] = None,
+        user: Dict[str, str] = {},
+    ):
+        self._attributes = attributes
+        self._url = url
+        self.sticky_bucket_identifier_attributes = sticky_bucket_identifier_attributes
+        self._using_derived_sticky_bucket_attributes = not sticky_bucket_identifier_attributes
+        self._using_sticky_buckets = using_sticky_buckets
+        self._sticky_bucket_assignment_docs: dict = {}
+        self._features: Dict[str, Feature] = {}
+        self._subscriptions: Set[Any] = set()
+
+        self._user = user
+
+    def get_features(self) -> Dict[str, Feature]:
+        return self._features
+
+    # @deprecated, use get_features
+    def getFeatures(self) -> Dict[str, Feature]:
+        return self.get_features()
+
+    def get_attributes(self) -> dict:
+        return self._attributes
+
+    # @deprecated, use get_attributes
+    def getAttributes(self) -> dict:
+        return self.get_attributes()
+
+    def get_all_results(self):
+        return self._assigned.copy()
+
+    # @deprecated, use get_all_results
+    def getAllResults(self):
+        return self.get_all_results()
+
+    def _getOrigHashValue(self, attr: Optional[str] = None, fallbackAttr: Optional[str] = None) -> Tuple[str, str]:
+        attr = attr or "id"
+        val = ""
+        if attr in self._attributes:
+            val = "" if self._attributes[attr] is None else self._attributes[attr]
+        elif attr in self._user:
+            val = "" if self._user[attr] is None else self._user[attr]
+
+        # If no match, try fallback
+        if (not val or val == "") and fallbackAttr and self._using_sticky_buckets:
+            if fallbackAttr in self._attributes:
+                val = "" if self._attributes[fallbackAttr] is None else self._attributes[fallbackAttr]
+            elif fallbackAttr in self._user:
+                val = "" if self._user[fallbackAttr] is None else self._user[fallbackAttr]
+
+            if not val or val != "":
+                attr = fallbackAttr
+
+        return (attr, val)
+
+    def _getHashValue(self, attr: Optional[str] = None, fallbackAttr: Optional[str] = None) -> Tuple[str, str]:
+        (attr, val) = self._getOrigHashValue(attr, fallbackAttr)
+        return (attr, str(val))
+
+    def _isIncludedInRollout(
+        self,
+        seed: str,
+        hashAttribute: Optional[str] = None,
+        fallbackAttribute: Optional[str] = None,
+        range: Optional[Tuple[float, float]] = None,
+        coverage: Optional[float] = None,
+        hashVersion: Optional[int] = None,
+    ) -> bool:
+        if coverage is None and range is None:
+            return True
+
+        (_, hash_value) = self._getHashValue(hashAttribute, fallbackAttribute)
+        if hash_value == "":
+            return False
+
+        n = gbhash(seed, hash_value, hashVersion or 1)
+        if n is None:
+            return False
+
+        if range:
+            return inRange(n, range)
+        elif coverage is not None:
+            return n <= coverage
+
+        return True
+
+    def _isFilteredOut(self, filters: List[Filter]) -> bool:
+        for filter in filters:
+            (_, hash_value) = self._getHashValue(filter.get("attribute", "id"))
+            if hash_value == "":
+                return False
+
+            n = gbhash(filter.get("seed", ""), hash_value, filter.get("hashVersion", 2))
+            if n is None:
+                return False
+
+            filtered = False
+            for range in filter["ranges"]:
+                if inRange(n, range):
+                    filtered = True
+                    break
+            if not filtered:
+                return True
+        return False
+
+    def subscribe(self, callback):
+        self._subscriptions.add(callback)
+        return lambda: self._subscriptions.remove(callback)
+
+    def _urlIsValid(self, pattern) -> bool:
+        if not self._url:
+            return False
+
+        try:
+            r = re.compile(pattern)
+            if r.search(self._url):
+                return True
+
+            pathOnly = re.sub(r"^[^/]*/", "/", re.sub(r"^https?:\/\/", "", self._url))
+            if r.search(pathOnly):
+                return True
+            return False
+        except Exception:
+            return True
+
+    def _getExperimentResult(
+        self,
+        experiment: Experiment,
+        variationId: int = -1,
+        hashUsed: bool = False,
+        featureId: Optional[str] = None,
+        bucket: Optional[float] = None,
+        stickyBucketUsed: bool = False
+    ) -> Result:
+        inExperiment = True
+        if variationId < 0 or variationId > len(experiment.variations) - 1:
+            variationId = 0
+            inExperiment = False
+
+        meta = None
+        if experiment.meta:
+            meta = experiment.meta[variationId]
+
+        (hashAttribute, hashValue) = self._getOrigHashValue(experiment.hashAttribute, experiment.fallbackAttribute)
+
+        return Result(
+            featureId=featureId,
+            inExperiment=inExperiment,
+            variationId=variationId,
+            value=experiment.variations[variationId],
+            hashUsed=hashUsed,
+            hashAttribute=hashAttribute,
+            hashValue=hashValue,
+            meta=meta,
+            bucket=bucket,
+            stickyBucketUsed=stickyBucketUsed
+        )
+
+    def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
+        attributes = set()
+        for key, feature in self._features.items():
+            for rule in feature.rules:
+                if rule.variations:
+                    attributes.add(rule.hashAttribute or "id")
+                    if rule.fallbackAttribute:
+                        attributes.add(rule.fallbackAttribute)
+        return list(attributes)
+
+    def _get_sticky_bucket_attributes(self) -> dict:
+        attributes: Dict[str, str] = {}
+        if self._using_derived_sticky_bucket_attributes:
+            self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes()
+
+        if not self.sticky_bucket_identifier_attributes:
+            return attributes
+
+        for attr in self.sticky_bucket_identifier_attributes:
+            _, hash_value = self._getHashValue(attr)
+            if hash_value:
+                attributes[attr] = hash_value
+        return attributes
+
+    def _get_sticky_bucket_assignments(self, attr: Optional[str] = None, fallback: Optional[str] = None) -> Dict[str, str]:
+        merged: Dict[str, str] = {}
+
+        _, hashValue = self._getHashValue(attr)
+        key = f"{attr}||{hashValue}"
+        if key in self._sticky_bucket_assignment_docs:
+            merged = self._sticky_bucket_assignment_docs[key].get("assignments", {})
+
+        if fallback:
+            _, hashValue = self._getHashValue(fallback)
+            key = f"{fallback}||{hashValue}"
+            if key in self._sticky_bucket_assignment_docs:
+                # Merge the fallback assignments, but don't overwrite existing ones
+                for k, v in self._sticky_bucket_assignment_docs[key].get("assignments", {}).items():
+                    if k not in merged:
+                        merged[k] = v
+
+        return merged
+
+    def _is_blocked(
+        self,
+        assignments: Dict[str, str],
+        experiment_key: str,
+        min_bucket_version: int
+    ) -> bool:
+        if min_bucket_version > 0:
+            for i in range(min_bucket_version):
+                blocked_key = self._get_sticky_bucket_experiment_key(experiment_key, i)
+                if blocked_key in assignments:
+                    return True
+        return False
+
+    def _get_sticky_bucket_variation(
+        self,
+        experiment_key: str,
+        bucket_version: Optional[int] = None,
+        min_bucket_version: Optional[int] = None,
+        meta: Optional[List[VariationMeta]] = None,
+        hash_attribute: Optional[str] = None,
+        fallback_attribute: Optional[str] = None
+    ) -> dict:
+        bucket_version = bucket_version or 0
+        min_bucket_version = min_bucket_version or 0
+        meta = meta or []
+
+        id = self._get_sticky_bucket_experiment_key(experiment_key, bucket_version)
+
+        assignments = self._get_sticky_bucket_assignments(hash_attribute, fallback_attribute)
+        if self._is_blocked(assignments, experiment_key, min_bucket_version):
+            return {
+                'variation': -1,
+                'versionIsBlocked': True
+            }
+
+        variation_key = assignments.get(id, None)
+        if not variation_key:
+            return {
+                'variation': -1
+            }
+
+        # Find the key in meta
+        variation = next((i for i, v in enumerate(meta) if v.get("key") == variation_key), -1)
+        if variation < 0:
+            return {
+                'variation': -1
+            }
+
+        return {'variation': variation}
+
+    def _get_sticky_bucket_experiment_key(self, experiment_key: str, bucket_version: int = 0) -> str:
+        return experiment_key + "__" + str(bucket_version)
+
+
+    def _generate_sticky_bucket_assignment_doc(self, attribute_name: str, attribute_value: str, assignments: dict):
+        key = attribute_name + "||" + attribute_value
+        existing_assignments = self._sticky_bucket_assignment_docs.get(key, {}).get("assignments", {})
+
+        new_assignments = {**existing_assignments, **assignments}
+
+        # Compare JSON strings to see if they have changed
+        existing_json = json.dumps(existing_assignments, sort_keys=True)
+        new_json = json.dumps(new_assignments, sort_keys=True)
+        changed = existing_json != new_json
+
+        return {
+            'key': key,
+            'doc': {
+                'attributeName': attribute_name,
+                'attributeValue': attribute_value,
+                'assignments': new_assignments
+            },
+            'changed': changed
+        }
+
+
+class GrowthBook(AgnosticGrowthBookBase):
     def __init__(
         self,
         enabled: bool = True,
@@ -1112,8 +1421,8 @@ class GrowthBook(object):
         decryption_key: str = "",
         cache_ttl: int = 60,
         forced_variations: dict = {},
-        sticky_bucket_service: AbstractStickyBucketService = None,
-        sticky_bucket_identifier_attributes: List[str] = None,
+        sticky_bucket_service: Optional[AbstractStickyBucketService] = None,
+        sticky_bucket_identifier_attributes: Optional[List[str]] = None,
         savedGroups: dict = {},
         streaming: bool = False,
         # Deprecated args
@@ -1124,16 +1433,21 @@ class GrowthBook(object):
         overrides: dict = {},
         forcedVariations: dict = {},
     ):
+        super().__init__(
+            attributes=attributes,
+            url=url,
+            sticky_bucket_identifier_attributes=sticky_bucket_identifier_attributes,
+            using_sticky_buckets=sticky_bucket_service is not None,
+            user=user,
+        )
+
         self._enabled = enabled
-        self._attributes = attributes
-        self._url = url
         self._features: Dict[str, Feature] = {}
         self._saved_groups = savedGroups
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
         self._cache_ttl = cache_ttl
-        self.sticky_bucket_identifier_attributes = sticky_bucket_identifier_attributes
         self.sticky_bucket_service = sticky_bucket_service
         self._sticky_bucket_assignment_docs: dict = {}
         self._using_derived_sticky_bucket_attributes = not sticky_bucket_identifier_attributes
@@ -1145,7 +1459,6 @@ class GrowthBook(object):
         self._streaming = streaming
 
         # Deprecated args
-        self._user = user
         self._groups = groups
         self._overrides = overrides
         self._forcedVariations = forced_variations or forcedVariations
@@ -1193,7 +1506,7 @@ class GrowthBook(object):
         decoded = json.loads(features)
         if not decoded:
             return None
-        
+
         data = feature_repo.decrypt_response(decoded, self._decryption_key)
 
         if data is not None:
@@ -1202,7 +1515,7 @@ class GrowthBook(object):
             if "savedGroups" in data:
                 self._saved_groups = data["savedGroups"]
             feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
-            
+
     def _dispatch_sse_event(self, event_data):
         event_type = event_data['type']
         data = event_data['data']
@@ -1211,13 +1524,12 @@ class GrowthBook(object):
         elif event_type == 'features':
             self._features_event_handler(data)
 
-
     def startAutoRefresh(self):
         if not self._client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
-       
+
         feature_repo.startAutoRefresh(
-            api_host=self._api_host, 
+            api_host=self._api_host,
             client_key=self._client_key,
             cb=self._dispatch_sse_event
         )
@@ -1241,13 +1553,6 @@ class GrowthBook(object):
                 )
         self.refresh_sticky_buckets()
 
-    # @deprecated, use get_features
-    def getFeatures(self) -> Dict[str, Feature]:
-        return self.get_features()
-
-    def get_features(self) -> Dict[str, Feature]:
-        return self._features
-
     # @deprecated, use set_attributes
     def setAttributes(self, attributes: dict) -> None:
         return self.set_attributes(attributes)
@@ -1255,13 +1560,6 @@ class GrowthBook(object):
     def set_attributes(self, attributes: dict) -> None:
         self._attributes = attributes
         self.refresh_sticky_buckets()
-
-    # @deprecated, use get_attributes
-    def getAttributes(self) -> dict:
-        return self.get_attributes()
-
-    def get_attributes(self) -> dict:
-        return self._attributes
 
     def destroy(self) -> None:
         self._subscriptions.clear()
@@ -1417,83 +1715,6 @@ class GrowthBook(object):
 
         logger.debug("Use default value for feature %s", key)
         return FeatureResult(feature.defaultValue, "defaultValue")
-
-    # @deprecated, use get_all_results
-    def getAllResults(self):
-        return self.get_all_results()
-
-    def get_all_results(self):
-        return self._assigned.copy()
-
-    def _getOrigHashValue(self, attr: str = None, fallbackAttr: str = None) -> Tuple[str, str]:
-        attr = attr or "id"
-        val = ""
-        if attr in self._attributes:
-            val = "" if self._attributes[attr] is None else self._attributes[attr]
-        elif attr in self._user:
-            val = "" if self._user[attr] is None else self._user[attr]
-
-        # If no match, try fallback
-        if (not val or val == "") and fallbackAttr and self.sticky_bucket_service:
-            if fallbackAttr in self._attributes:
-                val = "" if self._attributes[fallbackAttr] is None else self._attributes[fallbackAttr]
-            elif fallbackAttr in self._user:
-                val = "" if self._user[fallbackAttr] is None else self._user[fallbackAttr]
-
-            if not val or val != "":
-                attr = fallbackAttr
-
-        return (attr, val)
-
-    def _getHashValue(self, attr: str = None, fallbackAttr: str = None) -> Tuple[str, str]:
-        (attr, val) = self._getOrigHashValue(attr, fallbackAttr)
-        return (attr, str(val))
-
-    def _isIncludedInRollout(
-        self,
-        seed: str,
-        hashAttribute: str = None,
-        fallbackAttribute: str = None,
-        range: Tuple[float, float] = None,
-        coverage: float = None,
-        hashVersion: int = None,
-    ) -> bool:
-        if coverage is None and range is None:
-            return True
-
-        (_, hash_value) = self._getHashValue(hashAttribute, fallbackAttribute)
-        if hash_value == "":
-            return False
-
-        n = gbhash(seed, hash_value, hashVersion or 1)
-        if n is None:
-            return False
-
-        if range:
-            return inRange(n, range)
-        elif coverage is not None:
-            return n <= coverage
-
-        return True
-
-    def _isFilteredOut(self, filters: List[Filter]) -> bool:
-        for filter in filters:
-            (_, hash_value) = self._getHashValue(filter.get("attribute", "id"))
-            if hash_value == "":
-                return False
-
-            n = gbhash(filter.get("seed", ""), hash_value, filter.get("hashVersion", 2))
-            if n is None:
-                return False
-
-            filtered = False
-            for range in filter["ranges"]:
-                if inRange(n, range):
-                    filtered = True
-                    break
-            if not filtered:
-                return True
-        return False
 
     def _fireSubscriptions(self, experiment: Experiment, result: Result):
         prev = self._assigned.get(experiment.key, None)
@@ -1778,135 +1999,6 @@ class GrowthBook(object):
         except Exception:
             return True
 
-    def _getExperimentResult(
-        self,
-        experiment: Experiment,
-        variationId: int = -1,
-        hashUsed: bool = False,
-        featureId: str = None,
-        bucket: float = None,
-        stickyBucketUsed: bool = False
-    ) -> Result:
-        inExperiment = True
-        if variationId < 0 or variationId > len(experiment.variations) - 1:
-            variationId = 0
-            inExperiment = False
-
-        meta = None
-        if experiment.meta:
-            meta = experiment.meta[variationId]
-
-        (hashAttribute, hashValue) = self._getOrigHashValue(experiment.hashAttribute, experiment.fallbackAttribute)
-
-        return Result(
-            featureId=featureId,
-            inExperiment=inExperiment,
-            variationId=variationId,
-            value=experiment.variations[variationId],
-            hashUsed=hashUsed,
-            hashAttribute=hashAttribute,
-            hashValue=hashValue,
-            meta=meta,
-            bucket=bucket,
-            stickyBucketUsed=stickyBucketUsed
-        )
-
-    def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
-        attributes = set()
-        for key, feature in self._features.items():
-            for rule in feature.rules:
-                if rule.variations:
-                    attributes.add(rule.hashAttribute or "id")
-                    if rule.fallbackAttribute:
-                        attributes.add(rule.fallbackAttribute)
-        return list(attributes)
-
-    def _get_sticky_bucket_attributes(self) -> dict:
-        attributes: Dict[str, str] = {}
-        if self._using_derived_sticky_bucket_attributes:
-            self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes()
-
-        if not self.sticky_bucket_identifier_attributes:
-            return attributes
-
-        for attr in self.sticky_bucket_identifier_attributes:
-            _, hash_value = self._getHashValue(attr)
-            if hash_value:
-                attributes[attr] = hash_value
-        return attributes
-
-    def _get_sticky_bucket_assignments(self, attr: str = None, fallback: str = None) -> Dict[str, str]:
-        merged: Dict[str, str] = {}
-
-        _, hashValue = self._getHashValue(attr)
-        key = f"{attr}||{hashValue}"
-        if key in self._sticky_bucket_assignment_docs:
-            merged = self._sticky_bucket_assignment_docs[key].get("assignments", {})
-
-        if fallback:
-            _, hashValue = self._getHashValue(fallback)
-            key = f"{fallback}||{hashValue}"
-            if key in self._sticky_bucket_assignment_docs:
-                # Merge the fallback assignments, but don't overwrite existing ones
-                for k, v in self._sticky_bucket_assignment_docs[key].get("assignments", {}).items():
-                    if k not in merged:
-                        merged[k] = v
-
-        return merged
-
-    def _is_blocked(
-        self,
-        assignments: Dict[str, str],
-        experiment_key: str,
-        min_bucket_version: int
-    ) -> bool:
-        if min_bucket_version > 0:
-            for i in range(min_bucket_version):
-                blocked_key = self._get_sticky_bucket_experiment_key(experiment_key, i)
-                if blocked_key in assignments:
-                    return True
-        return False
-
-    def _get_sticky_bucket_variation(
-        self,
-        experiment_key: str,
-        bucket_version: int = None,
-        min_bucket_version: int = None,
-        meta: List[VariationMeta] = None,
-        hash_attribute: str = None,
-        fallback_attribute: str = None
-    ) -> dict:
-        bucket_version = bucket_version or 0
-        min_bucket_version = min_bucket_version or 0
-        meta = meta or []
-
-        id = self._get_sticky_bucket_experiment_key(experiment_key, bucket_version)
-
-        assignments = self._get_sticky_bucket_assignments(hash_attribute, fallback_attribute)
-        if self._is_blocked(assignments, experiment_key, min_bucket_version):
-            return {
-                'variation': -1,
-                'versionIsBlocked': True
-            }
-
-        variation_key = assignments.get(id, None)
-        if not variation_key:
-            return {
-                'variation': -1
-            }
-
-        # Find the key in meta
-        variation = next((i for i, v in enumerate(meta) if v.get("key") == variation_key), -1)
-        if variation < 0:
-            return {
-                'variation': -1
-            }
-
-        return {'variation': variation}
-
-    def _get_sticky_bucket_experiment_key(self, experiment_key: str, bucket_version: int = 0) -> str:
-        return experiment_key + "__" + str(bucket_version)
-
     def refresh_sticky_buckets(self, force: bool = False) -> None:
         if not self.sticky_bucket_service:
             return
@@ -1918,24 +2010,3 @@ class GrowthBook(object):
 
         self._sticky_bucket_attributes = attributes
         self._sticky_bucket_assignment_docs = self.sticky_bucket_service.get_all_assignments(attributes)
-
-    def _generate_sticky_bucket_assignment_doc(self, attribute_name: str, attribute_value: str, assignments: dict):
-        key = attribute_name + "||" + attribute_value
-        existing_assignments = self._sticky_bucket_assignment_docs.get(key, {}).get("assignments", {})
-
-        new_assignments = {**existing_assignments, **assignments}
-
-        # Compare JSON strings to see if they have changed
-        existing_json = json.dumps(existing_assignments, sort_keys=True)
-        new_json = json.dumps(new_assignments, sort_keys=True)
-        changed = existing_json != new_json
-
-        return {
-            'key': key,
-            'doc': {
-                'attributeName': attribute_name,
-                'attributeValue': attribute_value,
-                'assignments': new_assignments
-            },
-            'changed': changed
-        }
