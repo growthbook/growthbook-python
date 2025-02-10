@@ -2,6 +2,8 @@
 
 import json
 import os
+from typing import Union
+
 from growthbook import (
     FeatureRule,
     GrowthBook,
@@ -19,7 +21,12 @@ from growthbook import (
     decrypt,
     feature_repo,
     logger,
+    AsyncGrowthBook,
+    async_feature_repo,
+    AsyncInMemoryStickyBucketService
 )
+
+
 from time import time
 import pytest
 
@@ -122,11 +129,48 @@ def test_feature(feature_data):
     gb.destroy()
 
 
+@pytest.mark.asyncio
+async def test_feature_async(feature_data):
+    _, ctx, key, expected = feature_data
+    features = ctx.pop("features", None)
+    gb = AsyncGrowthBook(**ctx)
+    if features:
+        await gb.set_features(features)
+    if ctx.get("streaming"):
+        await gb.load_features()
+    res = await gb.evalFeature(key)
+
+    if "experiment" in expected:
+        expected["experiment"] = Experiment(**expected["experiment"]).to_dict()
+
+    assert res.to_dict() == expected
+    gb.destroy()
+
+
 def test_run(run_data):
     _, ctx, exp, value, inExperiment, hashUsed = run_data
     gb = GrowthBook(**ctx)
 
     res = gb.run(Experiment(**exp))
+    assert res.value == value
+    assert res.inExperiment == inExperiment
+    assert res.hashUsed == hashUsed
+
+    gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_run_async(run_data):
+    _, ctx, exp, value, inExperiment, hashUsed = run_data
+    features = ctx.pop("features", None)
+    gb = AsyncGrowthBook(**ctx)
+
+    if features:
+        await gb.set_features(features)
+    if ctx.get("streaming"):
+        await gb.load_features()
+
+    res = await gb.run(Experiment(**exp))
     assert res.value == value
     assert res.inExperiment == inExperiment
     assert res.hashUsed == hashUsed
@@ -163,7 +207,42 @@ def test_stickyBucket(stickyBucket_data):
     gb.destroy()
 
 
-def getTrackingMock(gb: GrowthBook):
+@pytest.mark.asyncio
+async def test_stickyBucket_async(stickyBucket_data):
+    _, ctx, key, expected_result, expected_docs = stickyBucket_data
+    features = ctx.pop("features")
+
+    # Just use the interface directly, which passes and doesn't persist anywhere
+    service = AsyncInMemoryStickyBucketService()
+    ctx['sticky_bucket_service'] = service
+
+    if 'stickyBucketIdentifierAttributes' in ctx:
+        ctx['sticky_bucket_identifier_attributes'] = ctx['stickyBucketIdentifierAttributes']
+        ctx.pop('stickyBucketIdentifierAttributes')
+
+    if 'stickyBucketAssignmentDocs' in ctx:
+        service.docs = ctx['stickyBucketAssignmentDocs']
+        ctx.pop('stickyBucketAssignmentDocs')
+
+    gb = AsyncGrowthBook(**ctx)
+    if features:
+        await gb.set_features(features)
+    if ctx.get("streaming"):
+        await gb.load_features()
+    res = await gb.eval_feature(key)
+
+    if not res.experimentResult:
+      assert None == expected_result
+    else:
+        assert res.experimentResult.to_dict() == expected_result
+
+    assert service.docs == expected_docs
+
+    await service.destroy()
+    gb.destroy()
+
+
+def getTrackingMock(gb: Union[GrowthBook, AsyncGrowthBook]):
     calls = []
 
     def track(experiment, result):
@@ -203,6 +282,37 @@ def test_tracking():
     gb.destroy()
 
 
+@pytest.mark.asyncio
+async def test_tracking_async():
+    gb = AsyncGrowthBook(user={"id": "1"})
+
+    getMockedCalls = getTrackingMock(gb)
+
+    exp1 = Experiment(
+        key="my-tracked-test",
+        variations=[0, 1],
+    )
+    exp2 = Experiment(
+        key="my-other-tracked-test",
+        variations=[0, 1],
+    )
+
+    res1 = await gb.run(exp1)
+    await gb.run(exp1)
+    await gb.run(exp1)
+    res4 = await gb.run(exp2)
+    gb._user = {"id": "2"}
+    res5 = await gb.run(exp2)
+
+    calls = getMockedCalls()
+    assert len(calls) == 3
+    assert calls[0] == [exp1, res1]
+    assert calls[1] == [exp2, res4]
+    assert calls[2] == [exp2, res5]
+
+    gb.destroy()
+
+
 def test_handles_weird_experiment_values():
     gb = GrowthBook(user={"id": "1"})
 
@@ -227,6 +337,31 @@ def test_handles_weird_experiment_values():
     gb.destroy()
 
 
+@pytest.mark.asyncio
+async def test_handles_weird_experiment_values_async():
+    gb = AsyncGrowthBook(user={"id": "1"})
+
+    assert (
+        (await gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+                include=lambda: 1 / 0,
+            )
+        )).inExperiment
+        is False
+    )
+
+    # Should fail gracefully
+    gb._trackingCallback = lambda experiment, result: 1 / 0
+    assert (await gb.run(Experiment(key="my-test", variations=[0, 1]))).value == 1
+
+    gb.subscribe(lambda: 1 / 0)
+    assert (await gb.run(Experiment(key="my-new-test", variations=[0, 1]))).value == 0
+
+    gb.destroy()
+
+
 def test_force_variation():
     gb = GrowthBook(user={"id": "6"})
     exp = Experiment(key="forced-test", variations=[0, 1])
@@ -240,6 +375,27 @@ def test_force_variation():
         },
     }
     assert gb.run(exp).value == 1
+
+    calls = getMockedCalls()
+    assert len(calls) == 0
+
+    gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_force_variation_async():
+    gb = AsyncGrowthBook(user={"id": "6"})
+    exp = Experiment(key="forced-test", variations=[0, 1])
+    assert (await gb.run(exp)).value == 0
+
+    getMockedCalls = getTrackingMock(gb)
+
+    gb._overrides = {
+        "forced-test": {
+            "force": 1,
+        },
+    }
+    assert (await gb.run(exp)).value == 1
 
     calls = getMockedCalls()
     assert len(calls) == 0
@@ -280,6 +436,46 @@ def test_uses_overrides():
                 variations=[0, 1],
             )
         ).inExperiment
+        is False
+    )
+
+    gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_uses_overrides_async():
+    gb = AsyncGrowthBook(
+        user={"id": "1"},
+        overrides={
+            "my-test": {
+                "coverage": 0.01,
+            },
+        },
+    )
+
+    assert (
+        (await gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+            )
+        )).inExperiment
+        is False
+    )
+
+    gb._overrides = {
+        "my-test": {
+            "url": r"^\\/path",
+        },
+    }
+
+    assert (
+        (await gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+            )
+        )).inExperiment
         is False
     )
 
@@ -332,12 +528,72 @@ def test_filters_user_groups():
     gb.destroy()
 
 
+@pytest.mark.asyncio
+async def test_filters_user_groups_async():
+    gb = AsyncGrowthBook(
+        user={"id": "123"},
+        groups={
+            "alpha": True,
+            "beta": True,
+            "internal": False,
+            "qa": False,
+        },
+    )
+
+    assert (
+        (await gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+                groups=["internal", "qa"],
+            )
+        )).inExperiment
+        is False
+    )
+
+    assert (
+        (await gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+                groups=["internal", "qa", "beta"],
+            )
+        )).inExperiment
+        is True
+    )
+
+    assert (
+        (await gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+            )
+        )).inExperiment
+        is True
+    )
+
+    gb.destroy()
+
+
 def test_runs_custom_include_callback():
     gb = GrowthBook(user={"id": "1"})
     assert (
         gb.run(
             Experiment(key="my-test", variations=[0, 1], include=lambda: False)
         ).inExperiment
+        is False
+    )
+
+    gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_runs_custom_include_callback_async():
+    gb = AsyncGrowthBook(user={"id": "1"})
+    assert (
+        (await gb.run(
+            Experiment(key="my-test", variations=[0, 1], include=lambda: False)
+        )).inExperiment
         is False
     )
 
@@ -357,6 +613,20 @@ def test_supports_custom_user_hash_keys():
     gb.destroy()
 
 
+@pytest.mark.asyncio
+async def test_supports_custom_user_hash_keys_async():
+    gb = AsyncGrowthBook(user={"id": "1", "company": "abc"})
+
+    exp = Experiment(key="my-test", variations=[0, 1], hashAttribute="company")
+
+    res = await gb.run(exp)
+
+    assert res.hashAttribute == "company"
+    assert res.hashValue == "abc"
+
+    gb.destroy()
+
+
 def test_querystring_force_disabled_tracking():
     gb = GrowthBook(
         user={"id": "1"},
@@ -369,6 +639,24 @@ def test_querystring_force_disabled_tracking():
         variations=[0, 1],
     )
     gb.run(exp)
+
+    calls = getMockedCalls()
+    assert len(calls) == 0
+
+
+@pytest.mark.asyncio
+async def test_querystring_force_disabled_tracking_async():
+    gb = AsyncGrowthBook(
+        user={"id": "1"},
+        url="http://example.com?forced-test-qs=1",
+    )
+    getMockedCalls = getTrackingMock(gb)
+
+    exp = Experiment(
+        key="forced-test-qs",
+        variations=[0, 1],
+    )
+    await gb.run(exp)
 
     calls = getMockedCalls()
     assert len(calls) == 0
@@ -403,6 +691,36 @@ def test_url_targeting():
     gb.destroy()
 
 
+@pytest.mark.asyncio
+async def test_url_targeting_async():
+    gb = AsyncGrowthBook(
+        user={"id": "1"},
+        url="http://example.com",
+    )
+
+    exp = Experiment(
+        key="my-test",
+        variations=[0, 1],
+        url="^\\/post\\/[0-9]+",
+    )
+
+    res = await gb.run(exp)
+    assert res.inExperiment is False
+    assert res.value == 0
+
+    gb._url = "http://example.com/post/123"
+    res = await gb.run(exp)
+    assert res.inExperiment is True
+    assert res.value == 1
+
+    exp.url = "http:\\/\\/example.com\\/post\\/[0-9]+"
+    res = await gb.run(exp)
+    assert res.inExperiment is True
+    assert res.value == 1
+
+    gb.destroy()
+
+
 def test_invalid_url_regex():
     gb = GrowthBook(
         user={"id": "1"},
@@ -421,6 +739,31 @@ def test_invalid_url_regex():
                 variations=[0, 1],
             )
         ).value
+        == 1
+    )
+
+    gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_invalid_url_regex_async():
+    gb = AsyncGrowthBook(
+        user={"id": "1"},
+        overrides={
+            "my-test": {
+                "url": "???***[)",
+            },
+        },
+        url="http://example.com",
+    )
+
+    assert (
+        (await gb.run(
+            Experiment(
+                key="my-test",
+                variations=[0, 1],
+            )
+        )).value
         == 1
     )
 
@@ -449,6 +792,29 @@ def test_ignores_draft_experiments():
     gb.destroy()
 
 
+@pytest.mark.asyncio
+async def test_ignores_draft_experiments_async():
+    gb = AsyncGrowthBook(user={"id": "1"})
+    exp = Experiment(
+        key="my-test",
+        status="draft",
+        variations=[0, 1],
+    )
+
+    res1 = await gb.run(exp)
+    gb._url = "http://example.com/?my-test=1"
+    res2 = await gb.run(exp)
+
+    assert res1.inExperiment is False
+    assert res1.hashUsed is False
+    assert res1.value == 0
+    assert res2.inExperiment is True
+    assert res2.hashUsed is False
+    assert res2.value == 1
+
+    gb.destroy()
+
+
 def test_ignores_stopped_experiments_unless_forced():
     gb = GrowthBook(user={"id": "1"})
     expLose = Experiment(
@@ -465,6 +831,32 @@ def test_ignores_stopped_experiments_unless_forced():
 
     res1 = gb.run(expLose)
     res2 = gb.run(expWin)
+
+    assert res1.value == 0
+    assert res1.inExperiment is False
+    assert res2.value == 2
+    assert res2.inExperiment is True
+
+    gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_ignores_stopped_experiments_unless_forced_async():
+    gb = AsyncGrowthBook(user={"id": "1"})
+    expLose = Experiment(
+        key="my-test",
+        status="stopped",
+        variations=[0, 1, 2],
+    )
+    expWin = Experiment(
+        key="my-test",
+        status="stopped",
+        variations=[0, 1, 2],
+        force=2,
+    )
+
+    res1 = await gb.run(expLose)
+    res2 = await gb.run(expWin)
 
     assert res1.value == 0
     assert res1.inExperiment is False
@@ -519,6 +911,37 @@ def test_destroy_removes_subscriptions():
     gb.destroy()
 
 
+@pytest.mark.asyncio
+async def test_destroy_removes_subscriptions_async():
+    gb = AsyncGrowthBook(user={"id": "1"})
+
+    resetFiredFlag()
+    gb.subscribe(flagSubscription)
+
+    await gb.run(
+        Experiment(
+            key="my-test",
+            variations=[0, 1],
+        )
+    )
+
+    assert hasFired() is True
+
+    resetFiredFlag()
+    gb.destroy()
+
+    await gb.run(
+        Experiment(
+            key="my-other-test",
+            variations=[0, 1],
+        )
+    )
+
+    assert hasFired() is False
+
+    gb.destroy()
+
+
 def test_fires_subscriptions_correctly():
     gb = GrowthBook(
         user={
@@ -559,6 +982,47 @@ def test_fires_subscriptions_correctly():
     gb.destroy()
 
 
+@pytest.mark.asyncio
+async def test_fires_subscriptions_correctly_async():
+    gb = AsyncGrowthBook(
+        user={
+            "id": "1",
+        },
+    )
+
+    resetFiredFlag()
+    unsubscriber = gb.subscribe(flagSubscription)
+
+    assert hasFired() is False
+
+    exp = Experiment(
+        key="my-test",
+        variations=[0, 1],
+    )
+
+    # Should fire when user is put in an experiment
+    await gb.run(exp)
+    assert hasFired() is True
+
+    # Does not fire if nothing has changed
+    resetFiredFlag()
+    await gb.run(exp)
+    assert hasFired() is False
+
+    # Does not fire after unsubscribed
+    unsubscriber()
+    await gb.run(
+        Experiment(
+            key="other-test",
+            variations=[0, 1],
+        )
+    )
+
+    assert hasFired() is False
+
+    gb.destroy()
+
+
 def test_stores_assigned_variations_in_the_user():
     gb = GrowthBook(
         user={
@@ -568,6 +1032,32 @@ def test_stores_assigned_variations_in_the_user():
 
     gb.run(Experiment(key="my-test", variations=[0, 1]))
     gb.run(Experiment(key="my-test-3", variations=[0, 1]))
+
+    assigned = gb.getAllResults()
+    assignedArr = []
+
+    for e in assigned:
+        assignedArr.append({"key": e, "variation": assigned[e]["result"].variationId})
+
+    assert len(assignedArr) == 2
+    assert assignedArr[0]["key"] == "my-test"
+    assert assignedArr[0]["variation"] == 1
+    assert assignedArr[1]["key"] == "my-test-3"
+    assert assignedArr[1]["variation"] == 0
+
+    gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_stores_assigned_variations_in_the_user_async():
+    gb = AsyncGrowthBook(
+        user={
+            "id": "1",
+        },
+    )
+
+    await gb.run(Experiment(key="my-test", variations=[0, 1]))
+    await gb.run(Experiment(key="my-test-3", variations=[0, 1]))
 
     assigned = gb.getAllResults()
     assignedArr = []
@@ -606,12 +1096,44 @@ def test_getters_setters():
     gb.destroy()
 
 
+@pytest.mark.asyncio
+async def test_getters_setters_async():
+    gb = AsyncGrowthBook()
+
+    feat = Feature(defaultValue="yes", rules=[FeatureRule(force="no")])
+    featuresInput = {"feature-1": feat.to_dict()}
+    attributes = {"id": "123", "url": "/"}
+
+    await gb.setFeatures(featuresInput)
+    await gb.setAttributes(attributes)
+
+    featuresOutput = {k: v.to_dict() for (k, v) in (gb.getFeatures()).items()}
+
+    assert featuresOutput == featuresInput
+    assert attributes == (gb.getAttributes())
+
+    newAttrs = {"url": "/hello"}
+    await gb.setAttributes(newAttrs)
+    assert newAttrs == (gb.getAttributes())
+
+    gb.destroy()
+
+
 def test_return_ruleid_when_evaluating_a_feature():
     gb = GrowthBook(
         features={"feature": {"defaultValue": 0, "rules": [{"force": 1, "id": "foo"}]}}
     )
     assert gb.eval_feature("feature").ruleId == "foo"
     gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_return_ruleid_when_evaluating_a_feature_async():
+    gb = AsyncGrowthBook()
+    await gb.set_features(features={"feature": {"defaultValue": 0, "rules": [{"force": 1, "id": "foo"}]}})
+    assert (await gb.eval_feature("feature")).ruleId == "foo"
+    gb.destroy()
+
 
 
 def test_feature_methods():
@@ -634,6 +1156,31 @@ def test_feature_methods():
     assert gb.isOn("featureNone") is False
     assert gb.isOff("featureNone") is True
     assert gb.getFeatureValue("featureNone", 10) == 10
+
+    gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_feature_methods_async():
+    gb = AsyncGrowthBook()
+
+    await gb.set_features(features={
+        "featureOn": {"defaultValue": 12},
+        "featureNone": {"defaultValue": None},
+        "featureOff": {"defaultValue": 0},
+    })
+
+    assert (await gb.isOn("featureOn")) is True
+    assert (await gb.isOff("featureOn")) is False
+    assert (await gb.getFeatureValue("featureOn", 15)) == 12
+
+    assert (await gb.isOn("featureOff")) is False
+    assert (await gb.isOff("featureOff")) is True
+    assert (await gb.getFeatureValue("featureOff", 10)) == 0
+
+    assert (await gb.isOn("featureNone")) is False
+    assert (await gb.isOff("featureNone")) is True
+    assert (await gb.getFeatureValue("featureNone", 10)) == 10
 
     gb.destroy()
 
@@ -669,6 +1216,32 @@ def test_feature_repository(mocker):
     feature_repo.clear_cache()
 
 
+@pytest.mark.asyncio
+async def test_feature_repository_async(mocker):
+    m = mocker.patch.object(async_feature_repo, "_get_json_or_none")
+    expected = {"features": {"feature": {"defaultValue": 5}}}
+    m.return_value = expected
+    features = await async_feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    assert features == expected
+
+    # Uses in-memory cache for the 2nd call
+    features = await async_feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+    assert m.call_count == 1
+    assert features == expected
+
+    # Does a new request if cache entry is expired
+    async_feature_repo.cache.cache["https://cdn.growthbook.io::sdk-abc123"].expires = (
+        time() - 10
+    )
+    features = await async_feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+    assert m.call_count == 2
+    assert features == expected
+
+    await async_feature_repo.clear_cache()
+
+
 def test_feature_repository_error(mocker):
     m = mocker.patch.object(feature_repo, "_get")
     m.return_value = MockHttpResp(400, "400 Error")
@@ -689,6 +1262,23 @@ def test_feature_repository_error(mocker):
     assert features is None
 
     feature_repo.clear_cache()
+
+
+@pytest.mark.asyncio
+async def test_feature_repository_error_async(mocker):
+    m = mocker.patch.object(async_feature_repo, "_get_json_or_none")
+    m.return_value = None
+    features = await async_feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    assert features is None
+
+    # Does not cache errors
+    features = await async_feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+    assert m.call_count == 2
+    assert features is None
+
+    await async_feature_repo.clear_cache()
 
 
 def test_feature_repository_encrypted(mocker):
@@ -716,6 +1306,32 @@ def test_feature_repository_encrypted(mocker):
         feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
 
 
+@pytest.mark.asyncio
+async def test_feature_repository_encrypted_async(mocker):
+    m = mocker.patch.object(async_feature_repo, "_get_json_or_none")
+    m.return_value = {
+        "features": {},
+        "encryptedFeatures": "m5ylFM6ndyOJA2OPadubkw==.Uu7ViqgKEt/dWvCyhI46q088PkAEJbnXKf3KPZjf9IEQQ+A8fojNoxw4wIbPX3aj",
+    }
+    features = await async_feature_repo.load_features(
+        "https://cdn.growthbook.io", "sdk-abc123", "Zvwv/+uhpFDznZ6SX28Yjg=="
+    )
+
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    assert features == {"features": {"feature": {"defaultValue": True}}}
+
+    await async_feature_repo.clear_cache()
+
+    m.return_value = {
+        "features": {},
+        "encryptedFeatures": "m5ylFM6ndyOJA2OPadubkw==.Uu7ViqgKEt/dWvCyhI46q088PkAEJbnXKf3KPZjf9IEQQ+A8fojNoxw4wIbPX3aj",
+    }
+
+    # Raises exception if missing decryption key
+    with pytest.raises(Exception):
+        await async_feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
+
+
 def test_load_features(mocker):
     m = mocker.patch.object(feature_repo, "_get")
     m.return_value = MockHttpResp(
@@ -732,6 +1348,24 @@ def test_load_features(mocker):
     assert gb.get_features()["feature"].to_dict() == {"defaultValue": 5, "rules": []}
 
     feature_repo.clear_cache()
+    gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_load_features_async(mocker):
+    m = mocker.patch.object(async_feature_repo, "_get_json_or_none")
+    m.return_value = {"features": {"feature": {"defaultValue": 5}}}
+
+    gb = AsyncGrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
+
+    assert m.call_count == 0
+
+    await gb.load_features()
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+
+    assert gb.get_features()["feature"].to_dict() == {"defaultValue": 5, "rules": []}
+
+    await async_feature_repo.clear_cache()
     gb.destroy()
 
 
@@ -834,6 +1468,106 @@ def test_loose_unmarshalling(mocker):
     gb.destroy()
 
 
+@pytest.mark.asyncio
+async def test_loose_unmarshalling_async(mocker):
+    m = mocker.patch.object(async_feature_repo, "_get_json_or_none")
+    m.return_value = {
+        "features": {
+            "feature": {
+                "defaultValue": 5,
+                "rules": [
+                    {
+                        "condition": {"country": "US"},
+                        "force": 3,
+                        "hashVersion": 1,
+                        "unknown": "foo"
+                    },
+                    {
+                        "key": "my-exp",
+                        "hashVersion": 2,
+                        "variations": [0, 1],
+                        "meta": [
+                            {
+                                "key": "control",
+                                "unknown": "foo"
+                            },
+                            {
+                                "key": "variation1",
+                                "unknown": "foo"
+                            }
+                        ],
+                        "filters": [
+                            {
+                                "seed": "abc123",
+                                "ranges": [[0, 0.0001]],
+                                "hashVersion": 2,
+                                "attribute": "id",
+                                "unknown": "foo"
+                            }
+                        ]
+                    },
+                    {
+                        "unknownRuleType": "foo"
+                    }
+                ],
+                "unknown": "foo"
+            }
+        },
+        "unknown": "foo"
+    }
+
+    gb = AsyncGrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
+
+    assert m.call_count == 0
+
+    await gb.load_features()
+    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+
+    assert gb.get_features()["feature"].to_dict() == {
+        "defaultValue": 5,
+        "rules": [
+            {
+                "condition": {"country": "US"},
+                "force": 3,
+                "hashVersion": 1
+            },
+            {
+                "key": "my-exp",
+                "hashVersion": 2,
+                "variations": [0, 1],
+                "meta": [
+                    {
+                        "key": "control",
+                        "unknown": "foo"
+                    },
+                    {
+                        "key": "variation1",
+                        "unknown": "foo"
+                    }
+                ],
+                "filters": [
+                    {
+                        "seed": "abc123",
+                        "ranges": [[0, 0.0001]],
+                        "hashVersion": 2,
+                        "attribute": "id",
+                        "unknown": "foo"
+                    }
+                ]
+            },
+            {
+                "hashVersion": 1
+            }
+        ]
+    }
+
+    value = await gb.get_feature_value("feature", -1)
+    assert value == 5
+
+    await async_feature_repo.clear_cache()
+    gb.destroy()
+
+
 def test_sticky_bucket_service(mocker):
     # Start forcing everyone to variation1
     features = {
@@ -905,3 +1639,77 @@ def test_sticky_bucket_service(mocker):
     }
     gb.destroy()
     service.destroy()
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_service_async(mocker):
+    # Start forcing everyone to variation1
+    features = {
+        "feature": {
+            "defaultValue": 5,
+            "rules": [{
+                "key": "exp",
+                "variations": [0, 1],
+                "weights": [0, 1],
+                "meta": [
+                    {"key": "control"},
+                    {"key": "variation1"}
+                ]
+            }]
+        },
+    }
+
+    service = AsyncInMemoryStickyBucketService()
+    gb = AsyncGrowthBook(
+        sticky_bucket_service=service,
+        attributes={
+            "id": "1"
+        },
+    )
+    await gb.set_features(features)
+
+    assert await gb.get_feature_value("feature", -1) == 1
+    assert await service.get_assignments("id", "1") == {
+        "attributeName": "id",
+        "attributeValue": "1",
+        "assignments": {
+            "exp__0": "variation1"
+        }
+    }
+
+    logger.debug("Change weights and ensure old user still gets variation")
+    features["feature"]["rules"][0]["weights"] = [1, 0]
+    await gb.set_features(features)
+    assert await gb.get_feature_value("feature", -1) == 1
+
+    logger.debug("New GrowthBook instance should also get variation")
+    gb2 = AsyncGrowthBook(
+        sticky_bucket_service=service,
+        attributes={
+            "id": "1"
+        }
+    )
+    await gb2.set_features(features)
+
+    assert await gb2.get_feature_value("feature", -1) == 1
+    gb2.destroy()
+
+    logger.debug("New users should get control")
+    await gb.set_attributes({"id": "2"})
+    assert await gb.get_feature_value("feature", -1) == 0
+
+    logger.debug("Bumping bucketVersion, should reset sticky buckets")
+    await gb.set_attributes({"id": "1"})
+    features["feature"]["rules"][0]["bucketVersion"] = 1
+    await gb.set_features(features)
+    assert await gb.get_feature_value("feature", -1) == 0
+
+    assert await service.get_assignments("id", "1") == {
+        "attributeName": "id",
+        "attributeValue": "1",
+        "assignments": {
+            "exp__0": "variation1",
+            "exp__1": "control"
+        }
+    }
+    gb.destroy()

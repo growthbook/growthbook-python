@@ -7,5 +7,6 @@ coverage
 twine
 pytest
 pytest-mock
+pytest-asyncio
 mypy
 types-urllib3

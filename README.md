@@ -461,3 +461,84 @@ formatter = logging.Formatter('%(asctime)s %(name)s %(levelname)s %(message)s')
 handler.setFormatter(formatter)
 logger.addHandler(handler)
 ```
+
+## Async Support
+
+For use cases, where you need to run GrowthBook with asynchronous systems for sticky bucketing, caching, tracking callbacks (`on_experiment_viewed`), etc.,
+you can use the `AsyncGrowthBook` class. It has feature parity with the `GrowthBook` class, with some minor differences:
+
+- You will need to set and load features manually instead of providing `features` in the constructor.
+- Streaming needs to be started manually instead of providing the `streaming=True` flag in the constructor.
+- Tracking callbacks can be asynchronous (though they don't have to be).
+- Sticky bucketing and caching services need to be asynchronous, using the `AbstractAsyncStickyBucketService` and `AbstractAsyncFeatureCache` base classes.
+
+```python
+from growthbook import AsyncGrowthBook
+
+gb = AsyncGrowthBook(
+  attributes = attributes,
+  on_experiment_viewed = on_experiment_viewed,
+  api_host = "https://cdn.growthbook.io",
+  client_key = "sdk-abc123"
+)
+
+# Setting features
+await gb.set_features(features)
+
+# Starting up streaming
+await gb.load_features()
+await gb.startAutoRefresh()
+```
+
+### Sticky Bucketing
+
+```python
+from growthbook import AbstractAsyncStickyBucketService, AsyncGrowthBook
+
+class MyAsyncStickyBucketService(AbstractAsyncStickyBucketService):
+        # Lookup a sticky bucket document
+    async def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+        return await db.find({
+          "attributeName": attributeName,
+          "attributeValue": attributeValue
+        })
+
+    async def save_assignments(self, doc: Dict) -> None:
+        # Insert new record if not exists, otherwise update
+        await db.upsert({
+            "attributeName": doc["attributeName"],
+            "attributeValue": doc["attributeValue"]
+        }, {
+          "$set": {
+            "assignments": doc["assignments"]
+          }
+        })
+
+gb = AsyncGrowthBook(
+  sticky_bucket_service = MyAsyncStickyBucketService()
+)
+```
+
+### Caching
+
+```python
+from redis.asyncio import Redis
+import json
+from growthbook import AbstractAsyncFeatureCache, AsyncGrowthBook, async_feature_repo
+
+class AsyncRedisFeatureCache(AbstractAsyncFeatureCache):
+  def __init__(self):
+    self.r = Redis(host='localhost', port=6379)
+    self.prefix = "gb:"
+
+  async def get(self, key: str):
+    data = await self.r.get(self.prefix + key)
+    # Data stored as a JSON string, parse into dict before returning
+    return None if data is None else json.loads(data)
+
+  async def set(self, key: str, value: dict, ttl: int) -> None:
+    await self.r.set(self.prefix + key, json.dumps(value))
+    await self.r.expire(self.prefix + key, ttl)
+
+async_feature_repo.set_cache(AsyncRedisFeatureCache())
+```
