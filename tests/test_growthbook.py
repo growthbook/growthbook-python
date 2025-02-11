@@ -8,6 +8,12 @@ from growthbook import (
     Experiment,
     Feature,
     InMemoryStickyBucketService,
+    decrypt,
+    feature_repo,
+    logger,
+)
+
+from growthbook.core import (
     getBucketRanges,
     gbhash,
     chooseVariation,
@@ -16,10 +22,8 @@ from growthbook import (
     inNamespace,
     getEqualWeights,
     evalCondition,
-    decrypt,
-    feature_repo,
-    logger,
 )
+
 from time import time
 import pytest
 
@@ -136,7 +140,6 @@ def test_run(run_data):
 
 def test_stickyBucket(stickyBucket_data):
     _, ctx, key, expected_result, expected_docs = stickyBucket_data
-
     # Just use the interface directly, which passes and doesn't persist anywhere
     service = InMemoryStickyBucketService()
     ctx['sticky_bucket_service'] = service
@@ -151,7 +154,7 @@ def test_stickyBucket(stickyBucket_data):
 
     gb = GrowthBook(**ctx)
     res = gb.eval_feature(key)
-
+    
     if not res.experimentResult:
       assert None == expected_result
     else:
@@ -174,7 +177,7 @@ def getTrackingMock(gb: GrowthBook):
 
 
 def test_tracking():
-    gb = GrowthBook(user={"id": "1"})
+    gb = GrowthBook(attributes={"id": "1"})
 
     getMockedCalls = getTrackingMock(gb)
 
@@ -191,7 +194,7 @@ def test_tracking():
     gb.run(exp1)
     gb.run(exp1)
     res4 = gb.run(exp2)
-    gb._user = {"id": "2"}
+    gb._attributes = {"id": "2"}
     res5 = gb.run(exp2)
 
     calls = getMockedCalls()
@@ -204,7 +207,7 @@ def test_tracking():
 
 
 def test_handles_weird_experiment_values():
-    gb = GrowthBook(user={"id": "1"})
+    gb = GrowthBook(attributes={"id": "1"})
 
     assert (
         gb.run(
@@ -228,7 +231,7 @@ def test_handles_weird_experiment_values():
 
 
 def test_force_variation():
-    gb = GrowthBook(user={"id": "6"})
+    gb = GrowthBook(attributes={"id": "6"})
     exp = Experiment(key="forced-test", variations=[0, 1])
     assert gb.run(exp).value == 0
 
@@ -249,7 +252,7 @@ def test_force_variation():
 
 def test_uses_overrides():
     gb = GrowthBook(
-        user={"id": "1"},
+        attributes={"id": "1"},
         overrides={
             "my-test": {
                 "coverage": 0.01,
@@ -288,7 +291,7 @@ def test_uses_overrides():
 
 def test_filters_user_groups():
     gb = GrowthBook(
-        user={"id": "123"},
+        attributes={"id": "123"},
         groups={
             "alpha": True,
             "beta": True,
@@ -345,7 +348,7 @@ def test_runs_custom_include_callback():
 
 
 def test_supports_custom_user_hash_keys():
-    gb = GrowthBook(user={"id": "1", "company": "abc"})
+    gb = GrowthBook(attributes={"id": "1", "company": "abc"})
 
     exp = Experiment(key="my-test", variations=[0, 1], hashAttribute="company")
 
@@ -359,7 +362,7 @@ def test_supports_custom_user_hash_keys():
 
 def test_querystring_force_disabled_tracking():
     gb = GrowthBook(
-        user={"id": "1"},
+        attributes={"id": "1"},
         url="http://example.com?forced-test-qs=1",
     )
     getMockedCalls = getTrackingMock(gb)
@@ -376,7 +379,7 @@ def test_querystring_force_disabled_tracking():
 
 def test_url_targeting():
     gb = GrowthBook(
-        user={"id": "1"},
+        attributes={"id": "1"},
         url="http://example.com",
     )
 
@@ -405,7 +408,7 @@ def test_url_targeting():
 
 def test_invalid_url_regex():
     gb = GrowthBook(
-        user={"id": "1"},
+        attributes={"id": "1"},
         overrides={
             "my-test": {
                 "url": "???***[)",
@@ -428,7 +431,7 @@ def test_invalid_url_regex():
 
 
 def test_ignores_draft_experiments():
-    gb = GrowthBook(user={"id": "1"})
+    gb = GrowthBook(attributes={"id": "1"})
     exp = Experiment(
         key="my-test",
         status="draft",
@@ -450,7 +453,7 @@ def test_ignores_draft_experiments():
 
 
 def test_ignores_stopped_experiments_unless_forced():
-    gb = GrowthBook(user={"id": "1"})
+    gb = GrowthBook(attributes={"id": "1"})
     expLose = Experiment(
         key="my-test",
         status="stopped",
@@ -561,7 +564,7 @@ def test_fires_subscriptions_correctly():
 
 def test_stores_assigned_variations_in_the_user():
     gb = GrowthBook(
-        user={
+        attributes={
             "id": "1",
         },
     )

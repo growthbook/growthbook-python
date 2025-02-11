@@ -7,9 +7,21 @@ this_directory = path.abspath(path.dirname(__file__))
 with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
 
-requirements = ['cryptography', 'typing_extensions', 'urllib3', ]
+requirements = [
+    'cryptography', 
+    'typing_extensions', 
+    'urllib3',
+    'dataclasses;python_version<"3.7"',  # Add dataclasses backport for Python 3.6
+    'async-generator;python_version<"3.7"',  # For asynccontextmanager in Python 3.6
+    'aiohttp>=3.6.0',  # For async HTTP support
+    'importlib-metadata;python_version<"3.8"',  # For metadata in Python 3.6-3.7
+]
 
-test_requirements = ['pytest>=3', ]
+test_requirements = [
+    'pytest>=3',
+    'pytest-asyncio>=0.10.0',
+    'mock;python_version<"3.8"',  # Only install mock for Python < 3.8
+]
 
 setup(
     name='growthbook',
@@ -37,11 +49,9 @@ setup(
     install_requires=requirements,
     license="MIT",
     include_package_data=True,
-    packages=find_packages(),
+    packages=find_packages(include=['growthbook', 'growthbook.*']),
     package_data={"growthbook": ["py.typed"]},
     keywords='growthbook',
-    py_modules=['growthbook'],
-    scripts=['growthbook/growthbook.py'],
     test_suite='tests',
     tests_require=test_requirements,
     url='https://github.com/growthbook/growthbook-python',

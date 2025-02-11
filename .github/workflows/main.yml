@@ -34,7 +34,12 @@ jobs:
 
       - name: Static type checking with MyPy
         run: |
-          mypy growthbook/growthbook.py --implicit-optional
+          if [ "${{ matrix.python-version }}" = "3.6" ]; then
+            python -m pip install types-dataclasses
+            mypy growthbook/growthbook.py --implicit-optional --ignore-missing-imports
+          else
+            mypy growthbook/growthbook.py --implicit-optional
+          fi
 
       - name: Test with pytest
         run: |
