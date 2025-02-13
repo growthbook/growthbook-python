@@ -11,6 +11,7 @@ Powerful Feature flagging and A/B testing for Python apps.
 - Flexible **targeting**
 - **Use your existing event tracking** (GA, Segment, Mixpanel, custom)
 - **Remote configuration** to change feature flags without deploying new code
+- **Async support** with real-time feature updates
 
 ## Installation
 
@@ -84,6 +85,158 @@ def index(request):
     feature_enabled = request.gb.is_on("my-feature")
     # ...
 ```
+
+## Quick Usage - Async Client
+
+```python
+from growthbook import GrowthBookClient, Options, UserContext, FeatureRefreshStrategy
+import asyncio
+
+async def main():
+    # Create client options
+    options = Options(
+        api_host="https://cdn.growthbook.io",
+        client_key="sdk-abc123",
+        # Optional: Enable real-time feature updates
+        refresh_strategy=FeatureRefreshStrategy.SERVER_SENT_EVENTS
+    )
+
+    # Create and initialize client
+    client = GrowthBookClient(options)
+    try:
+        # Initialize the client before using it
+        success = await client.initialize()
+        if not success:
+            print("Failed to initialize GrowthBook client")
+            return
+
+        # Create user context for targeting
+        user = UserContext(
+            attributes={
+                "id": "123",
+                "country": "US",
+                "premium": True
+            }
+        )
+
+        # Simple feature evaluation
+        if await client.is_on("new-homepage", user):
+            print("New homepage is enabled!")
+
+        # Get feature value with fallback
+        color = await client.get_feature_value("button-color", "blue", user)
+        print(f"Button color is {color}")
+
+        # Run an experiment
+        result = await client.run(
+            Experiment(
+                key="my-test",
+                variations=["A", "B"]
+            ),
+            user
+        )
+        print(f"User got variation: {result.value}")
+    finally:
+        # Always close the client when done
+        await client.close()
+
+# Run the async code
+asyncio.run(main())
+```
+
+### Async Web Framework Integration
+
+The async client works great with async web frameworks like FastAPI:
+
+```python
+from fastapi import FastAPI, Depends
+from growthbook import GrowthBookClient, Options, UserContext
+
+app = FastAPI()
+
+# Create a single client instance
+gb_client = GrowthBookClient(
+    Options(
+        api_host="https://cdn.growthbook.io",
+        client_key="sdk-abc123"
+    )
+)
+
+@app.on_event("startup")
+async def startup():
+    # Initialize the client when the app starts
+    await gb_client.initialize()
+
+@app.on_event("shutdown")
+async def shutdown():
+    # Clean up when the app shuts down
+    await gb_client.close()
+
+@app.get("/")
+async def root(user_id: str):
+    # Create user context for the request
+    user = UserContext(attributes={"id": user_id})
+    
+    # Use features
+    show_new_ui = await gb_client.is_on("new-ui", user)
+    return {"new_ui": show_new_ui}
+```
+
+### Real-time Feature Updates
+
+The async client supports real-time feature updates using Server-Sent Events:
+
+```python
+from growthbook import GrowthBookClient, Options, FeatureRefreshStrategy
+
+client = GrowthBookClient(
+    Options(
+        api_host="https://cdn.growthbook.io",
+        client_key="sdk-abc123",
+        # Enable SSE for real-time updates
+        refresh_strategy=FeatureRefreshStrategy.SERVER_SENT_EVENTS
+    )
+)
+```
+
+### Concurrency and Thread Safety
+
+The async client is designed to be thread-safe and handle concurrent requests efficiently. You can safely use a single client instance across multiple coroutines. For web applications, you can create a single client instance at startup and share it across requests. Here's an example:
+
+```python
+from fastapi import FastAPI
+from growthbook import GrowthBookClient, Options, UserContext
+import asyncio
+
+app = FastAPI()
+
+# Single client instance shared across all requests
+gb_client = GrowthBookClient(Options(
+    api_host="https://cdn.growthbook.io",
+    client_key="sdk-abc123"
+))
+
+@app.on_event("startup")
+async def startup():
+    await gb_client.initialize()
+
+@app.on_event("shutdown")
+async def shutdown():
+    await gb_client.close()
+
+@app.get("/batch")
+async def batch_process(user_ids: list[str]):
+    # Safely process multiple users concurrently
+    tasks = []
+    for user_id in user_ids:
+        user = UserContext(attributes={"id": user_id})
+        tasks.append(gb_client.eval_feature("new-feature", user))
+    
+    results = await asyncio.gather(*tasks)
+    return {"results": results}
+```
+
+Note: While the client is thread-safe, you should not share a single `UserContext` instance across different requests. Create a new `UserContext` for each request to maintain proper isolation.
 
 ## Loading Features
 
@@ -178,8 +331,8 @@ gb.set_attributes(gb.get_attributes())
 
 You can specify attributes about the current user and request. These are used for two things:
 
-1.  Feature targeting (e.g. paid users get one value, free users get another)
-2.  Assigning persistent variations in A/B tests (e.g. user id "123" always gets variation B)
+1. Feature targeting (e.g. paid users get one value, free users get another)
+2. Assigning persistent variations in A/B tests (e.g. user id "123" always gets variation B)
 
 Attributes can be any JSON data type - boolean, integer, float, string, list, or dict.
 

@@ -46,8 +46,11 @@ clean-test: ## remove test and coverage artifacts
 	rm -fr htmlcov/
 	rm -fr .pytest_cache
 
-lint: ## check style with flake8
-	flake8 growthbook --max-line-length=150
+lint: ## check style with ruff
+	ruff check growthbook
+
+format:  ## format code with ruff
+	ruff format growthbook
 
 type-check:
 	mypy growthbook --implicit-optional

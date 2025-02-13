@@ -1,0 +1,14 @@
+# Stick to old setup and keep only pytest config
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]
+pythonpath = "."
+
+[tool.mypy]
+implicit_optional = true
+
+[tool.ruff]
+line-length = 150
+indent-width = 4
+target-version = "py37"

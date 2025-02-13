@@ -2,11 +2,13 @@ pip
 bump2version
 wheel
 watchdog
-flake8
 coverage
 twine
 pytest
 pytest-mock
 pytest-asyncio
 mypy
+types-dataclasses>=0.6.6;python_version<"3.7"
 types-urllib3
+aiohttp-sse-client
+ruff

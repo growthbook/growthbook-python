@@ -5,11 +5,20 @@ import os
 from typing import Union
 
 from growthbook import (
-    FeatureRule,
     GrowthBook,
     Experiment,
     Feature,
     InMemoryStickyBucketService,
+    decrypt,
+    feature_repo,
+    logger,
+    AsyncGrowthBook,
+    async_feature_repo,
+    AsyncInMemoryStickyBucketService
+)
+from growthbook.common_types import FeatureRule
+
+from growthbook.core import (
     getBucketRanges,
     gbhash,
     chooseVariation,
@@ -18,14 +27,7 @@ from growthbook import (
     inNamespace,
     getEqualWeights,
     evalCondition,
-    decrypt,
-    feature_repo,
-    logger,
-    AsyncGrowthBook,
-    async_feature_repo,
-    AsyncInMemoryStickyBucketService
 )
-
 
 from time import time
 import pytest
@@ -180,7 +182,6 @@ async def test_run_async(run_data):
 
 def test_stickyBucket(stickyBucket_data):
     _, ctx, key, expected_result, expected_docs = stickyBucket_data
-
     # Just use the interface directly, which passes and doesn't persist anywhere
     service = InMemoryStickyBucketService()
     ctx['sticky_bucket_service'] = service
@@ -253,7 +254,7 @@ def getTrackingMock(gb: Union[GrowthBook, AsyncGrowthBook]):
 
 
 def test_tracking():
-    gb = GrowthBook(user={"id": "1"})
+    gb = GrowthBook(attributes={"id": "1"})
 
     getMockedCalls = getTrackingMock(gb)
 
@@ -270,7 +271,7 @@ def test_tracking():
     gb.run(exp1)
     gb.run(exp1)
     res4 = gb.run(exp2)
-    gb._user = {"id": "2"}
+    gb._attributes = {"id": "2"}
     res5 = gb.run(exp2)
 
     calls = getMockedCalls()
@@ -284,7 +285,7 @@ def test_tracking():
 
 @pytest.mark.asyncio
 async def test_tracking_async():
-    gb = AsyncGrowthBook(user={"id": "1"})
+    gb = AsyncGrowthBook(attributes={"id": "1"})
 
     getMockedCalls = getTrackingMock(gb)
 
@@ -301,7 +302,7 @@ async def test_tracking_async():
     await gb.run(exp1)
     await gb.run(exp1)
     res4 = await gb.run(exp2)
-    gb._user = {"id": "2"}
+    gb._attributes = {"id": "2"}
     res5 = await gb.run(exp2)
 
     calls = getMockedCalls()
@@ -314,7 +315,7 @@ async def test_tracking_async():
 
 
 def test_handles_weird_experiment_values():
-    gb = GrowthBook(user={"id": "1"})
+    gb = GrowthBook(attributes={"id": "1"})
 
     assert (
         gb.run(
@@ -339,7 +340,7 @@ def test_handles_weird_experiment_values():
 
 @pytest.mark.asyncio
 async def test_handles_weird_experiment_values_async():
-    gb = AsyncGrowthBook(user={"id": "1"})
+    gb = AsyncGrowthBook(attributes={"id": "1"})
 
     assert (
         (await gb.run(
@@ -363,7 +364,7 @@ async def test_handles_weird_experiment_values_async():
 
 
 def test_force_variation():
-    gb = GrowthBook(user={"id": "6"})
+    gb = GrowthBook(attributes={"id": "6"})
     exp = Experiment(key="forced-test", variations=[0, 1])
     assert gb.run(exp).value == 0
 
@@ -384,7 +385,7 @@ def test_force_variation():
 
 @pytest.mark.asyncio
 async def test_force_variation_async():
-    gb = AsyncGrowthBook(user={"id": "6"})
+    gb = AsyncGrowthBook(attributes={"id": "6"})
     exp = Experiment(key="forced-test", variations=[0, 1])
     assert (await gb.run(exp)).value == 0
 
@@ -405,7 +406,7 @@ async def test_force_variation_async():
 
 def test_uses_overrides():
     gb = GrowthBook(
-        user={"id": "1"},
+        attributes={"id": "1"},
         overrides={
             "my-test": {
                 "coverage": 0.01,
@@ -445,7 +446,7 @@ def test_uses_overrides():
 @pytest.mark.asyncio
 async def test_uses_overrides_async():
     gb = AsyncGrowthBook(
-        user={"id": "1"},
+        attributes={"id": "1"},
         overrides={
             "my-test": {
                 "coverage": 0.01,
@@ -484,7 +485,7 @@ async def test_uses_overrides_async():
 
 def test_filters_user_groups():
     gb = GrowthBook(
-        user={"id": "123"},
+        attributes={"id": "123"},
         groups={
             "alpha": True,
             "beta": True,
@@ -531,7 +532,7 @@ def test_filters_user_groups():
 @pytest.mark.asyncio
 async def test_filters_user_groups_async():
     gb = AsyncGrowthBook(
-        user={"id": "123"},
+        attributes={"id": "123"},
         groups={
             "alpha": True,
             "beta": True,
@@ -601,7 +602,7 @@ async def test_runs_custom_include_callback_async():
 
 
 def test_supports_custom_user_hash_keys():
-    gb = GrowthBook(user={"id": "1", "company": "abc"})
+    gb = GrowthBook(attributes={"id": "1", "company": "abc"})
 
     exp = Experiment(key="my-test", variations=[0, 1], hashAttribute="company")
 
@@ -615,7 +616,7 @@ def test_supports_custom_user_hash_keys():
 
 @pytest.mark.asyncio
 async def test_supports_custom_user_hash_keys_async():
-    gb = AsyncGrowthBook(user={"id": "1", "company": "abc"})
+    gb = AsyncGrowthBook(attributes={"id": "1", "company": "abc"})
 
     exp = Experiment(key="my-test", variations=[0, 1], hashAttribute="company")
 
@@ -629,7 +630,7 @@ async def test_supports_custom_user_hash_keys_async():
 
 def test_querystring_force_disabled_tracking():
     gb = GrowthBook(
-        user={"id": "1"},
+        attributes={"id": "1"},
         url="http://example.com?forced-test-qs=1",
     )
     getMockedCalls = getTrackingMock(gb)
@@ -647,7 +648,7 @@ def test_querystring_force_disabled_tracking():
 @pytest.mark.asyncio
 async def test_querystring_force_disabled_tracking_async():
     gb = AsyncGrowthBook(
-        user={"id": "1"},
+        attributes={"id": "1"},
         url="http://example.com?forced-test-qs=1",
     )
     getMockedCalls = getTrackingMock(gb)
@@ -664,7 +665,7 @@ async def test_querystring_force_disabled_tracking_async():
 
 def test_url_targeting():
     gb = GrowthBook(
-        user={"id": "1"},
+        attributes={"id": "1"},
         url="http://example.com",
     )
 
@@ -694,7 +695,7 @@ def test_url_targeting():
 @pytest.mark.asyncio
 async def test_url_targeting_async():
     gb = AsyncGrowthBook(
-        user={"id": "1"},
+        attributes={"id": "1"},
         url="http://example.com",
     )
 
@@ -723,7 +724,7 @@ async def test_url_targeting_async():
 
 def test_invalid_url_regex():
     gb = GrowthBook(
-        user={"id": "1"},
+        attributes={"id": "1"},
         overrides={
             "my-test": {
                 "url": "???***[)",
@@ -748,7 +749,7 @@ def test_invalid_url_regex():
 @pytest.mark.asyncio
 async def test_invalid_url_regex_async():
     gb = AsyncGrowthBook(
-        user={"id": "1"},
+        attributes={"id": "1"},
         overrides={
             "my-test": {
                 "url": "???***[)",
@@ -771,7 +772,7 @@ async def test_invalid_url_regex_async():
 
 
 def test_ignores_draft_experiments():
-    gb = GrowthBook(user={"id": "1"})
+    gb = GrowthBook(attributes={"id": "1"})
     exp = Experiment(
         key="my-test",
         status="draft",
@@ -794,7 +795,7 @@ def test_ignores_draft_experiments():
 
 @pytest.mark.asyncio
 async def test_ignores_draft_experiments_async():
-    gb = AsyncGrowthBook(user={"id": "1"})
+    gb = AsyncGrowthBook(attributes={"id": "1"})
     exp = Experiment(
         key="my-test",
         status="draft",
@@ -816,7 +817,7 @@ async def test_ignores_draft_experiments_async():
 
 
 def test_ignores_stopped_experiments_unless_forced():
-    gb = GrowthBook(user={"id": "1"})
+    gb = GrowthBook(attributes={"id": "1"})
     expLose = Experiment(
         key="my-test",
         status="stopped",
@@ -842,7 +843,7 @@ def test_ignores_stopped_experiments_unless_forced():
 
 @pytest.mark.asyncio
 async def test_ignores_stopped_experiments_unless_forced_async():
-    gb = AsyncGrowthBook(user={"id": "1"})
+    gb = AsyncGrowthBook(attributes={"id": "1"})
     expLose = Experiment(
         key="my-test",
         status="stopped",
@@ -1025,7 +1026,7 @@ async def test_fires_subscriptions_correctly_async():
 
 def test_stores_assigned_variations_in_the_user():
     gb = GrowthBook(
-        user={
+        attributes={
             "id": "1",
         },
     )
@@ -1051,7 +1052,7 @@ def test_stores_assigned_variations_in_the_user():
 @pytest.mark.asyncio
 async def test_stores_assigned_variations_in_the_user_async():
     gb = AsyncGrowthBook(
-        user={
+        attributes={
             "id": "1",
         },
     )
