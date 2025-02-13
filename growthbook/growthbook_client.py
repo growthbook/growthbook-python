@@ -1,15 +1,14 @@
 #!/usr/bin/env python
 
-from dataclasses import dataclass, field
 import random
 import logging
-from typing import Any, Dict, List, Optional, Union, Callable, Awaitable
-from typing import Set
+from typing import Any, Dict, Optional, Union, Callable, Set
 import asyncio
 import threading
 import traceback
 from datetime import datetime
 from growthbook import FeatureRepository
+
 try:
     from contextlib import asynccontextmanager
 except ImportError:
@@ -20,21 +19,23 @@ from .core import eval_feature as core_eval_feature, run_experiment
 from .common_types import (
     Feature,
     GlobalContext,
-    Options,
     Result,
     UserContext,
     EvaluationContext,
     StackContext,
     FeatureResult,
     FeatureRefreshStrategy,
-    Experiment
+    Experiment,
+    ClientOptions,
 )
 
 logger = logging.getLogger("growthbook.growthbook_client")
 
+
 class SingletonMeta(type):
     """Thread-safe implementation of Singleton pattern"""
-    _instances = {}
+
+    _instances: Dict[type, Any] = {}
     _lock = threading.Lock()
 
     def __call__(cls, *args, **kwargs):
@@ -44,14 +45,16 @@ class SingletonMeta(type):
                 cls._instances[cls] = instance
         return cls._instances[cls]
 
+
 class BackoffStrategy:
     """Exponential backoff with jitter for failed requests"""
+
     def __init__(
-        self, 
-        initial_delay: float = 1.0, 
-        max_delay: float = 60.0, 
+        self,
+        initial_delay: float = 1.0,
+        max_delay: float = 60.0,
         multiplier: float = 2.0,
-        jitter: float = 0.1
+        jitter: float = 0.1,
     ):
         self.initial_delay = initial_delay
         self.max_delay = max_delay
@@ -63,8 +66,7 @@ class BackoffStrategy:
     def next_delay(self) -> float:
         """Calculate next delay with jitter"""
         delay = min(
-            self.current_delay * (self.multiplier ** self.attempt), 
-            self.max_delay
+            self.current_delay * (self.multiplier**self.attempt), self.max_delay
         )
         # Add random jitter
         jitter_amount = delay * self.jitter
@@ -77,43 +79,51 @@ class BackoffStrategy:
         self.current_delay = self.initial_delay
         self.attempt = 0
 
+
 class WeakRefWrapper:
     """A wrapper class to allow weak references for otherwise non-weak-referenceable objects."""
+
     def __init__(self, obj):
         self.obj = obj
 
+
 class FeatureCache:
     """Thread-safe feature cache"""
+
     def __init__(self):
-        self._cache = {
-            'features': {},
-            'savedGroups': {}
-        }
+        self._cache = {"features": {}, "savedGroups": {}}
         self._lock = threading.Lock()
 
     def update(self, features: Dict[str, Any], saved_groups: Dict[str, Any]) -> None:
         """Simple thread-safe update of cache with new API data"""
         with self._lock:
-            self._cache['features'].update(features)
-            self._cache['savedGroups'].update(saved_groups)
+            self._cache["features"].update(features)
+            self._cache["savedGroups"].update(saved_groups)
 
     def get_current_state(self) -> Dict[str, Any]:
         """Get current cache state"""
         with self._lock:
             return {
-                "features": dict(self._cache['features']),
-                "savedGroups": self._cache['savedGroups']
+                "features": dict(self._cache["features"]),
+                "savedGroups": self._cache["savedGroups"],
             }
 
+
 class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
-    def __init__(self, api_host: str, client_key: str, decryption_key: str = "", cache_ttl: int = 60):
+    def __init__(
+        self,
+        api_host: str,
+        client_key: str,
+        decryption_key: str = "",
+        cache_ttl: int = 60,
+    ):
         FeatureRepository.__init__(self)
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
         self._cache_ttl = cache_ttl
         self._refresh_lock = threading.Lock()
-        self._refresh_task = None
+        self._refresh_task: Union[asyncio.Task | None] = None
         self._stop_event = asyncio.Event()
         self._backoff = BackoffStrategy()
         self._feature_cache = FeatureCache()
@@ -147,8 +157,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         """Update features with memory optimization"""
         # Directly update with new features
         self._feature_cache.update(
-            data.get("features", {}),
-            data.get("savedGroups", {})
+            data.get("features", {}), data.get("savedGroups", {})
         )
 
         # Create a copy of callbacks to avoid modification during iteration
@@ -181,13 +190,16 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
 
             async def sse_handler(event_data: Dict[str, Any]) -> None:
                 try:
-                    if event_data['type'] == 'features-updated':
+                    if event_data["type"] == "features-updated":
                         response = await self.load_features_async(
-                            self._api_host, self._client_key, self._decryption_key, self._cache_ttl
+                            self._api_host,
+                            self._client_key,
+                            self._decryption_key,
+                            self._cache_ttl,
                         )
                         await self._handle_feature_update(response)
-                    elif event_data['type'] == 'features':
-                        await self._handle_feature_update(event_data['data'])
+                    elif event_data["type"] == "features":
+                        await self._handle_feature_update(event_data["data"])
                 except Exception:
                     traceback.print_exc()
 
@@ -204,7 +216,9 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             except Exception as e:
                 if not self._stop_event.is_set():
                     delay = self._backoff.next_delay()
-                    logger.error(f"SSE connection lost, reconnecting in {delay:.2f}s: {str(e)}")
+                    logger.error(
+                        f"SSE connection lost, reconnecting in {delay:.2f}s: {str(e)}"
+                    )
                     await asyncio.sleep(delay)
 
     async def _start_http_refresh(self, interval: int = 60) -> None:
@@ -222,7 +236,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                                     api_host=self._api_host,
                                     client_key=self._client_key,
                                     decryption_key=self._decryption_key,
-                                    ttl=self._cache_ttl
+                                    ttl=self._cache_ttl,
                                 )
                                 await self._handle_feature_update(response)
                                 # On success, reset backoff and use normal interval
@@ -235,7 +249,9 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                             except Exception as e:
                                 # On failure, use backoff delay
                                 delay = self._backoff.next_delay()
-                                logger.error(f"Refresh failed, next attempt in {delay:.2f}s: {str(e)}")
+                                logger.error(
+                                    f"Refresh failed, next attempt in {delay:.2f}s: {str(e)}"
+                                )
                                 traceback.print_exc()
                                 try:
                                     await asyncio.sleep(delay)
@@ -251,10 +267,12 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
 
         self._refresh_task = asyncio.create_task(refresh_loop())
 
-    async def start_feature_refresh(self, strategy: FeatureRefreshStrategy, callback=None):
+    async def start_feature_refresh(
+        self, strategy: FeatureRefreshStrategy, callback=None
+    ):
         """Initialize feature refresh based on strategy"""
         self._refresh_callback = callback
-        
+
         if strategy == FeatureRefreshStrategy.SERVER_SENT_EVENTS:
             await self._start_sse_refresh()
         else:
@@ -283,7 +301,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
 
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.stop_refresh()
-    
+
     async def load_features_async(
         self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
     ) -> Optional[Dict]:
@@ -291,40 +309,43 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         if api_host == self._api_host and client_key == self._client_key:
             decryption_key = self._decryption_key
             ttl = self._cache_ttl
-        return await super().load_features_async(api_host, client_key, decryption_key, ttl)
+        return await super().load_features_async(
+            api_host, client_key, decryption_key, ttl
+        )
+
 
 class GrowthBookClient:
-    def __init__(
-        self,
-        options: Optional[Union[Dict[str, Any], Options]] = None
-    ):  
+    def __init__(self, options: Optional[Union[Dict[str, Any], ClientOptions]] = None):
         self.options = (
-            options if isinstance(options, Options)
-            else Options(**options) if options
-            else Options()
+            options
+            if isinstance(options, ClientOptions)
+            else ClientOptions(**options)
+            if options
+            else ClientOptions()
         )
-        
+
         # Thread-safe tracking state
         self._tracked: Dict[str, bool] = {}  # Access only within async context
         self._tracked_lock = threading.Lock()
-        
+
         # Thread-safe subscription management
         self._subscriptions: Set[Callable[[Experiment, Result], None]] = set()
         self._subscriptions_lock = threading.Lock()
 
         # Add sticky bucket cache
-        self._sticky_bucket_cache = {
-            'attributes': {},
-            'assignments': {}
-        }
+        self._sticky_bucket_cache = {"attributes": {}, "assignments": {}}
         self._sticky_bucket_cache_lock = False
-        
+
         self._features_repository = (
-            EnhancedFeatureRepository(self.options.api_host, self.options.client_key, self.options.decryption_key)
+            EnhancedFeatureRepository(
+                self.options.api_host,
+                self.options.client_key,
+                self.options.decryption_key,
+            )
             if self.options.client_key
             else None
         )
-        
+
         self._global_context = None
         self._context_lock = asyncio.Lock()
 
@@ -344,18 +365,24 @@ class GrowthBookClient:
         with self._tracked_lock:
             if not self._tracked.get(key):
                 try:
-                    self.options.on_experiment_viewed(experiment=experiment, result=result)
+                    self.options.on_experiment_viewed(
+                        experiment=experiment, result=result
+                    )
                     self._tracked[key] = True
                 except Exception:
                     logger.exception("Error in tracking callback")
 
-    def subscribe(self, callback: Callable[[Experiment, Result], None]) -> Callable[[], None]:
+    def subscribe(
+        self, callback: Callable[[Experiment, Result], None]
+    ) -> Callable[[], None]:
         """Thread-safe subscription management"""
         with self._subscriptions_lock:
             self._subscriptions.add(callback)
+
             def unsubscribe():
                 with self._subscriptions_lock:
                     self._subscriptions.discard(callback)
+
             return unsubscribe
 
     def _fire_subscriptions(self, experiment: Experiment, result: Result) -> None:
@@ -369,21 +396,25 @@ class GrowthBookClient:
             except Exception:
                 logger.exception("Error in subscription callback")
 
-    async def _refresh_sticky_buckets(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
+    async def _refresh_sticky_buckets(
+        self, attributes: Dict[str, Any]
+    ) -> Dict[str, Any]:
         """Refresh sticky bucket assignments only if attributes have changed"""
         if not self.options.sticky_bucket_service:
             return {}
 
         # Use compare-and-swap pattern
         while not self._sticky_bucket_cache_lock:
-            if attributes == self._sticky_bucket_cache['attributes']:
-                return self._sticky_bucket_cache['assignments']
-            
+            if attributes == self._sticky_bucket_cache["attributes"]:
+                return self._sticky_bucket_cache["assignments"]
+
             self._sticky_bucket_cache_lock = True
             try:
-                assignments = self.options.sticky_bucket_service.get_all_assignments(attributes)
-                self._sticky_bucket_cache['attributes'] = attributes.copy()
-                self._sticky_bucket_cache['assignments'] = assignments
+                assignments = self.options.sticky_bucket_service.get_all_assignments(
+                    attributes
+                )
+                self._sticky_bucket_cache["attributes"] = attributes.copy()
+                self._sticky_bucket_cache["assignments"] = assignments
                 return assignments
             finally:
                 self._sticky_bucket_cache_lock = False
@@ -397,7 +428,10 @@ class GrowthBookClient:
         try:
             # Initial feature load
             initial_features = await self._features_repository.load_features_async(
-                self.options.api_host, self.options.client_key, self.options.decryption_key, self.options.cache_ttl
+                self.options.api_host,
+                self.options.client_key,
+                self.options.decryption_key,
+                self.options.cache_ttl,
             )
             if not initial_features:
                 logger.error("Failed to load initial features")
@@ -405,14 +439,16 @@ class GrowthBookClient:
 
             # Create global context with initial features
             await self._feature_update_callback(initial_features)
-            
+
             # Set up callback for future updates
             self._features_repository.add_callback(self._feature_update_callback)
-            
+
             # Start feature refresh
-            await self._features_repository.start_feature_refresh(self.options.refresh_strategy)
+            await self._features_repository.start_feature_refresh(
+                self.options.refresh_strategy
+            )
             return True
-            
+
         except Exception as e:
             logger.error(f"Initialization failed: {str(e)}", exc_info=True)
             traceback.print_exc()
@@ -439,9 +475,10 @@ class GrowthBookClient:
             if self._global_context is None:
                 # Initial creation of global context
                 self._global_context = GlobalContext(
-                        options=self.options,
-                        features=features,
-                        saved_groups=features_data.get("savedGroups", {})
+                    options=self.options,
+                    features=features,
+                    saved_groups=features_data.get("savedGroups", {}),
+                    sticky_bucket_service=self.options.sticky_bucket_service,
                 )
             else:
                 # Update existing global context
@@ -455,21 +492,23 @@ class GrowthBookClient:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         await self.close()
 
-    async def create_evaluation_context(self, user_context: UserContext) -> EvaluationContext:
+    async def create_evaluation_context(
+        self, user_context: UserContext
+    ) -> EvaluationContext:
         """Create evaluation context for feature evaluation"""
         if self._global_context is None:
             raise RuntimeError("GrowthBook client not properly initialized")
-            
+
         # Get sticky bucket assignments if needed
         sticky_assignments = await self._refresh_sticky_buckets(user_context.attributes)
-        
+
         # update user context with sticky bucket assignments
         user_context.sticky_bucket_assignment_docs = sticky_assignments
 
         return EvaluationContext(
             user=user_context,
             global_ctx=self._global_context,
-            stack=StackContext(evaluted_features=set())
+            stack=StackContext(evaluted_features=set()),
         )
 
     async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult:
@@ -484,14 +523,16 @@ class GrowthBookClient:
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
             return core_eval_feature(key=key, evalContext=context).on
-    
+
     async def is_off(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is set to off with proper async context management"""
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
             return core_eval_feature(key=key, evalContext=context).off
-    
-    async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext) -> Any:
+
+    async def get_feature_value(
+        self, key: str, fallback: Any, user_context: UserContext
+    ) -> Any:
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
             result = core_eval_feature(key=key, evalContext=context)
@@ -502,14 +543,12 @@ class GrowthBookClient:
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
             result = run_experiment(
-                experiment=experiment, 
-                evalContext=context,
-                tracking_cb=self._track
+                experiment=experiment, evalContext=context, tracking_cb=self._track
             )
             # Fire subscriptions synchronously
             self._fire_subscriptions(experiment, result)
             return result
-        
+
     async def close(self) -> None:
         """Clean shutdown with proper cleanup"""
         if self._features_repository:

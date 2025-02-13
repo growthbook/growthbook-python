@@ -11,32 +11,37 @@ import threading
 import logging
 
 from abc import ABC, abstractmethod
-from typing import Optional, Any, Set, Tuple, List, Dict
+from typing import Optional, Any, Set, List, Dict
 
-from .common_types import ( EvaluationContext, 
-    Experiment, 
-    FeatureResult, 
+from .common_types import (
+    EvaluationContext,
+    Experiment,
+    FeatureResult,
     Feature,
-    GlobalContext, 
-    Options, 
-    Result, StackContext, 
-    UserContext, 
+    GlobalContext,
+    Options,
+    Result,
+    StackContext,
+    UserContext,
     AbstractStickyBucketService,
-    FeatureRule
 )
 
 # Only require typing_extensions if using Python 3.7 or earlier
 if sys.version_info >= (3, 8):
-    from typing import TypedDict
+    pass
 else:
-    from typing_extensions import TypedDict
+    pass
 
 from base64 import b64decode
 from time import time
 import aiohttp
 import asyncio
 
-from aiohttp.client_exceptions import ClientConnectorError, ClientResponseError, ClientPayloadError
+from aiohttp.client_exceptions import (
+    ClientConnectorError,
+    ClientResponseError,
+    ClientPayloadError,
+)
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from urllib3 import PoolManager
@@ -44,6 +49,7 @@ from urllib3 import PoolManager
 from .core import _getHashValue, eval_feature as core_eval_feature, run_experiment
 
 logger = logging.getLogger("growthbook")
+
 
 def decrypt(encrypted_str: str, key_str: str) -> str:
     iv_str, ct_str = encrypted_str.split(".", 2)
@@ -61,6 +67,7 @@ def decrypt(encrypted_str: str, key_str: str) -> str:
     bytestring = unpadder.update(decrypted) + unpadder.finalize()
 
     return bytestring.decode("utf-8")
+
 
 class AbstractFeatureCache(ABC):
     @abstractmethod
@@ -105,11 +112,14 @@ class InMemoryFeatureCache(AbstractFeatureCache):
     def clear(self) -> None:
         self.cache.clear()
 
+
 class InMemoryStickyBucketService(AbstractStickyBucketService):
     def __init__(self) -> None:
         self.docs: Dict[str, Dict] = {}
 
-    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+    def get_assignments(
+        self, attributeName: str, attributeValue: str
+    ) -> Optional[Dict]:
         return self.docs.get(self.get_key(attributeName, attributeValue), None)
 
     def save_assignments(self, doc: Dict) -> None:
@@ -129,6 +139,7 @@ class SSEClient:
 
         self._sse_session = None
         self._sse_thread = None
+        self._sse_task = None
         self._loop = None
 
         self.is_running = False
@@ -150,6 +161,15 @@ class SSEClient:
         self._sse_thread = threading.Thread(target=self._run_sse_channel)
         self._sse_thread.start()
 
+    async def connect_async(self):
+        if self.is_running:
+            logger.debug("Streaming session is already running.")
+            return
+
+        self.is_running = True
+        self._loop = asyncio.get_running_loop()
+        self._sse_task = asyncio.create_task(self._init_session())
+
     def disconnect(self):
         self.is_running = False
         if self._loop and self._loop.is_running():
@@ -164,13 +184,24 @@ class SSEClient:
 
         logger.debug("Streaming session disconnected")
 
+    async def disconnect_async(self):
+        self.is_running = False
+        if self._loop and self._loop.is_running():
+            await self._stop_session()
+
+        if self._sse_task:
+            async with asyncio.timeout(5):
+                await self._sse_task
+
+        logger.debug("Streaming session disconnected")
+
     def _get_sse_url(self, api_host: str, client_key: str) -> str:
         api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
         return f"{api_host}/sub/{client_key}"
 
     async def _init_session(self):
         url = self._get_sse_url(self.api_host, self.client_key)
-        
+
         while self.is_running:
             try:
                 async with aiohttp.ClientSession(headers=self.headers) as session:
@@ -180,7 +211,9 @@ class SSEClient:
                         response.raise_for_status()
                         await self._process_response(response)
             except ClientResponseError as e:
-                logger.error(f"Streaming error, closing connection: {e.status} {e.message}")
+                logger.error(
+                    f"Streaming error, closing connection: {e.status} {e.message}"
+                )
                 self.is_running = False
                 break
             except (ClientConnectorError, ClientPayloadError) as e:
@@ -189,7 +222,9 @@ class SSEClient:
                     break
                 await self._wait_for_reconnect()
             except TimeoutError:
-                logger.warning(f"Streaming connection timed out after {self.timeout} seconds.")
+                logger.warning(
+                    f"Streaming connection timed out after {self.timeout} seconds."
+                )
                 await self._wait_for_reconnect()
             except asyncio.CancelledError:
                 logger.debug("Streaming was cancelled.")
@@ -200,17 +235,20 @@ class SSEClient:
     async def _process_response(self, response):
         event_data = {}
         async for line in response.content:
-            decoded_line = line.decode('utf-8').strip()
+            decoded_line = line.decode("utf-8").strip()
             if decoded_line.startswith("event:"):
-                event_data['type'] = decoded_line[len("event:"):].strip()
+                event_data["type"] = decoded_line[len("event:") :].strip()
             elif decoded_line.startswith("data:"):
-                event_data['data'] = event_data.get('data', '') + f"\n{decoded_line[len('data:'):].strip()}"
+                event_data["data"] = (
+                    event_data.get("data", "")
+                    + f"\n{decoded_line[len('data:') :].strip()}"
+                )
             elif not decoded_line:
-                if 'type' in event_data and 'data' in event_data:
+                if "type" in event_data and "data" in event_data:
                     self.on_event(event_data)
                 event_data = {}
 
-        if 'type' in event_data and 'data' in event_data:
+        if "type" in event_data and "data" in event_data:
             self.on_event(event_data)
 
     async def _wait_for_reconnect(self):
@@ -224,7 +262,7 @@ class SSEClient:
 
     def _run_sse_channel(self):
         self._loop = asyncio.new_event_loop()
-        
+
         try:
             self._loop.run_until_complete(self._init_session())
         except asyncio.CancelledError:
@@ -245,6 +283,7 @@ class SSEClient:
                     await task
                 except asyncio.CancelledError:
                     pass
+
 
 class FeatureRepository(object):
     def __init__(self) -> None:
@@ -267,7 +306,7 @@ class FeatureRepository(object):
     ) -> Optional[Dict]:
         if not client_key:
             raise ValueError("Must specify `client_key` to refresh features")
-        
+
         key = api_host + "::" + client_key
 
         cached = self.cache.get(key)
@@ -278,7 +317,7 @@ class FeatureRepository(object):
                 logger.debug("Fetched features from API, stored in cache")
                 return res
         return cached
-    
+
     async def load_features_async(
         self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
     ) -> Optional[Dict]:
@@ -297,7 +336,7 @@ class FeatureRepository(object):
     def _get(self, url: str):
         self.http = self.http or PoolManager()
         return self.http.request("GET", url)
-    
+
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
         try:
             r = self._get(self._get_features_url(api_host, client_key))
@@ -311,14 +350,19 @@ class FeatureRepository(object):
         except Exception:
             logger.warning("Failed to decode feature JSON from GrowthBook API")
             return None
-        
-    async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
+
+    async def _fetch_and_decode_async(
+        self, api_host: str, client_key: str
+    ) -> Optional[Dict]:
         try:
             url = self._get_features_url(api_host, client_key)
             async with aiohttp.ClientSession() as session:
                 async with session.get(url) as response:
                     if response.status >= 400:
-                        logger.warning("Failed to fetch features, received status code %d", response.status)
+                        logger.warning(
+                            "Failed to fetch features, received status code %d",
+                            response.status,
+                        )
                         return None
                     decoded = await response.json()
                     return decoded
@@ -328,15 +372,15 @@ class FeatureRepository(object):
         except Exception as e:
             logger.warning("Failed to decode feature JSON from GrowthBook API: %s", e)
             return None
-        
+
     def decrypt_response(self, data, decryption_key: str):
         if "encryptedFeatures" in data:
             if not decryption_key:
                 raise ValueError("Must specify decryption_key")
             try:
                 decryptedFeatures = decrypt(data["encryptedFeatures"], decryption_key)
-                data['features'] = json.loads(decryptedFeatures)
-                del data['encryptedFeatures']
+                data["features"] = json.loads(decryptedFeatures)
+                del data["encryptedFeatures"]
             except Exception:
                 logger.warning(
                     "Failed to decrypt features from GrowthBook API response"
@@ -344,20 +388,22 @@ class FeatureRepository(object):
                 return None
         elif "features" not in data:
             logger.warning("GrowthBook API response missing features")
-        
+
         if "encryptedSavedGroups" in data:
             if not decryption_key:
                 raise ValueError("Must specify decryption_key")
             try:
-                decryptedFeatures = decrypt(data["encryptedSavedGroups"], decryption_key)
-                data['savedGroups'] = json.loads(decryptedFeatures)
-                del data['encryptedSavedGroups']
+                decryptedFeatures = decrypt(
+                    data["encryptedSavedGroups"], decryption_key
+                )
+                data["savedGroups"] = json.loads(decryptedFeatures)
+                del data["encryptedSavedGroups"]
                 return data
             except Exception:
                 logger.warning(
                     "Failed to decrypt saved groups from GrowthBook API response"
                 )
-            
+
         return data
 
     # Fetch features from the GrowthBook API
@@ -371,7 +417,7 @@ class FeatureRepository(object):
         data = self.decrypt_response(decoded, decryption_key)
 
         return data
-        
+
     async def _fetch_features_async(
         self, api_host: str, client_key: str, decryption_key: str = ""
     ) -> Optional[Dict]:
@@ -383,11 +429,12 @@ class FeatureRepository(object):
 
         return data
 
-
     def startAutoRefresh(self, api_host, client_key, cb):
         if not client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
-        self.sse_client = self.sse_client or SSEClient(api_host=api_host, client_key=client_key, on_event=cb)
+        self.sse_client = self.sse_client or SSEClient(
+            api_host=api_host, client_key=client_key, on_event=cb
+        )
         self.sse_client.connect()
 
     def stopAutoRefresh(self):
@@ -402,7 +449,124 @@ class FeatureRepository(object):
 # Singleton instance
 feature_repo = FeatureRepository()
 
-class GrowthBook(object):
+
+class AgnosticGrowthBookBase(ABC):
+    def __init__(
+        self,
+        enabled: bool = True,
+        attributes: dict = {},
+        url: str = "",
+        qa_mode: bool = False,
+        on_experiment_viewed=None,
+        api_host: str = "",
+        client_key: str = "",
+        decryption_key: str = "",
+        cache_ttl: int = 60,
+        forced_variations: dict = {},
+        sticky_bucket_identifier_attributes: List[str] = None,
+        savedGroups: dict = {},
+        user: dict = {},
+        groups: dict = {},
+        overrides: dict = {},
+    ):
+        self._enabled = enabled
+        self._attributes = attributes
+        self._url = url
+        self._features: Dict[str, Feature] = {}
+        self._api_host = api_host
+        self._client_key = client_key
+        self._decryption_key = decryption_key
+        self._cache_ttl = cache_ttl
+        self._qaMode = qa_mode
+        self._groups = groups
+        self._overrides = overrides
+        self._forcedVariations = forced_variations
+        self._sticky_bucket_assignment_docs: dict = {}
+        self._sticky_bucket_attributes: Optional[dict] = None
+        self._using_derived_sticky_bucket_attributes = (
+            not sticky_bucket_identifier_attributes
+        )
+        self._saved_groups = savedGroups
+
+        self.sticky_bucket_identifier_attributes = sticky_bucket_identifier_attributes
+
+        self._global_ctx_options = Options(
+            url=self._url,
+            api_host=self._api_host,
+            client_key=self._client_key,
+            decryption_key=self._decryption_key,
+            cache_ttl=self._cache_ttl,
+            sticky_bucket_identifier_attributes=self.sticky_bucket_identifier_attributes,
+            enabled=self._enabled,
+            qa_mode=self._qaMode,
+        )
+
+        # Create a user context for the current user
+        self._user_ctx: UserContext = UserContext(
+            url=self._url,
+            attributes=self._attributes,
+            groups=self._groups,
+            forced_variations=self._forcedVariations,
+            overrides=self._overrides,
+            sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs,
+        )
+
+        # Deprecated args
+        self._user = user
+        self._groups = groups
+        self._overrides = overrides
+        self._forcedVariations = forced_variations
+
+        self._tracked: Dict[str, Any] = {}
+        self._assigned: Dict[str, Any] = {}
+
+        self._subscriptions: Set[Any] = set()
+        self._trackingCallback = on_experiment_viewed
+
+    # @deprecated, use get_attributes
+    def getAttributes(self) -> dict:
+        return self.get_attributes()
+
+    def get_attributes(self) -> dict:
+        return self._attributes
+
+    def get_features(self) -> Dict[str, Feature]:
+        return self._features
+
+    # @deprecated, use get_features
+    def getFeatures(self) -> Dict[str, Feature]:
+        return self.get_features()
+
+    # @deprecated, use get_all_results
+    def getAllResults(self):
+        return self.get_all_results()
+
+    def get_all_results(self):
+        return self._assigned.copy()
+
+    def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
+        attributes = set()
+        for key, feature in self._features.items():
+            for rule in feature.rules:
+                if rule.variations:
+                    attributes.add(rule.hashAttribute or "id")
+                    if rule.fallbackAttribute:
+                        attributes.add(rule.fallbackAttribute)
+        return list(attributes)
+
+    def destroy(self) -> None:
+        self._subscriptions.clear()
+        self._tracked.clear()
+        self._assigned.clear()
+        self._trackingCallback = None
+        self._forcedVariations.clear()
+        self._overrides.clear()
+        self._groups.clear()
+        self._attributes.clear()
+        self._features.clear()
+
+
+class GrowthBook(AgnosticGrowthBookBase):
     def __init__(
         self,
         enabled: bool = True,
@@ -428,60 +592,33 @@ class GrowthBook(object):
         overrides: dict = {},
         forcedVariations: dict = {},
     ):
-        self._enabled = enabled
-        self._attributes = attributes
-        self._url = url
-        self._features: Dict[str, Feature] = {}
-        self._saved_groups = savedGroups
-        self._api_host = api_host
-        self._client_key = client_key
-        self._decryption_key = decryption_key
-        self._cache_ttl = cache_ttl
-        self.sticky_bucket_identifier_attributes = sticky_bucket_identifier_attributes
-        self.sticky_bucket_service = sticky_bucket_service
-        self._sticky_bucket_assignment_docs: dict = {}
-        self._using_derived_sticky_bucket_attributes = not sticky_bucket_identifier_attributes
-        self._sticky_bucket_attributes: Optional[dict] = None
-
-        self._qaMode = qa_mode or qaMode
-        self._trackingCallback = on_experiment_viewed or trackingCallback
-
-        self._streaming = streaming
-
-        # Deprecated args
-        self._user = user
-        self._groups = groups
-        self._overrides = overrides
-        self._forcedVariations = forced_variations or forcedVariations
-
-        self._tracked: Dict[str, Any] = {}
-        self._assigned: Dict[str, Any] = {}
-        self._subscriptions: Set[Any] = set()
+        super().__init__(
+            enabled=enabled,
+            attributes=attributes,
+            url=url,
+            qa_mode=qa_mode or qaMode,
+            on_experiment_viewed=on_experiment_viewed or trackingCallback,
+            api_host=api_host,
+            client_key=client_key,
+            decryption_key=decryption_key,
+            cache_ttl=cache_ttl,
+            forced_variations=forced_variations or forcedVariations,
+            savedGroups=savedGroups,
+            sticky_bucket_identifier_attributes=sticky_bucket_identifier_attributes,
+            user=user,
+            groups=groups,
+            overrides=overrides,
+        )
 
         self._global_ctx = GlobalContext(
-            options=Options(
-                url=self._url,
-                api_host=self._api_host,
-                client_key=self._client_key,
-                decryption_key=self._decryption_key,
-                cache_ttl=self._cache_ttl,
-                sticky_bucket_service=self.sticky_bucket_service,
-                sticky_bucket_identifier_attributes=self.sticky_bucket_identifier_attributes,
-                enabled=self._enabled,
-                qa_mode=self._qaMode
-            ),
-            features={},
-            saved_groups=self._saved_groups
-        )       
-        # Create a user context for the current user
-        self._user_ctx: UserContext = UserContext(
-            url=self._url,
-            attributes=self._attributes,
-            groups=self._groups,
-            forced_variations=self._forcedVariations,
-            overrides=self._overrides,
-            sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs
+            options=self._global_ctx_options,
+            sticky_bucket_service=sticky_bucket_service,
+            features=self._features,
+            saved_groups=self._saved_groups,
         )
+
+        self.sticky_bucket_service = sticky_bucket_service
+        self._streaming = streaming
 
         if features:
             self.setFeatures(features)
@@ -490,8 +627,9 @@ class GrowthBook(object):
             self.load_features()
             self.startAutoRefresh()
 
-
     def load_features(self) -> None:
+        if not self._client_key:
+            raise ValueError("Must specify `client_key` to refresh features")
 
         response = feature_repo.load_features(
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
@@ -521,7 +659,7 @@ class GrowthBook(object):
         decoded = json.loads(features)
         if not decoded:
             return None
-        
+
         data = feature_repo.decrypt_response(decoded, self._decryption_key)
 
         if data is not None:
@@ -532,22 +670,21 @@ class GrowthBook(object):
             feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
 
     def _dispatch_sse_event(self, event_data):
-        event_type = event_data['type']
-        data = event_data['data']
-        if event_type == 'features-updated':
+        event_type = event_data["type"]
+        data = event_data["data"]
+        if event_type == "features-updated":
             self.load_features()
-        elif event_type == 'features':
+        elif event_type == "features":
             self._features_event_handler(data)
-
 
     def startAutoRefresh(self):
         if not self._client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
-       
+
         feature_repo.startAutoRefresh(
-            api_host=self._api_host, 
+            api_host=self._api_host,
             client_key=self._client_key,
-            cb=self._dispatch_sse_event
+            cb=self._dispatch_sse_event,
         )
 
     def stopAutoRefresh(self):
@@ -572,13 +709,6 @@ class GrowthBook(object):
         self._global_ctx.saved_groups = self._saved_groups
         self.refresh_sticky_buckets()
 
-    # @deprecated, use get_features
-    def getFeatures(self) -> Dict[str, Feature]:
-        return self.get_features()
-
-    def get_features(self) -> Dict[str, Feature]:
-        return self._features
-
     # @deprecated, use set_attributes
     def setAttributes(self, attributes: dict) -> None:
         return self.set_attributes(attributes)
@@ -586,24 +716,6 @@ class GrowthBook(object):
     def set_attributes(self, attributes: dict) -> None:
         self._attributes = attributes
         self.refresh_sticky_buckets()
-
-    # @deprecated, use get_attributes
-    def getAttributes(self) -> dict:
-        return self.get_attributes()
-
-    def get_attributes(self) -> dict:
-        return self._attributes
-
-    def destroy(self) -> None:
-        self._subscriptions.clear()
-        self._tracked.clear()
-        self._assigned.clear()
-        self._trackingCallback = None
-        self._forcedVariations.clear()
-        self._overrides.clear()
-        self._groups.clear()
-        self._attributes.clear()
-        self._features.clear()
 
     # @deprecated, use is_on
     def isOn(self, key: str) -> bool:
@@ -627,10 +739,6 @@ class GrowthBook(object):
         res = self.evalFeature(key)
         return res.value if res.value is not None else fallback
 
-    # @deprecated, use eval_feature
-    def evalFeature(self, key: str) -> FeatureResult:
-        return self.eval_feature(key)
-    
     def _get_eval_context(self) -> EvaluationContext:
         # use the latest attributes for every evaluation.
         self._user_ctx.attributes = self._attributes
@@ -639,28 +747,23 @@ class GrowthBook(object):
         # set the url for every evaluation. (unlikely to change)
         self._global_ctx.options.url = self._url
         return EvaluationContext(
-            global_ctx = self._global_ctx,
-            user = self._user_ctx,
-            stack = StackContext(evaluted_features=set())
+            global_ctx=self._global_ctx,
+            user=self._user_ctx,
+            stack=StackContext(evaluted_features=set()),
         )
 
     def eval_feature(self, key: str) -> FeatureResult:
-        return core_eval_feature(key=key, 
-                                 evalContext=self._get_eval_context(), 
-                                 callback_subscription=self._fireSubscriptions
-                                 )
+        return core_eval_feature(
+            key=key,
+            evalContext=self._get_eval_context(),
+            callback_subscription=self._fireSubscriptions,
+        )
 
-    # @deprecated, use get_all_results
-    def getAllResults(self):
-        return self.get_all_results()
-
-    def get_all_results(self):
-        return self._assigned.copy()
+    # @deprecated, use eval_feature
+    def evalFeature(self, key: str) -> FeatureResult:
+        return self.eval_feature(key)
 
     def _fireSubscriptions(self, experiment: Experiment, result: Result):
-        if experiment is None:
-            return
-        
         prev = self._assigned.get(experiment.key, None)
         if (
             not prev
@@ -679,10 +782,11 @@ class GrowthBook(object):
 
     def run(self, experiment: Experiment) -> Result:
         # result = self._run(experiment)
-        result = run_experiment(experiment=experiment, 
-                                evalContext=self._get_eval_context(),
-                                tracking_cb=self._track
-                                )
+        result = run_experiment(
+            experiment=experiment,
+            evalContext=self._get_eval_context(),
+            tracking_cb=self._track,
+        )
 
         self._fireSubscriptions(experiment, result)
         return result
@@ -707,30 +811,6 @@ class GrowthBook(object):
             except Exception:
                 pass
 
-    def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
-        attributes = set()
-        for key, feature in self._features.items():
-            for rule in feature.rules:
-                if rule.variations:
-                    attributes.add(rule.hashAttribute or "id")
-                    if rule.fallbackAttribute:
-                        attributes.add(rule.fallbackAttribute)
-        return list(attributes)
-
-    def _get_sticky_bucket_attributes(self) -> dict:
-        attributes: Dict[str, str] = {}
-        if self._using_derived_sticky_bucket_attributes:
-            self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes()
-
-        if not self.sticky_bucket_identifier_attributes:
-            return attributes
-
-        for attr in self.sticky_bucket_identifier_attributes:
-            _, hash_value = _getHashValue(attr=attr, eval_context=self._get_eval_context())
-            if hash_value:
-                attributes[attr] = hash_value
-        return attributes
-
     def refresh_sticky_buckets(self, force: bool = False) -> None:
         if not self.sticky_bucket_service:
             return
@@ -741,6 +821,28 @@ class GrowthBook(object):
             return
 
         self._sticky_bucket_attributes = attributes
-        self._sticky_bucket_assignment_docs = self.sticky_bucket_service.get_all_assignments(attributes)
+        self._sticky_bucket_assignment_docs = (
+            self.sticky_bucket_service.get_all_assignments(attributes)
+        )
         # Update the user context with the new sticky bucket assignment docs
-        self._user_ctx.sticky_bucket_assignment_docs = self._sticky_bucket_assignment_docs
+        self._user_ctx.sticky_bucket_assignment_docs = (
+            self._sticky_bucket_assignment_docs
+        )
+
+    def _get_sticky_bucket_attributes(self) -> dict:
+        attributes: Dict[str, str] = {}
+        if self._using_derived_sticky_bucket_attributes:
+            self.sticky_bucket_identifier_attributes = (
+                self._derive_sticky_bucket_identifier_attributes()
+            )
+
+        if not self.sticky_bucket_identifier_attributes:
+            return attributes
+
+        for attr in self.sticky_bucket_identifier_attributes:
+            _, hash_value = _getHashValue(
+                attr=attr, eval_context=self._get_eval_context()
+            )
+            if hash_value:
+                attributes[attr] = hash_value
+        return attributes

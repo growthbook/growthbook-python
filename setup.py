@@ -8,8 +8,8 @@ with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
     long_description = f.read()
 
 requirements = [
-    'cryptography', 
-    'typing_extensions', 
+    'cryptography',
+    'typing_extensions',
     'urllib3',
     'dataclasses;python_version<"3.7"',  # Add dataclasses backport for Python 3.6
     'async-generator;python_version<"3.7"',  # For asynccontextmanager in Python 3.6
@@ -25,7 +25,7 @@ test_requirements = [
 
 setup(
     name='growthbook',
-    version='1.2.0',
+    version='1.3.0',
     author="GrowthBook",
     author_email='hello@growthbook.io',
     python_requires='>=3.6',

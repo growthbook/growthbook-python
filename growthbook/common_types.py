@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import sys
+
 # Only require typing_extensions if using Python 3.7 or earlier
 if sys.version_info >= (3, 8):
     from typing import TypedDict
@@ -8,9 +9,10 @@ else:
     from typing_extensions import TypedDict
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Awaitable
 from enum import Enum
 from abc import ABC, abstractmethod
+
 
 class VariationMeta(TypedDict):
     key: str
@@ -23,6 +25,7 @@ class Filter(TypedDict):
     ranges: List[Tuple[float, float]]
     hashVersion: int
     attribute: str
+
 
 class Experiment(object):
     def __init__(
@@ -197,6 +200,7 @@ class Result(object):
 
         return obj
 
+
 class FeatureResult(object):
     def __init__(
         self,
@@ -230,6 +234,7 @@ class FeatureResult(object):
 
         return data
 
+
 class Feature(object):
     def __init__(self, defaultValue=None, rules: list = []) -> None:
         self.defaultValue = defaultValue
@@ -238,36 +243,41 @@ class Feature(object):
             if isinstance(rule, FeatureRule):
                 self.rules.append(rule)
             else:
-                self.rules.append(FeatureRule(
-                    id=rule.get("id", None),
-                    key=rule.get("key", ""),
-                    variations=rule.get("variations", None),
-                    weights=rule.get("weights", None),
-                    coverage=rule.get("coverage", None),
-                    condition=rule.get("condition", None),
-                    namespace=rule.get("namespace", None),
-                    force=rule.get("force", None),
-                    hashAttribute=rule.get("hashAttribute", "id"),
-                    fallbackAttribute=rule.get("fallbackAttribute", None),
-                    hashVersion=rule.get("hashVersion", None),
-                    range=rule.get("range", None),
-                    ranges=rule.get("ranges", None),
-                    meta=rule.get("meta", None),
-                    filters=rule.get("filters", None),
-                    seed=rule.get("seed", None),
-                    name=rule.get("name", None),
-                    phase=rule.get("phase", None),
-                    disableStickyBucketing=rule.get("disableStickyBucketing", False),
-                    bucketVersion=rule.get("bucketVersion", None),
-                    minBucketVersion=rule.get("minBucketVersion", None),
-                    parentConditions=rule.get("parentConditions", None),
-                ))
+                self.rules.append(
+                    FeatureRule(
+                        id=rule.get("id", None),
+                        key=rule.get("key", ""),
+                        variations=rule.get("variations", None),
+                        weights=rule.get("weights", None),
+                        coverage=rule.get("coverage", None),
+                        condition=rule.get("condition", None),
+                        namespace=rule.get("namespace", None),
+                        force=rule.get("force", None),
+                        hashAttribute=rule.get("hashAttribute", "id"),
+                        fallbackAttribute=rule.get("fallbackAttribute", None),
+                        hashVersion=rule.get("hashVersion", None),
+                        range=rule.get("range", None),
+                        ranges=rule.get("ranges", None),
+                        meta=rule.get("meta", None),
+                        filters=rule.get("filters", None),
+                        seed=rule.get("seed", None),
+                        name=rule.get("name", None),
+                        phase=rule.get("phase", None),
+                        disableStickyBucketing=rule.get(
+                            "disableStickyBucketing", False
+                        ),
+                        bucketVersion=rule.get("bucketVersion", None),
+                        minBucketVersion=rule.get("minBucketVersion", None),
+                        parentConditions=rule.get("parentConditions", None),
+                    )
+                )
 
     def to_dict(self) -> dict:
         return {
             "defaultValue": self.defaultValue,
             "rules": [rule.to_dict() for rule in self.rules],
         }
+
 
 class FeatureRule(object):
     def __init__(
@@ -295,7 +305,6 @@ class FeatureRule(object):
         minBucketVersion: int = None,
         parentConditions: List[dict] = None,
     ) -> None:
-
         if disableStickyBucketing:
             fallbackAttribute = None
 
@@ -371,17 +380,22 @@ class FeatureRule(object):
 
         return data
 
-class AbstractStickyBucketService(ABC):
+
+class AgnosticStickyBucketServiceBase(ABC):
+    def get_key(self, attributeName: str, attributeValue: str) -> str:
+        return f"{attributeName}||{attributeValue}"
+
+
+class AbstractStickyBucketService(AgnosticStickyBucketServiceBase, ABC):
     @abstractmethod
-    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+    def get_assignments(
+        self, attributeName: str, attributeValue: str
+    ) -> Optional[Dict]:
         pass
 
     @abstractmethod
     def save_assignments(self, doc: Dict) -> None:
         pass
-
-    def get_key(self, attributeName: str, attributeValue: str) -> str:
-        return f"{attributeName}||{attributeValue}"
 
     # By default, just loop through all attributes and call get_assignments
     # Override this method in subclasses to perform a multi-query instead
@@ -393,14 +407,39 @@ class AbstractStickyBucketService(ABC):
                 docs[self.get_key(attributeName, attributeValue)] = doc
         return docs
 
+
+class AbstractAsyncStickyBucketService(AgnosticStickyBucketServiceBase, ABC):
+    @abstractmethod
+    def get_assignments(
+        self, attributeName: str, attributeValue: str
+    ) -> Awaitable[Optional[Dict]]:
+        pass
+
+    @abstractmethod
+    def save_assignments(self, doc: Dict) -> Awaitable[None]:
+        pass
+
+    # By default, just loop through all attributes and call get_assignments
+    # Override this method in subclasses to perform a multi-query instead
+    async def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
+        docs = {}
+        for attributeName, attributeValue in attributes.items():
+            doc = await self.get_assignments(attributeName, attributeValue)
+            if doc:
+                docs[self.get_key(attributeName, attributeValue)] = doc
+        return docs
+
+
 @dataclass
-class StackContext: 
+class StackContext:
     id: Optional[str] = None
     evaluted_features: Set[str] = field(default_factory=set)
 
+
 class FeatureRefreshStrategy(Enum):
-    STALE_WHILE_REVALIDATE = 'HTTP_REFRESH'
-    SERVER_SENT_EVENTS = 'SSE'
+    STALE_WHILE_REVALIDATE = "HTTP_REFRESH"
+    SERVER_SENT_EVENTS = "SSE"
+
 
 @dataclass
 class Options:
@@ -413,10 +452,17 @@ class Options:
     qa_mode: bool = False
     enable_dev_mode: bool = False
     # forced_variations: Dict[str, Any] = field(default_factory=dict)
-    refresh_strategy: Optional[FeatureRefreshStrategy] = FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
-    sticky_bucket_service: Optional[AbstractStickyBucketService] = None
+    refresh_strategy: Optional[FeatureRefreshStrategy] = (
+        FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
+    )
     sticky_bucket_identifier_attributes: Optional[List[str]] = None
-    on_experiment_viewed=None
+    on_experiment_viewed = None
+
+
+@dataclass
+class ClientOptions(Options):
+    sticky_bucket_service: Optional[AbstractStickyBucketService] = None
+
 
 @dataclass
 class UserContext:
@@ -428,14 +474,32 @@ class UserContext:
     overrides: Dict[str, Any] = field(default_factory=dict)
     sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
 
+
 @dataclass
 class GlobalContext:
     options: Options
+    sticky_bucket_service: Optional[AbstractStickyBucketService] = None
     features: Dict[str, Any] = field(default_factory=dict)
     saved_groups: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class AsyncGlobalContext:
+    options: Options
+    sticky_bucket_service: Optional[AbstractAsyncStickyBucketService] = None
+    features: Dict[str, Any] = field(default_factory=dict)
+    saved_groups: Dict[str, Any] = field(default_factory=dict)
+
 
 @dataclass
 class EvaluationContext:
     user: UserContext
     global_ctx: GlobalContext
+    stack: StackContext
+
+
+@dataclass
+class AsyncEvaluationContext:
+    user: UserContext
+    global_ctx: AsyncGlobalContext
     stack: StackContext
