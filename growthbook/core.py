@@ -10,17 +10,20 @@ from .common_types import EvaluationContext, FeatureResult, Experiment, Filter, 
 logger = logging.getLogger("growthbook.core")
 
 def evalCondition(attributes: dict, condition: dict, savedGroups: dict = None) -> bool:
-    if "$or" in condition:
-        return evalOr(attributes, condition["$or"], savedGroups)
-    if "$nor" in condition:
-        return not evalOr(attributes, condition["$nor"], savedGroups)
-    if "$and" in condition:
-        return evalAnd(attributes, condition["$and"], savedGroups)
-    if "$not" in condition:
-        return not evalCondition(attributes, condition["$not"], savedGroups)
-
     for key, value in condition.items():
-        if not evalConditionValue(value, getPath(attributes, key), savedGroups):
+        if key == "$or":
+            if not evalOr(attributes, value, savedGroups):
+                return False
+        elif key == "$nor":
+            if evalOr(attributes, value, savedGroups):
+                return False
+        elif key == "$and":
+            if not evalAnd(attributes, value, savedGroups):
+                return False
+        elif key == "$not":
+            if evalCondition(attributes, value, savedGroups):
+                return False
+        elif not evalConditionValue(value, getPath(attributes, key), savedGroups):
             return False
 
     return True
@@ -276,6 +279,9 @@ def _isIncludedInRollout(
     if coverage is None and range is None:
         return True
 
+    if coverage == 0 and range is None:
+        return False
+
     (_, hash_value) = _getHashValue(attr=hashAttribute, fallbackAttr=fallbackAttribute, eval_context=eval_context)
     if hash_value == "":
         return False
@@ -418,15 +424,20 @@ def eval_feature(
         logger.warning("Unknown feature %s", key)
         return FeatureResult(None, "unknownFeature")
 
-    if key in evalContext.stack.evaluted_features:
-        logger.warning("Cyclic prerequisite detected, stack: %s", evalContext.stack.evaluted_features)
+    if key in evalContext.stack.evaluated_features:
+        logger.warning("Cyclic prerequisite detected, stack: %s", evalContext.stack.evaluated_features)
         return FeatureResult(None, "cyclicPrerequisite")
  
-    evalContext.stack.evaluted_features.add(key)
+    evalContext.stack.evaluated_features.add(key)
 
     feature = evalContext.global_ctx.features[key]
 
+    evaluated_features = evalContext.stack.evaluated_features.copy()
+
     for rule in feature.rules:
+        # Reset the stack for each rule
+        evalContext.stack.evaluated_features = evaluated_features.copy()
+
         if (rule.parentConditions):
             prereq_res = eval_prereqs(parentConditions=rule.parentConditions, evalContext=evalContext)
             if prereq_res == "gate":
@@ -519,7 +530,12 @@ def eval_feature(
     return FeatureResult(feature.defaultValue, "defaultValue")
 
 def eval_prereqs(parentConditions: List[dict], evalContext: EvaluationContext) -> str:
+    evaluated_features = evalContext.stack.evaluated_features.copy()
+
     for parentCondition in parentConditions:
+        # Reset the stack in each iteration
+        evalContext.stack.evaluated_features = evaluated_features.copy()
+
         parentRes = eval_feature(key=parentCondition.get("id", None), evalContext=evalContext)
 
         if parentRes.source == "cyclicPrerequisite":
