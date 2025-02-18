@@ -641,7 +641,7 @@ class GrowthBook(object):
         return EvaluationContext(
             global_ctx = self._global_ctx,
             user = self._user_ctx,
-            stack = StackContext(evaluted_features=set())
+            stack = StackContext(evaluated_features=set())
         )
 
     def eval_feature(self, key: str) -> FeatureResult:

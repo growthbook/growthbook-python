@@ -396,7 +396,7 @@ class AbstractStickyBucketService(ABC):
 @dataclass
 class StackContext: 
     id: Optional[str] = None
-    evaluted_features: Set[str] = field(default_factory=set)
+    evaluated_features: Set[str] = field(default_factory=set)
 
 class FeatureRefreshStrategy(Enum):
     STALE_WHILE_REVALIDATE = 'HTTP_REFRESH'

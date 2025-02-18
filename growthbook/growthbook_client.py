@@ -469,7 +469,7 @@ class GrowthBookClient:
         return EvaluationContext(
             user=user_context,
             global_ctx=self._global_context,
-            stack=StackContext(evaluted_features=set())
+            stack=StackContext(evaluated_features=set())
         )
 
     async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult:
