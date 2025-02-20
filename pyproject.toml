@@ -15,6 +15,16 @@ license = {text = "MIT"}
 authors = [
     {name = "GrowthBook", email = "hello@growthbook.io"}
 ]
+keywords = ["growthbook"]
+dependencies = [
+    "cryptography",
+    "typing_extensions",
+    "urllib3",
+    'dataclasses;python_version<"3.7"',
+    'async-generator;python_version<"3.7"',
+    "aiohttp>=3.6.0",
+    'importlib-metadata;python_version<"3.8"'
+]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -48,3 +58,7 @@ version_pattern = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
 template_dir = "templates"
 changelog_file = "CHANGELOG.md"
 exclude_commit_patterns = ["Merge pull request.*"]
+
+[build-system]
+requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
+build-backend = "setuptools.build_meta"
