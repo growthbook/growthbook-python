@@ -44,7 +44,7 @@ write_to = "growthbook/_version.py"
 version_scheme = "post-release"
 local_scheme = "no-local-version"
 git_describe_command = "git describe --tags --long"
-tag_regex = '^v(?P<version>[^\+]+)(?P<suffix>.*)?$'
+tag_regex = '^v(?P<version>\d+\.\d+\.\d+)$'
 
 [tool.semantic_release]
 branch = "main"
