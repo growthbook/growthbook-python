@@ -68,13 +68,13 @@ jobs:
           # Force version bump based on input
           case "${{ github.event.inputs.release_type }}" in
             "major")
-              semantic-release version --major --no-vcs-release
+              semantic-release version --major
               ;;
             "minor")
-              semantic-release version --minor --no-vcs-release
+              semantic-release version --minor
               ;;
             *)
-              semantic-release version --patch --no-vcs-release
+              semantic-release version --patch
               ;;
           esac
           
