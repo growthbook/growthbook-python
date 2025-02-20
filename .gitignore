@@ -102,3 +102,6 @@ ENV/
 
 # IDE settings
 .vscode/
+
+# Generated version file
+growthbook/_version.py
