@@ -22,8 +22,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # Get all history and tags
           token: ${{ secrets.GITHUB_TOKEN }}
+          submodules: true  # Get submodules if any
+          persist-credentials: false
+          fetch-tags: true
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -32,10 +35,13 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip
+          python -m pip install --upgrade pip setuptools setuptools_scm
           pip install -r requirements_dev.txt
           pip install -r requirements.txt
           pip install "python-semantic-release<8.0.0" build twine
+
+      - name: Check Git Files
+        run: ls -la .git
 
       - name: Run tests
         run: pytest
@@ -51,6 +57,10 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
+          # Get current version
+          CURRENT_VERSION=$(python setup.py --version)
+          echo "Current version: $CURRENT_VERSION"
+
           # Verify we can build the package
           python -m build
           twine check dist/*
@@ -58,16 +68,20 @@ jobs:
           # Force version bump based on input
           case "${{ github.event.inputs.release_type }}" in
             "major")
-              semantic-release version --major
+              semantic-release version --major --no-vcs-release
               ;;
             "minor")
-              semantic-release version --minor
+              semantic-release version --minor --no-vcs-release
               ;;
             *)
-              semantic-release version --patch
+              semantic-release version --patch --no-vcs-release
               ;;
           esac
           
+          # Get new version
+          NEW_VERSION=$(python setup.py --version)
+          echo "New version: $NEW_VERSION"
+
           # Publish to PyPI and GitHub
           semantic-release publish
 
@@ -102,4 +116,4 @@ jobs:
             --title "Update Python SDK to ${VERSION}" \
             --body "Automated PR to update Python SDK version to ${VERSION} in capabilities matrix" \
             --repo growthbook/growthbook \
-            --base main 
+            --base main

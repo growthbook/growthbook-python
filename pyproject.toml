@@ -41,8 +41,9 @@ classifiers = [
 
 [tool.setuptools_scm]
 write_to = "growthbook/_version.py"
-version_scheme = "release-branch-semver"
-local_scheme = "dirty-tag"
+version_scheme = "post-release"
+local_scheme = "no-local-version"
+git_describe_command = "git describe --tags --long"
 
 [tool.semantic_release]
 branch = "main"
