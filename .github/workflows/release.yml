@@ -60,10 +60,6 @@ jobs:
           # Get current version
           CURRENT_VERSION=$(python setup.py --version)
           echo "Current version: $CURRENT_VERSION"
-
-          # Ensure version file exists
-          python -c "import setuptools_scm; setuptools_scm.get_version(write_to='growthbook/_version.py')"
-          cat growthbook/_version.py
           
           # Verify we can build the package
           python -m build

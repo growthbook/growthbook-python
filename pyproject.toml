@@ -44,6 +44,7 @@ write_to = "growthbook/_version.py"
 version_scheme = "post-release"
 local_scheme = "no-local-version"
 git_describe_command = "git describe --tags --long"
+tag_regex = '^v(?P<version>[^\+]+)(?P<suffix>.*)?$'
 
 [tool.semantic_release]
 branch = "main"
@@ -51,10 +52,9 @@ upload_to_pypi = true
 build_command = "python -m build"
 commit_parser = "plain"
 major_on_zero = false
-tag_format = "{version}"
-version_source = "scm"
-# version_pattern = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
-version_variable = "growthbook/_version.py:__version__"
+tag_format = "v{version}"
+version_source = "tag"
+version_pattern = "v(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
 
 [tool.semantic_release.changelog]
 template_dir = "templates"
