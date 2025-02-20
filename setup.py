@@ -25,10 +25,14 @@ test_requirements = [
 
 setup(
     name='growthbook',
-    version='1.2.0',
     author="GrowthBook",
     author_email='hello@growthbook.io',
     python_requires='>=3.6',
+    setup_requires=['setuptools_scm'],
+    use_scm_version={
+        'write_to': 'growthbook/_version.py',
+        'write_to_template': '__version__ = "{version}"',
+    },
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',
