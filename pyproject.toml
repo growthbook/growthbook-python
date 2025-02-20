@@ -4,3 +4,21 @@ asyncio_mode = "strict"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = "."
+
+[project]
+dynamic = ["version"]
+
+[tool.semantic_release]
+branch = "main"
+upload_to_pypi = true
+build_command = "python -m build"
+commit_parser = "plain"
+major_on_zero = false
+tag_format = "v{version}"
+version_source = "tag"
+version_pattern = "(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
+
+[tool.semantic_release.changelog]
+template_dir = "templates"
+changelog_file = "CHANGELOG.md"
+exclude_commit_patterns = ["Merge pull request.*"]
