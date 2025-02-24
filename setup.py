@@ -28,11 +28,7 @@ setup(
     author="GrowthBook",
     author_email='hello@growthbook.io',
     python_requires='>=3.6',
-    setup_requires=['setuptools_scm'],
-    use_scm_version={
-        'write_to': 'growthbook/__init__.py:__version__',
-        'write_to_template': '__version__ = "{version}"',
-    },
+    version=__import__('growthbook').__version__,  # Get version from __init__.py
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',

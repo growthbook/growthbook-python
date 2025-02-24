@@ -57,5 +57,5 @@ changelog_file = "CHANGELOG.md"
 exclude_commit_patterns = ["Merge pull request.*"]
 
 [build-system]
-requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
+requires = ["setuptools>=45"]
 build-backend = "setuptools.build_meta"
