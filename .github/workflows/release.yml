@@ -57,26 +57,8 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
-          # Debug current state
-          echo "Current __init__.py contents:"
-          cat growthbook/__init__.py
-          echo "Current git tags:"
-          git tag -l
-          
-          case "${{ github.event.inputs.release_type }}" in
-            "major")
-              semantic-release version --major -D commit_author="github-actions <action@github.com>"
-              ;;
-            "minor")
-              semantic-release version --minor -D commit_author="github-actions <action@github.com>"
-              ;;
-            *)
-              semantic-release version --patch -D commit_author="github-actions <action@github.com>"
-              ;;
-          esac
-          
           # Publish the release
-          semantic-release publish
+          semantic-release publish --patch -D commit_author="github-actions <action@github.com>"
           
           # Get version for SDK update
           VERSION=$(python setup.py --version)
