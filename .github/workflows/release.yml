@@ -70,6 +70,12 @@ jobs:
           # Create version file
           python -c "import setuptools_scm; setuptools_scm.get_version(write_to='growthbook/_version.py')"
           
+          # Debug version file
+          echo "Version file contents:"
+          cat growthbook/_version.py
+          echo "Version file location:"
+          ls -l growthbook/_version.py
+          
           # Verify we can build the package
           python -m build
           twine check dist/*
@@ -77,13 +83,13 @@ jobs:
           # Force version bump based on input
           case "${{ github.event.inputs.release_type }}" in
             "major")
-              semantic-release version --major
+              PYTHONPATH=. semantic-release version --major
               ;;
             "minor")
-              semantic-release version --minor
+              PYTHONPATH=. semantic-release version --minor
               ;;
             *)
-              semantic-release version --patch
+              PYTHONPATH=. semantic-release version --patch
               ;;
           esac
           
