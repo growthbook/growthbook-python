@@ -58,7 +58,7 @@ jobs:
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
           # Publish the release
-          semantic-release publish --patch -D commit_author="github-actions <action@github.com>"
+          semantic-release publish -D commit_author="github-actions <action@github.com>"
           
           # Get version for SDK update
           VERSION=$(python setup.py --version)
