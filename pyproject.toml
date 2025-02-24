@@ -46,6 +46,7 @@ build_command = "python -m build"
 commit_parser = "plain"
 major_on_zero = false
 tag_format = "v{version}"
+version_source = "tag"
 version_variable = [
     "growthbook/__init__.py:__version__"
 ]
