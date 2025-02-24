@@ -57,25 +57,20 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
-          # Force version bump based on input
           case "${{ github.event.inputs.release_type }}" in
             "major")
-              semantic-release version --major
+              semantic-release publish --major -D commit_author="github-actions <action@github.com>"
               ;;
             "minor")
-              semantic-release version --minor
+              semantic-release publish --minor -D commit_author="github-actions <action@github.com>"
               ;;
             *)
-              semantic-release version --patch
+              semantic-release publish --patch -D commit_author="github-actions <action@github.com>"
               ;;
           esac
           
-          # Get new version
-          NEW_VERSION=$(python setup.py --version)
-          echo "New version: $NEW_VERSION"
-
-          # Publish to PyPI and GitHub
-          semantic-release publish -D commit_author="github-actions <action@github.com>"
+          # Get version for SDK update
+          VERSION=$(python setup.py --version)
 
       - name: Update SDK Versions Repository
         env:
