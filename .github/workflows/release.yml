@@ -60,13 +60,13 @@ jobs:
           # Force version bump based on input
           case "${{ github.event.inputs.release_type }}" in
             "major")
-              PYTHONPATH=. semantic-release version --major -D commit_author="github-actions <action@github.com>"
+              semantic-release version --major
               ;;
             "minor")
-              PYTHONPATH=. semantic-release version --minor -D commit_author="github-actions <action@github.com>"
+              semantic-release version --minor
               ;;
             *)
-              PYTHONPATH=. semantic-release version --patch -D commit_author="github-actions <action@github.com>"
+              semantic-release version --patch
               ;;
           esac
           
@@ -75,7 +75,7 @@ jobs:
           echo "New version: $NEW_VERSION"
 
           # Publish to PyPI and GitHub
-          semantic-release publish
+          semantic-release publish -D commit_author="github-actions <action@github.com>"
 
       - name: Update SDK Versions Repository
         env:
