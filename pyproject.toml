@@ -41,8 +41,8 @@ classifiers = [
 
 [tool.setuptools_scm]
 write_to = "growthbook/_version.py"
-version_scheme = "post-release"
-local_scheme = "no-local-version"
+version_scheme = "release-branch-semver"
+local_scheme = "clean-tag"
 git_describe_command = "git describe --tags --long"
 #tag_regex = '^v(?P<version>\d+\.\d+\.\d+)$'
 
@@ -53,8 +53,8 @@ build_command = "python -m build"
 commit_parser = "plain"
 major_on_zero = false
 tag_format = "v{version}"
-version_variable = "growthbook/_version.py:__version__"
-version_source = "commit"
+version_source = "tag"
+version_pattern = "v(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
 
 [tool.semantic_release.changelog]
 template_dir = "templates"
