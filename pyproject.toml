@@ -53,8 +53,9 @@ build_command = "python -m build"
 commit_parser = "plain"
 major_on_zero = false
 tag_format = "v{version}"
-version_source = "tag"
-version_pattern = "v(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
+# version_source = "tag"
+# version_pattern = "v(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
+version_variable = "growthbook/_version.py:__version__"
 
 [tool.semantic_release.changelog]
 template_dir = "templates"

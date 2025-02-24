@@ -57,9 +57,18 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
+          # Debug git info
+          echo "Git tags:"
+          git tag -l
+          echo "Latest tag:"
+          git describe --tags --abbrev=0
+          
           # Get current version
           CURRENT_VERSION=$(python setup.py --version)
           echo "Current version: $CURRENT_VERSION"
+          
+          # Create version file
+          python -c "import setuptools_scm; setuptools_scm.get_version(write_to='growthbook/_version.py')"
           
           # Verify we can build the package
           python -m build
