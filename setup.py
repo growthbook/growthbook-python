@@ -30,7 +30,7 @@ setup(
     python_requires='>=3.6',
     setup_requires=['setuptools_scm'],
     use_scm_version={
-        'write_to': 'growthbook/_version.py',
+        'write_to': 'growthbook/__init__.py:__version__',
         'write_to_template': '__version__ = "{version}"',
     },
     classifiers=[
