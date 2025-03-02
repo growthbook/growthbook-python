@@ -51,9 +51,6 @@ version_variable = [
     "growthbook/__init__.py:__version__"
 ]
 
-[tool.semantic_release.changelog]
-changelog_file = "CHANGELOG.md"
-
 [build-system]
 requires = ["setuptools>=45"]
 build-backend = "setuptools.build_meta"
