@@ -52,9 +52,9 @@ version_variable = [
 ]
 
 [tool.semantic_release.changelog]
-template_dir = "templates"
+template_dir = ""  # Use default template
 changelog_file = "CHANGELOG.md"
-exclude_commit_patterns = ["Merge pull request.*"]
+exclude_commit_patterns = []
 
 [build-system]
 requires = ["setuptools>=45"]
