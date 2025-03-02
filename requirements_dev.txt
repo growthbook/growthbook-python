@@ -1,5 +1,5 @@
 pip
-bump2version
+bump2version>=1.0.0
 wheel
 watchdog
 flake8
@@ -11,5 +11,3 @@ mypy
 types-dataclasses>=0.6.6;python_version<"3.7"
 types-urllib3
 aiohttp-sse-client
-python-semantic-release<8.0.0;python_version<"3.7"
-python-semantic-release>=8.3.0;python_version>="3.7"
