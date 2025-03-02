@@ -38,8 +38,6 @@ jobs:
           python -m pip install --upgrade pip setuptools
           pip install -r requirements_dev.txt
           pip install -r requirements.txt
-          pip install "python-semantic-release==7.33.5" build twine
-          semantic-release --version  # Check version
 
       - name: Check Git Files
         run: ls -la .git
@@ -57,33 +55,43 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
-          DEBUG: "true"
         run: |
-          # Check current state
-          echo "Current version in __init__.py:"
-          grep "__version__" growthbook/__init__.py
-          echo "Current git tags:"
-          git tag -l
+          # Install tools
+          pip install bump2version build twine
           
-          # Try version bump first
-          semantic-release version --patch || echo "Version bump failed with $?"
+          # 1. Bump version
+          case "${{ github.event.inputs.release_type }}" in
+            "major")
+              bump2version major
+              ;;
+            "minor")
+              bump2version minor
+              ;;
+            *)
+              bump2version patch
+              ;;
+          esac
           
-          # Check state after version bump
-          echo "Version after bump:"
-          grep "__version__" growthbook/__init__.py
+          # 2. Build package
+          python -m build
           
-          # Publish the release
-          semantic-release publish -v -D commit_author="github-actions <action@github.com>" || echo "Publish failed with $?"
+          # 3. Create GitHub Release
+          VERSION=$(grep "__version__" growthbook/__init__.py | cut -d'"' -f2)
+          git push && git push --tags
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --notes "Release v${VERSION}" \
+            dist/*
           
-          # Get version for SDK update
-          VERSION=$(python setup.py --version)
+          # 4. Publish to PyPI
+          twine upload dist/*
 
       - name: Update SDK Versions Repository
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           # Get the new version
-          VERSION=$(python setup.py --version)
+          VERSION=$(grep "__version__" growthbook/__init__.py | cut -d'"' -f2)
           
           # Checkout the SDK versions repository
           git clone https://github.com/growthbook/growthbook.git
