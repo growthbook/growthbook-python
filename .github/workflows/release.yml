@@ -56,9 +56,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
+          DEBUG: "true"  # Enable debug output
+          PYTHONVERBOSE: "true"  # Verbose Python output
         run: |
           # Publish the release
-          semantic-release publish --patch --debug -D commit_author="github-actions <action@github.com>"
+          semantic-release publish --patch -v -D commit_author="github-actions <action@github.com>"
           
           # Get version for SDK update
           VERSION=$(python setup.py --version)
