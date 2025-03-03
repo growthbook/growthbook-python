@@ -37,7 +37,7 @@ setup(
     author="GrowthBook",
     author_email='hello@growthbook.io',
     python_requires='>=3.6',
-    version="1.2.0",  # Version managed by bump2version
+    version=get_version(),  # Read version from __init__.py
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',

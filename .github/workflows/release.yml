@@ -93,8 +93,12 @@ jobs:
           # Get the new version
           VERSION=$(grep "__version__" growthbook/__init__.py | cut -d'"' -f2)
           
-          # Checkout the SDK versions repository
-          git clone https://github.com/growthbook/growthbook.git
+          # Remove directory if it exists and clone fresh
+          rm -rf growthbook || true
+          git clone https://github.com/growthbook/growthbook.git || {
+            echo "Failed to clone repository"
+            exit 1
+          }
           cd growthbook/packages/shared/src/sdk-versioning/sdk-versions
           
           # Create a new branch
