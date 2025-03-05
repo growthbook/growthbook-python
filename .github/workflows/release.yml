@@ -35,10 +35,9 @@ jobs:
 
       - name: Install dependencies
         run: |
-          python -m pip install --upgrade pip setuptools setuptools_scm
+          python -m pip install --upgrade pip setuptools
           pip install -r requirements_dev.txt
           pip install -r requirements.txt
-          pip install "python-semantic-release<8.0.0" build twine
 
       - name: Check Git Files
         run: ls -la .git
@@ -57,78 +56,32 @@ jobs:
           TWINE_USERNAME: __token__
           TWINE_PASSWORD: ${{ secrets.PYPI_API_TOKEN }}
         run: |
-          # Debug git info
-          echo "Git tags:"
-          git tag -l
-          echo "Latest tag:"
-          git describe --tags --abbrev=0
+          # Install tools
+          pip install bump2version build twine
           
-          # Get current version
-          CURRENT_VERSION=$(python setup.py --version)
-          echo "Current version: $CURRENT_VERSION"
-          
-          # Create version file
-          python -c "import setuptools_scm; setuptools_scm.get_version(write_to='growthbook/_version.py')"
-          
-          # Debug version file
-          echo "Version file contents:"
-          cat growthbook/_version.py
-          echo "Version file location:"
-          ls -l growthbook/_version.py
-          
-          # Verify we can build the package
-          python -m build
-          twine check dist/*
-          
-          # Force version bump based on input
+          # 1. Bump version
           case "${{ github.event.inputs.release_type }}" in
             "major")
-              PYTHONPATH=. semantic-release version --major
+              bump2version major
               ;;
             "minor")
-              PYTHONPATH=. semantic-release version --minor
+              bump2version minor
               ;;
             *)
-              PYTHONPATH=. semantic-release version --patch
+              bump2version patch
               ;;
           esac
           
-          # Get new version
-          NEW_VERSION=$(python setup.py --version)
-          echo "New version: $NEW_VERSION"
-
-          # Publish to PyPI and GitHub
-          semantic-release publish
-
-      - name: Update SDK Versions Repository
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          # Get the new version
-          VERSION=$(python setup.py --version)
+          # 2. Build package
+          python -m build
           
-          # Checkout the SDK versions repository
-          git clone https://github.com/growthbook/growthbook.git
-          cd growthbook/packages/shared/src/sdk-versioning/sdk-versions
+          # 3. Create GitHub Release
+          VERSION=$(grep "__version__" growthbook/__init__.py | cut -d'"' -f2)
+          git push && git push --tags
+          gh release create "v${VERSION}" \
+            --title "v${VERSION}" \
+            --notes "Release v${VERSION}" \
+            dist/*
           
-          # Create a new branch
-          git checkout -b update-python-sdk-${VERSION}
-          
-          # Update the JSON file - # ignore capabilities for now[, "capabilities": .[0].capabilities}]
-          jq --arg v "$VERSION" \
-             '.versions = ([{"version": $v}] + .versions)' \
-             python.json > python.json.tmp && mv python.json.tmp python.json
-          
-          # Commit and push changes
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add python.json
-          git commit -m "chore: update Python SDK to ${VERSION}"
-          git push origin update-python-sdk-${VERSION}
-          
-          # Create Pull Request
-          gh pr create \
-            --title "Update Python SDK to ${VERSION}" \
-            --body "Automated PR to update Python SDK version to ${VERSION} in capabilities matrix" \
-            --repo growthbook/growthbook \
-            --base main
+          # 4. Publish to PyPI
+          twine upload dist/*

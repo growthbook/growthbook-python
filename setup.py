@@ -2,6 +2,7 @@
 
 from setuptools import setup, find_packages
 from os import path
+import re
 
 this_directory = path.abspath(path.dirname(__file__))
 with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
@@ -23,16 +24,20 @@ test_requirements = [
     'mock;python_version<"3.8"',  # Only install mock for Python < 3.8
 ]
 
+def get_version():
+    with open('growthbook/__init__.py', 'r') as f:
+        content = f.read()
+    version_match = re.search(r"^__version__ = ['\"]([^'\"]*)['\"]", content, re.M)
+    if version_match:
+        return version_match.group(1)
+    raise RuntimeError("Unable to find version string.")
+
 setup(
     name='growthbook',
     author="GrowthBook",
     author_email='hello@growthbook.io',
     python_requires='>=3.6',
-    setup_requires=['setuptools_scm'],
-    use_scm_version={
-        'write_to': 'growthbook/_version.py',
-        'write_to_template': '__version__ = "{version}"',
-    },
+    version=get_version(),  # Read version from __init__.py
     classifiers=[
         'Development Status :: 4 - Beta',
         'Intended Audience :: Developers',

@@ -1,0 +1,71 @@
+name: Update SDK Version
+
+on:
+  release:
+    types: [published]  # Triggers when a release is published
+  workflow_dispatch: {}  # Manual trigger without inputs
+
+jobs:
+  update-versions:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+
+    steps:
+      - name: Get Latest Release
+        id: latest_release
+        run: |
+          LATEST_TAG=$(gh api repos/growthbook/growthbook-python/releases/latest --jq .tag_name)
+          echo "version=${LATEST_TAG#v}" >> $GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Update SDK Versions Repository
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # Get version from latest release
+          VERSION=${{ steps.latest_release.outputs.version }}
+          
+          # Validate version format (semver)
+          if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
+            echo "Error: Version '$VERSION' is not in semantic versioning format (x.y.z)"
+            exit 1
+          fi
+          
+          # Remove directory if it exists and clone fresh
+          rm -rf growthbook || true
+          git clone https://github.com/growthbook/growthbook.git || {
+            echo "Failed to clone repository"
+            exit 1
+          }
+          cd growthbook/packages/shared/src/sdk-versioning/sdk-versions
+          
+          # Check if version already exists
+          if jq -e --arg v "$VERSION" '.versions[] | select(.version == $v)' python.json > /dev/null; then
+            echo "Version $VERSION already exists in python.json"
+            exit 0  # Exit successfully since this is not an error condition
+          fi
+          
+          # Create a new branch
+          git checkout -b update-python-sdk-${VERSION}
+          
+          # Update the JSON file
+          jq --arg v "$VERSION" \
+             '.versions = ([{"version": $v}] + .versions)' \
+             python.json > python.json.tmp && mv python.json.tmp python.json
+          
+          # Commit and push changes
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add python.json
+          git commit -m "chore: update Python SDK to ${VERSION}"
+          git push origin update-python-sdk-${VERSION}
+          
+          # Create Pull Request
+          gh pr create \
+            --title "Update Python SDK to ${VERSION}" \
+            --body "Automated PR to update Python SDK version to ${VERSION} in capabilities matrix" \
+            --repo growthbook/growthbook \
+            --base main

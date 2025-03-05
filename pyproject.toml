@@ -39,28 +39,6 @@ classifiers = [
     "Programming Language :: Python :: 3.12",
 ]
 
-[tool.setuptools_scm]
-write_to = "growthbook/_version.py"
-version_scheme = "release-branch-semver"
-local_scheme = "clean-tag"
-git_describe_command = "git describe --tags --long"
-#tag_regex = '^v(?P<version>\d+\.\d+\.\d+)$'
-
-[tool.semantic_release]
-branch = "main"
-upload_to_pypi = true
-build_command = "python -m build"
-commit_parser = "plain"
-major_on_zero = false
-tag_format = "v{version}"
-version_source = "tag"
-version_pattern = "v(?P<major>\\d+)\\.(?P<minor>\\d+)\\.(?P<patch>\\d+)"
-
-[tool.semantic_release.changelog]
-template_dir = "templates"
-changelog_file = "CHANGELOG.md"
-exclude_commit_patterns = ["Merge pull request.*"]
-
 [build-system]
-requires = ["setuptools>=45", "setuptools_scm[toml]>=6.2"]
+requires = ["setuptools>=45"]
 build-backend = "setuptools.build_meta"
