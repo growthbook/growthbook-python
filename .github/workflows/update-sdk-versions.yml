@@ -16,8 +16,19 @@ jobs:
       - name: Get Latest Release
         id: latest_release
         run: |
+          # Debug: Show all releases
+          echo "All releases:"
+          gh api repos/growthbook/growthbook-python/releases
+          
+          # Debug: Show latest release
+          echo "Latest release:"
+          gh api repos/growthbook/growthbook-python/releases/latest
+          
           LATEST_TAG=$(gh api repos/growthbook/growthbook-python/releases/latest --jq .tag_name)
+          echo "Latest tag: $LATEST_TAG"
+          
           echo "version=${LATEST_TAG#v}" >> $GITHUB_OUTPUT
+          echo "Final version: ${LATEST_TAG#v}"
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
