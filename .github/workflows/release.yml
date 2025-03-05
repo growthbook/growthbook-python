@@ -59,6 +59,10 @@ jobs:
           # Install tools
           pip install bump2version build twine
           
+          # Get current version before bump
+          CURRENT_VERSION=$(grep "__version__" growthbook/__init__.py | cut -d'"' -f2)
+          echo "Current version: $CURRENT_VERSION"
+          
           # 1. Bump version
           case "${{ github.event.inputs.release_type }}" in
             "major")
@@ -72,12 +76,36 @@ jobs:
               ;;
           esac
           
+          # Validate version bump and tag creation
+          NEW_VERSION=$(grep "__version__" growthbook/__init__.py | cut -d'"' -f2)
+          echo "New version: $NEW_VERSION"
+          
+          # Check if version was actually bumped
+          if [ "$CURRENT_VERSION" = "$NEW_VERSION" ]; then
+            echo "Error: Version was not bumped"
+            exit 1
+          fi
+          
+          # Verify tag format
+          TAG_NAME="v$NEW_VERSION"
+          if ! git tag | grep -q "^$TAG_NAME$"; then
+            echo "Error: Tag $TAG_NAME was not created properly"
+            exit 1
+          fi
+          
           # 2. Build package
           python -m build
           
           # 3. Create GitHub Release
-          VERSION=$(grep "__version__" growthbook/__init__.py | cut -d'"' -f2)
+          VERSION=$NEW_VERSION  # Use already validated version
           git push && git push --tags
+          
+          # Verify tag was pushed
+          if ! gh api repos/growthbook/growthbook-python/git/refs/tags/$TAG_NAME &>/dev/null; then
+            echo "Error: Tag $TAG_NAME was not pushed to GitHub"
+            exit 1
+          fi
+          
           gh release create "v${VERSION}" \
             --title "v${VERSION}" \
             --notes "Release v${VERSION}" \
