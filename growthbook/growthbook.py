@@ -96,6 +96,9 @@ class InMemoryFeatureCache(AbstractFeatureCache):
             if entry.expires >= time():
                 return entry.value
         return None
+    
+    def get_entry(self, key: str) -> Optional[CacheEntry]:
+        return self.cache.get(key)
 
     def set(self, key: str, value: Dict, ttl: int) -> None:
         if key in self.cache:
@@ -261,7 +264,7 @@ class FeatureRepository(object):
     def save_in_cache(self, key: str, res, ttl: int = 60):
         self.cache.set(key, res, ttl)
 
-    # Loads features with an in-memory cache in front
+    # Loads features with an in-memory cache in front using stale-while-revalidate approach
     def load_features(
         self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
     ) -> Optional[Dict]:
@@ -270,28 +273,57 @@ class FeatureRepository(object):
         
         key = api_host + "::" + client_key
 
-        cached = self.cache.get(key)
-        if not cached:
-            res = self._fetch_features(api_host, client_key, decryption_key)
-            if res is not None:
-                self.cache.set(key, res, ttl)
-                logger.debug("Fetched features from API, stored in cache")
-                return res
-        return cached
+        entry = self.cache.get_entry(key)
+        if entry:
+            if entry.expires >= time():
+                return entry.value
+            else:
+                threading.Thread(target=self._revalidate, args=(key, api_host, client_key, decryption_key, ttl)).start()
+                return entry.value
+
+        res = self._fetch_features(api_host, client_key, decryption_key)
+        if res is not None:
+            self.cache.set(key, res, ttl)
+            logger.debug("Fetched features from API, stored in cache")
+        return res
     
     async def load_features_async(
         self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
     ) -> Optional[Dict]:
         key = api_host + "::" + client_key
 
-        cached = self.cache.get(key)
-        if not cached:
+        entry = self.cache.get_entry(key)
+        if entry:
+            if entry.expires >= time():
+                return entry.value
+            else:
+                asyncio.create_task(self._revalidate_async(key, api_host, client_key, decryption_key, ttl))
+                return entry.value
+
+        res = await self._fetch_features_async(api_host, client_key, decryption_key)
+        if res is not None:
+            self.cache.set(key, res, ttl)
+            logger.debug("Fetched features from API, stored in cache")
+        return res
+
+    def _revalidate(self, key: str, api_host: str, client_key: str, decryption_key: str, ttl: int):
+        try:
+            res = self._fetch_features(api_host, client_key, decryption_key)
+            if res is not None:
+                self.cache.set(key, res, ttl)
+                logger.debug("Revalidated and updated cache")
+        except Exception as e:
+            logger.warning(f"Revalidation failed: {e}")
+
+    async def _revalidate_async(self, key: str, api_host: str, client_key: str, decryption_key: str, ttl: int):
+        try:
             res = await self._fetch_features_async(api_host, client_key, decryption_key)
             if res is not None:
                 self.cache.set(key, res, ttl)
-                logger.debug("Fetched features from API, stored in cache")
-                return res
-        return cached
+                logger.debug("Revalidated and updated cache")
+        except Exception as e:
+            logger.warning(f"Revalidation failed: {e}")
+
 
     # Perform the GET request (separate method for easy mocking)
     def _get(self, url: str):
@@ -636,6 +668,7 @@ class GrowthBook(object):
         self._user_ctx.attributes = self._attributes
         self._user_ctx.url = self._url
         self._user_ctx.overrides = self._overrides
+        self.load_features()
         # set the url for every evaluation. (unlikely to change)
         self._global_ctx.options.url = self._url
         return EvaluationContext(
