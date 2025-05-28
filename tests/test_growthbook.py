@@ -124,10 +124,6 @@ def test_feature(feature_data):
 
     actual = res.to_dict()
 
-    # Set ruleId to empty string if missing to match test cases
-    if "ruleId" not in actual:
-        actual["ruleId"] = ""
-
     assert actual == expected
     gb.destroy()
 
