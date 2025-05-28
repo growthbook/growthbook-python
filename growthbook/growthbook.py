@@ -96,6 +96,9 @@ class InMemoryFeatureCache(AbstractFeatureCache):
             if entry.expires >= time():
                 return entry.value
         return None
+    
+    def get_entry(self, key: str) -> Optional[CacheEntry]:
+        return self.cache.get(key)
 
     def set(self, key: str, value: Dict, ttl: int) -> None:
         if key in self.cache:
@@ -280,7 +283,7 @@ class FeatureRepository(object):
             except Exception as e:
                 logger.warning(f"Error in feature update callback: {e}")
 
-    # Loads features with an in-memory cache in front
+    # Loads features with an in-memory cache in front using stale-while-revalidate approach
     def load_features(
         self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
     ) -> Optional[Dict]:
@@ -673,6 +676,7 @@ class GrowthBook(object):
         self._user_ctx.attributes = self._attributes
         self._user_ctx.url = self._url
         self._user_ctx.overrides = self._overrides
+        self.load_features()
         # set the url for every evaluation. (unlikely to change)
         self._global_ctx.options.url = self._url
         return EvaluationContext(
