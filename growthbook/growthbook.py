@@ -259,7 +259,7 @@ class FeatureRepository(object):
     def clear_cache(self):
         self.cache.clear()
 
-    def save_in_cache(self, key: str, res, ttl: int = 60):
+    def save_in_cache(self, key: str, res, ttl: int = 600):
         self.cache.set(key, res, ttl)
 
     def add_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
@@ -282,7 +282,7 @@ class FeatureRepository(object):
 
     # Loads features with an in-memory cache in front using stale-while-revalidate approach
     def load_features(
-        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
+        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 600
     ) -> Optional[Dict]:
         if not client_key:
             raise ValueError("Must specify `client_key` to refresh features")
@@ -301,7 +301,7 @@ class FeatureRepository(object):
         return cached
     
     async def load_features_async(
-        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
+        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 600
     ) -> Optional[Dict]:
         key = api_host + "::" + client_key
 
@@ -437,7 +437,7 @@ class GrowthBook(object):
         api_host: str = "",
         client_key: str = "",
         decryption_key: str = "",
-        cache_ttl: int = 60,
+        cache_ttl: int = 600,
         forced_variations: dict = {},
         sticky_bucket_service: AbstractStickyBucketService = None,
         sticky_bucket_identifier_attributes: List[str] = None,
@@ -668,7 +668,36 @@ class GrowthBook(object):
     def evalFeature(self, key: str) -> FeatureResult:
         return self.eval_feature(key)
     
+    def _ensure_fresh_features(self) -> None:
+        """Lazy refresh: Check cache expiry and refresh if needed, but only if client_key is provided"""
+        
+        if self._streaming or not self._client_key:
+            return  # Skip cache checks - SSE handles freshness for streaming users
+            
+        # Check if we should refresh features
+        key = self._api_host + "::" + self._client_key
+        cached = feature_repo.cache.get(key)
+        
+        if not cached:
+            # No cache at all - try to load features
+            try:
+                self.load_features()
+            except Exception as e:
+                logger.warning(f"Failed to load features: {e}")
+        else:
+            # We have cache - check if it's expired
+            entry = feature_repo.cache.cache.get(key)
+            if entry and entry.expires < time():
+                # Cache expired - refresh in background but continue with stale data
+                try:
+                    self.load_features()
+                except Exception as e:
+                    logger.warning(f"Failed to refresh expired features: {e}")
+
     def _get_eval_context(self) -> EvaluationContext:
+        # Lazy refresh: ensure features are fresh before evaluation
+        self._ensure_fresh_features()
+        
         # use the latest attributes for every evaluation.
         self._user_ctx.attributes = self._attributes
         self._user_ctx.url = self._url
