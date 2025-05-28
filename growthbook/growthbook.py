@@ -676,7 +676,6 @@ class GrowthBook(object):
         self._user_ctx.attributes = self._attributes
         self._user_ctx.url = self._url
         self._user_ctx.overrides = self._overrides
-        self.load_features()
         # set the url for every evaluation. (unlikely to change)
         self._global_ctx.options.url = self._url
         return EvaluationContext(
