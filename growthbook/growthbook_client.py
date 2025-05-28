@@ -466,13 +466,6 @@ class GrowthBookClient:
         # update user context with sticky bucket assignments
         user_context.sticky_bucket_assignment_docs = sticky_assignments
 
-        updated_features = await self._features_repository.load_features_async(
-                self.options.api_host, self.options.client_key, self.options.decryption_key, self.options.cache_ttl
-            )
-        if not updated_features:
-            logger.error("Failed to update features")
-            return False
-
         return EvaluationContext(
             user=user_context,
             global_ctx=self._global_context,
