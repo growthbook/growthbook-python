@@ -11,7 +11,7 @@ import threading
 import logging
 
 from abc import ABC, abstractmethod
-from typing import Optional, Any, Set, Tuple, List, Dict
+from typing import Optional, Any, Set, Tuple, List, Dict, Callable
 
 from .common_types import ( EvaluationContext, 
     Experiment, 
@@ -251,6 +251,7 @@ class FeatureRepository(object):
         self.cache: AbstractFeatureCache = InMemoryFeatureCache()
         self.http: Optional[PoolManager] = None
         self.sse_client: Optional[SSEClient] = None
+        self._feature_update_callbacks: List[Callable[[Dict], None]] = []
 
     def set_cache(self, cache: AbstractFeatureCache) -> None:
         self.cache = cache
@@ -258,12 +259,30 @@ class FeatureRepository(object):
     def clear_cache(self):
         self.cache.clear()
 
-    def save_in_cache(self, key: str, res, ttl: int = 60):
+    def save_in_cache(self, key: str, res, ttl: int = 600):
         self.cache.set(key, res, ttl)
 
-    # Loads features with an in-memory cache in front
+    def add_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
+        """Add a callback to be notified when features are updated due to cache expiry"""
+        if callback not in self._feature_update_callbacks:
+            self._feature_update_callbacks.append(callback)
+
+    def remove_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
+        """Remove a feature update callback"""
+        if callback in self._feature_update_callbacks:
+            self._feature_update_callbacks.remove(callback)
+
+    def _notify_feature_update_callbacks(self, features_data: Dict) -> None:
+        """Notify all registered callbacks about feature updates"""
+        for callback in self._feature_update_callbacks:
+            try:
+                callback(features_data)
+            except Exception as e:
+                logger.warning(f"Error in feature update callback: {e}")
+
+    # Loads features with an in-memory cache in front using stale-while-revalidate approach
     def load_features(
-        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
+        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 600
     ) -> Optional[Dict]:
         if not client_key:
             raise ValueError("Must specify `client_key` to refresh features")
@@ -276,11 +295,13 @@ class FeatureRepository(object):
             if res is not None:
                 self.cache.set(key, res, ttl)
                 logger.debug("Fetched features from API, stored in cache")
+                # Notify callbacks about fresh features
+                self._notify_feature_update_callbacks(res)
                 return res
         return cached
     
     async def load_features_async(
-        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
+        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 600
     ) -> Optional[Dict]:
         key = api_host + "::" + client_key
 
@@ -290,6 +311,8 @@ class FeatureRepository(object):
             if res is not None:
                 self.cache.set(key, res, ttl)
                 logger.debug("Fetched features from API, stored in cache")
+                # Notify callbacks about fresh features
+                self._notify_feature_update_callbacks(res)
                 return res
         return cached
 
@@ -414,7 +437,7 @@ class GrowthBook(object):
         api_host: str = "",
         client_key: str = "",
         decryption_key: str = "",
-        cache_ttl: int = 60,
+        cache_ttl: int = 600,
         forced_variations: dict = {},
         sticky_bucket_service: AbstractStickyBucketService = None,
         sticky_bucket_identifier_attributes: List[str] = None,
@@ -486,10 +509,20 @@ class GrowthBook(object):
         if features:
             self.setFeatures(features)
 
+        # Register for automatic feature updates when cache expires
+        if self._client_key:
+            feature_repo.add_feature_update_callback(self._on_feature_update)
+
         if self._streaming:
             self.load_features()
             self.startAutoRefresh()
 
+    def _on_feature_update(self, features_data: Dict) -> None:
+        """Callback to handle automatic feature updates from FeatureRepository"""
+        if features_data and "features" in features_data:
+            self.set_features(features_data["features"])
+        if features_data and "savedGroups" in features_data:
+            self._saved_groups = features_data["savedGroups"]
 
     def load_features(self) -> None:
 
@@ -595,6 +628,10 @@ class GrowthBook(object):
         return self._attributes
 
     def destroy(self) -> None:
+        # Clean up feature update callback
+        if self._client_key:
+            feature_repo.remove_feature_update_callback(self._on_feature_update)
+            
         self._subscriptions.clear()
         self._tracked.clear()
         self._assigned.clear()
@@ -631,7 +668,21 @@ class GrowthBook(object):
     def evalFeature(self, key: str) -> FeatureResult:
         return self.eval_feature(key)
     
+    def _ensure_fresh_features(self) -> None:
+        """Lazy refresh: Check cache expiry and refresh if needed, but only if client_key is provided"""
+        
+        if self._streaming or not self._client_key:
+            return  # Skip cache checks - SSE handles freshness for streaming users
+
+        try:
+            self.load_features()
+        except Exception as e:
+            logger.warning(f"Failed to refresh features: {e}")
+
     def _get_eval_context(self) -> EvaluationContext:
+        # Lazy refresh: ensure features are fresh before evaluation
+        self._ensure_fresh_features()
+        
         # use the latest attributes for every evaluation.
         self._user_ctx.attributes = self._attributes
         self._user_ctx.url = self._url
