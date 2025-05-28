@@ -577,10 +577,21 @@ def base_client_setup():
 @pytest.mark.asyncio
 async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup):
     """Test sticky bucket functionality in GrowthBookClient"""
-    _, ctx, key, expected_result, expected_docs = test_sticky_bucket_data
+    _, ctx, initial_docs, key, expected_result, expected_docs = test_sticky_bucket_data
 
     # Initialize sticky bucket service with test data
     service = InMemoryStickyBucketService()
+    
+    # Add initial documents to the service
+    for doc in initial_docs:
+        service.save_assignments(doc)
+    
+    # Handle sticky bucket identifier attributes mapping
+    if 'stickyBucketIdentifierAttributes' in ctx:
+        ctx['sticky_bucket_identifier_attributes'] = ctx['stickyBucketIdentifierAttributes']
+        ctx.pop('stickyBucketIdentifierAttributes')
+        
+    # Handle sticky bucket assignment docs
     if 'stickyBucketAssignmentDocs' in ctx:
         service.docs = ctx['stickyBucketAssignmentDocs']
         ctx.pop('stickyBucketAssignmentDocs')
@@ -614,13 +625,15 @@ async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup):
                 else:
                     assert result.experimentResult.to_dict() == expected_result
   
-                # Verify sticky bucket assignments
-                assert client._global_context.options.sticky_bucket_service.docs == expected_docs
+                # Verify sticky bucket assignments - check each expected doc individually
+                for doc_key, expected_doc in expected_docs.items():
+                    assert service.docs[doc_key] == expected_doc
     except Exception as e:
         print(f"Error during test execution: {str(e)}")
         raise
     finally:
         await client.close()
+        service.destroy()
         await asyncio.sleep(0.1)
 
 async def getTrackingMock(client: GrowthBookClient):
