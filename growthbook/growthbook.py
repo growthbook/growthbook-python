@@ -96,9 +96,6 @@ class InMemoryFeatureCache(AbstractFeatureCache):
             if entry.expires >= time():
                 return entry.value
         return None
-    
-    def get_entry(self, key: str) -> Optional[CacheEntry]:
-        return self.cache.get(key)
 
     def set(self, key: str, value: Dict, ttl: int) -> None:
         if key in self.cache:
