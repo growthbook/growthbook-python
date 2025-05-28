@@ -12,16 +12,12 @@ requirements = [
     'cryptography', 
     'typing_extensions', 
     'urllib3',
-    'dataclasses;python_version<"3.7"',  # Add dataclasses backport for Python 3.6
-    'async-generator;python_version<"3.7"',  # For asynccontextmanager in Python 3.6
     'aiohttp>=3.6.0',  # For async HTTP support
-    'importlib-metadata;python_version<"3.8"',  # For metadata in Python 3.6-3.7
 ]
 
 test_requirements = [
     'pytest>=3',
     'pytest-asyncio>=0.10.0',
-    'mock;python_version<"3.8"',  # Only install mock for Python < 3.8
 ]
 
 def get_version():
@@ -36,7 +32,7 @@ setup(
     name='growthbook',
     author="GrowthBook",
     author_email='hello@growthbook.io',
-    python_requires='>=3.6',
+    python_requires='>=3.7',
     version=get_version(),  # Read version from __init__.py
     classifiers=[
         'Development Status :: 4 - Beta',
@@ -44,7 +40,6 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Natural Language :: English',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.6',
         'Programming Language :: Python :: 3.7',
         'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
