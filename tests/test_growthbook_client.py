@@ -81,8 +81,8 @@ async def test_initialization_for_failure(mock_options):
 
 @pytest.mark.asyncio
 async def test_sse_connection_lifecycle(mock_options, mock_features_response):
-    with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async') as mock_load:
-        mock_load.return_value = mock_features_response
+    with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
+               new_callable=AsyncMock, return_value=mock_features_response) as mock_load:
         
         client = GrowthBookClient(
             Options(**{**mock_options.__dict__, 
@@ -105,16 +105,17 @@ async def test_feature_repository_load():
         "savedGroups": {}
     }
     
-    with patch('growthbook.FeatureRepository.load_features_async') as mock_load:
-        mock_load.return_value = features_response
+    with patch('growthbook.FeatureRepository.load_features_async', 
+               new_callable=AsyncMock, return_value=features_response) as mock_load:
         result = await repo.load_features_async(api_host="", client_key="")
         assert result == features_response
 
 @pytest.mark.asyncio
 async def test_initialize_success(mock_options, mock_features_response):
-    with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async') as mock_load, \
-         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh', return_value=None):
-        mock_load.return_value = mock_features_response
+    with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
+               new_callable=AsyncMock, return_value=mock_features_response) as mock_load, \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh', 
+               new_callable=AsyncMock, return_value=None):
         
         client = GrowthBookClient(mock_options)
         success = await client.initialize()
@@ -235,8 +236,8 @@ async def test_initialization_state_verification(mock_options, mock_features_res
         callback_called = True
         features_received = features
 
-    with patch('growthbook.FeatureRepository.load_features_async') as mock_load:
-        mock_load.return_value = mock_features_response
+    with patch('growthbook.FeatureRepository.load_features_async', 
+               new_callable=AsyncMock, return_value=mock_features_response) as mock_load:
         
         client = GrowthBookClient(mock_options)
         client._features_repository.add_callback(test_callback)
@@ -268,8 +269,8 @@ async def test_sse_event_handling(mock_options):
         if event_data['type'] == 'features':
             await client._features_repository._handle_feature_update(event_data['data'])
 
-    with patch('growthbook.FeatureRepository.load_features_async') as mock_load:
-        mock_load.return_value = {"features": {}, "savedGroups": {}}
+    with patch('growthbook.FeatureRepository.load_features_async', 
+               new_callable=AsyncMock, return_value={"features": {}, "savedGroups": {}}) as mock_load:
 
         # Create options with SSE strategy
         sse_options = Options(
