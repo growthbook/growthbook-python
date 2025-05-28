@@ -10,11 +10,7 @@ import threading
 import traceback
 from datetime import datetime
 from growthbook import FeatureRepository
-try:
-    from contextlib import asynccontextmanager
-except ImportError:
-    # to support python 3.6
-    from async_generator import asynccontextmanager
+from contextlib import asynccontextmanager
 
 from .core import eval_feature as core_eval_feature, run_experiment
 from .common_types import (
