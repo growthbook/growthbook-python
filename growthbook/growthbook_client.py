@@ -10,11 +10,7 @@ import threading
 import traceback
 from datetime import datetime
 from growthbook import FeatureRepository
-try:
-    from contextlib import asynccontextmanager
-except ImportError:
-    # to support python 3.6
-    from async_generator import asynccontextmanager
+from contextlib import asynccontextmanager
 
 from .core import eval_feature as core_eval_feature, run_experiment
 from .common_types import (
@@ -34,7 +30,7 @@ logger = logging.getLogger("growthbook.growthbook_client")
 
 class SingletonMeta(type):
     """Thread-safe implementation of Singleton pattern"""
-    _instances = {}
+    _instances: Dict[type, Any] = {}
     _lock = threading.Lock()
 
     def __call__(cls, *args, **kwargs):
@@ -113,11 +109,11 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._decryption_key = decryption_key
         self._cache_ttl = cache_ttl
         self._refresh_lock = threading.Lock()
-        self._refresh_task = None
+        self._refresh_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
         self._backoff = BackoffStrategy()
         self._feature_cache = FeatureCache()
-        self._callbacks = []
+        self._callbacks: List[Callable[[Dict[str, Any]], Awaitable[None]]] = []
         self._last_successful_refresh = None
         self._refresh_in_progress = asyncio.Lock()
 
@@ -161,13 +157,13 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             except Exception:
                 traceback.print_exc()
 
-    def add_callback(self, callback: Callable) -> None:
+    def add_callback(self, callback: Callable[[Dict[str, Any]], Awaitable[None]]) -> None:
         """Add callback to the list"""
         with self._refresh_lock:
             if callback not in self._callbacks:
                 self._callbacks.append(callback)
 
-    def remove_callback(self, callback: Callable) -> None:
+    def remove_callback(self, callback: Callable[[Dict[str, Any]], Awaitable[None]]) -> None:
         """Remove callback from the list"""
         with self._refresh_lock:
             if callback in self._callbacks:
@@ -185,7 +181,8 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                         response = await self.load_features_async(
                             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
                         )
-                        await self._handle_feature_update(response)
+                        if response is not None:
+                            await self._handle_feature_update(response)
                     elif event_data['type'] == 'features':
                         await self._handle_feature_update(event_data['data'])
                 except Exception:
@@ -224,7 +221,8 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                                     decryption_key=self._decryption_key,
                                     ttl=self._cache_ttl
                                 )
-                                await self._handle_feature_update(response)
+                                if response is not None:
+                                    await self._handle_feature_update(response)
                                 # On success, reset backoff and use normal interval
                                 self._backoff.reset()
                                 try:
@@ -313,19 +311,24 @@ class GrowthBookClient:
         self._subscriptions_lock = threading.Lock()
 
         # Add sticky bucket cache
-        self._sticky_bucket_cache = {
+        self._sticky_bucket_cache: Dict[str, Dict[str, Any]] = {
             'attributes': {},
             'assignments': {}
         }
         self._sticky_bucket_cache_lock = False
         
         self._features_repository = (
-            EnhancedFeatureRepository(self.options.api_host, self.options.client_key, self.options.decryption_key, self.options.cache_ttl)
+            EnhancedFeatureRepository(
+                self.options.api_host or "https://cdn.growthbook.io", 
+                self.options.client_key or "", 
+                self.options.decryption_key or "", 
+                self.options.cache_ttl
+            )
             if self.options.client_key
             else None
         )
         
-        self._global_context = None
+        self._global_context: Optional[GlobalContext] = None
         self._context_lock = asyncio.Lock()
 
     def _track(self, experiment: Experiment, result: Result) -> None:
@@ -387,6 +390,9 @@ class GrowthBookClient:
                 return assignments
             finally:
                 self._sticky_bucket_cache_lock = False
+        
+        # Fallback return for edge case where loop condition is never satisfied
+        return {}
 
     async def initialize(self) -> bool:
         """Initialize client with features and start refresh"""
@@ -397,7 +403,10 @@ class GrowthBookClient:
         try:
             # Initial feature load
             initial_features = await self._features_repository.load_features_async(
-                self.options.api_host, self.options.client_key, self.options.decryption_key, self.options.cache_ttl
+                self.options.api_host or "https://cdn.growthbook.io", 
+                self.options.client_key or "", 
+                self.options.decryption_key or "", 
+                self.options.cache_ttl
             )
             if not initial_features:
                 logger.error("Failed to load initial features")
@@ -410,7 +419,8 @@ class GrowthBookClient:
             self._features_repository.add_callback(self._feature_update_callback)
             
             # Start feature refresh
-            await self._features_repository.start_feature_refresh(self.options.refresh_strategy)
+            refresh_strategy = self.options.refresh_strategy or FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
+            await self._features_repository.start_feature_refresh(refresh_strategy)
             return True
             
         except Exception as e:
