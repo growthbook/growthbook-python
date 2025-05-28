@@ -673,26 +673,11 @@ class GrowthBook(object):
         
         if self._streaming or not self._client_key:
             return  # Skip cache checks - SSE handles freshness for streaming users
-            
-        # Check if we should refresh features
-        key = self._api_host + "::" + self._client_key
-        cached = feature_repo.cache.get(key)
-        
-        if not cached:
-            # No cache at all - try to load features
-            try:
-                self.load_features()
-            except Exception as e:
-                logger.warning(f"Failed to load features: {e}")
-        else:
-            # We have cache - check if it's expired
-            entry = feature_repo.cache.cache.get(key)
-            if entry and entry.expires < time():
-                # Cache expired - refresh in background but continue with stale data
-                try:
-                    self.load_features()
-                except Exception as e:
-                    logger.warning(f"Failed to refresh expired features: {e}")
+
+        try:
+            self.load_features()
+        except Exception as e:
+            logger.warning(f"Failed to refresh features: {e}")
 
     def _get_eval_context(self) -> EvaluationContext:
         # Lazy refresh: ensure features are fresh before evaluation
