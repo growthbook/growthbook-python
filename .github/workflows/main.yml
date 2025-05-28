@@ -2,12 +2,10 @@ name: Build
 on: [push]
 jobs:
   build:
-    # Python 3.5 and 3.6 are not supported on ubuntu latest (22.04)
-    # Need to pin this to 20.04 instead
-    runs-on: ubuntu-20.04
+    runs-on: ubuntu-22.04
     strategy:
       matrix:
-        python-version: [3.6, 3.7, 3.8, 3.9, "3.10", "3.11", "3.12"]
+        python-version: [3.7, 3.8, 3.9, "3.10", "3.11", "3.12"]
 
     steps:
       - name: "Begin CI..."
@@ -34,12 +32,7 @@ jobs:
 
       - name: Static type checking with MyPy
         run: |
-          if [ "${{ matrix.python-version }}" = "3.6" ]; then
-            python -m pip install types-dataclasses
-            mypy growthbook/growthbook.py --implicit-optional --ignore-missing-imports
-          else
-            mypy growthbook/growthbook.py --implicit-optional
-          fi
+          mypy growthbook/growthbook.py --implicit-optional
 
       - name: Test with pytest
         run: |
