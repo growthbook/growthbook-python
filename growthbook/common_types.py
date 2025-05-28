@@ -220,9 +220,8 @@ class FeatureResult(object):
             "source": self.source,
             "on": self.on,
             "off": self.off,
+            "ruleId": self.ruleId or "",
         }
-        if self.ruleId:
-            data["ruleId"] = self.ruleId
         if self.experiment:
             data["experiment"] = self.experiment.to_dict()
         if self.experimentResult:
