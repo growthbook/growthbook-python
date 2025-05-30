@@ -155,6 +155,58 @@ class TestTrackingPlugin(unittest.TestCase):
         """Clean up patches."""
         self.patch.stop()
     
+    def assert_request_data(self, expected_url, expected_event_count, expected_client_key=''):
+        """Helper to assert HTTP request data."""
+        self.assertGreater(len(self.mock_ingestor.requests), 0, "No HTTP requests captured")
+        
+        request = self.mock_ingestor.requests[0]
+        self.assertEqual(request['url'], expected_url)
+        self.assertEqual(request['event_count'], expected_event_count)
+        if expected_client_key is not None:
+            self.assertEqual(request['client_key'], expected_client_key)
+    
+    def assert_common_event_fields(self, event):
+        """Helper to assert common event fields (timestamp, SDK info)."""
+        self.assertIn('timestamp', event)
+        self.assertIsInstance(event['timestamp'], (int, float))
+        self.assertEqual(event['sdk_language'], 'python')
+        self.assertIn('sdk_version', event)
+    
+    def assert_experiment_event(self, event, experiment_id, expected_variations, user_id=None):
+        """Helper to assert experiment event structure."""
+        self.assertEqual(event['event_type'], 'experiment_viewed')
+        self.assertEqual(event['experiment_id'], experiment_id)
+        self.assertIn(event['variation_value'], expected_variations)
+        self.assertTrue(event['in_experiment'])
+        
+        if user_id:
+            self.assertEqual(event['hash_attribute'], 'id')
+            self.assertEqual(event['hash_value'], user_id)
+        
+        self.assert_common_event_fields(event)
+    
+    def assert_feature_event(self, event, feature_key, expected_value, expected_source='defaultValue'):
+        """Helper to assert feature evaluation event structure."""
+        self.assertEqual(event['event_type'], 'feature_evaluated')
+        self.assertEqual(event['feature_key'], feature_key)
+        self.assertEqual(event['feature_value'], expected_value)
+        self.assertEqual(event['source'], expected_source)
+        
+        # Boolean flags
+        self.assertEqual(event['on'], bool(expected_value))
+        self.assertEqual(event['off'], not bool(expected_value))
+        
+        self.assert_common_event_fields(event)
+    
+    def find_events_by_type(self, event_type, additional_filter=None):
+        """Helper to find events by type with optional additional filtering."""
+        events = [e for e in self.mock_ingestor.events if e.get('event_type') == event_type]
+        
+        if additional_filter:
+            events = [e for e in events if additional_filter(e)]
+        
+        return events
+    
     def test_plugin_creation(self):
         """Test tracking plugin creation."""
         plugin = growthbook_tracking_plugin(
@@ -178,10 +230,9 @@ class TestTrackingPlugin(unittest.TestCase):
             batch_timeout=0.5
         )
         
-        # Don't provide client_key to avoid API calls
         gb = GrowthBook(plugins=[plugin])
         
-        # Set up test features manually (no API calls)
+        # Set up test features
         gb.set_features({
             "test-feature": {"defaultValue": True},
             "another-feature": {"defaultValue": "test_value"}
@@ -194,18 +245,24 @@ class TestTrackingPlugin(unittest.TestCase):
         self.assertTrue(result1)
         self.assertEqual(result2, "test_value")
         
-        # Wait for events
+        # Wait for events and cleanup
         time.sleep(1)
         gb.destroy()
         time.sleep(0.5)
         
-        # Verify events were captured
-        self.assertGreater(len(self.mock_ingestor.events), 0)
-        self.assertGreater(len(self.mock_ingestor.requests), 0)
+        # Assert HTTP request
+        self.assert_request_data("https://test.growthbook.io/events", 2)
         
-        # Check event types
-        feature_events = [e for e in self.mock_ingestor.events if e.get('event_type') == 'feature_evaluated']
-        self.assertGreater(len(feature_events), 0)
+        # Find and assert feature events
+        feature_events = self.find_events_by_type('feature_evaluated')
+        self.assertEqual(len(feature_events), 2)
+        
+        # Assert individual feature events
+        test_feature_event = next(e for e in feature_events if e['feature_key'] == 'test-feature')
+        another_feature_event = next(e for e in feature_events if e['feature_key'] == 'another-feature')
+        
+        self.assert_feature_event(test_feature_event, 'test-feature', True)
+        self.assert_feature_event(another_feature_event, 'another-feature', 'test_value')
     
     def test_experiment_tracking(self):
         """Test experiment tracking."""
@@ -215,25 +272,44 @@ class TestTrackingPlugin(unittest.TestCase):
             batch_timeout=0.5
         )
         
-        # Don't provide client_key to avoid API calls
-        gb = GrowthBook(plugins=[plugin])
+        gb = GrowthBook(
+            attributes={"id": "test-user-123"},
+            plugins=[plugin]
+        )
         
         # Run experiment
         result = gb.run(Experiment(
             key="test-experiment",
-            variations=["control", "treatment"]
+            variations=["control", "treatment"],
+            coverage=1.0,
+            weights=[0.5, 0.5]
         ))
         
         self.assertIn(result.value, ["control", "treatment"])
+        self.assertTrue(result.inExperiment)
         
-        # Wait for events
+        # Wait for events and cleanup
         time.sleep(1)
         gb.destroy()
         time.sleep(0.5)
         
-        # Note: Experiments without proper setup won't generate experiment_viewed events
-        # but feature_evaluated events will be generated
-        self.assertGreaterEqual(len(self.mock_ingestor.events), 0)
+        # Assert HTTP request
+        self.assert_request_data("https://test.growthbook.io/events", 1)
+        
+        # Find and assert experiment events
+        experiment_events = self.find_events_by_type(
+            'experiment_viewed',
+            lambda e: e.get('experiment_id') == 'test-experiment'
+        )
+        self.assertEqual(len(experiment_events), 1)
+        
+        # Assert experiment event
+        self.assert_experiment_event(
+            experiment_events[0], 
+            'test-experiment', 
+            ["control", "treatment"],
+            user_id="test-user-123"
+        )
 
 
 class TestPluginIntegration(unittest.TestCase):
