@@ -318,68 +318,68 @@ def run_interactive_demo():
     print("🚀 GROWTHBOOK PLUGIN DEMO")
     print("=" * 40)
     
-    mock_ingestor = MockIngestor()
+    # mock_ingestor = MockIngestor()
     
-    with patch('urllib.request.urlopen', side_effect=mock_ingestor.mock_urlopen):
+    # with patch('urllib.request.urlopen', side_effect=mock_ingestor.mock_urlopen):
         
-        # Create client-side attributes
-        client_attrs = client_side_attributes(
-            pageTitle="Demo Store - Product Page",
-            deviceType="mobile",
-            browser="safari",
-            os="ios",
+    #     # Create client-side attributes
+    #     client_attrs = client_side_attributes(
+    #         pageTitle="Demo Store - Product Page",
+    #         deviceType="mobile",
+    #         browser="safari",
+    #         os="ios",
             
-            # Business context
-            productId="iphone-15",
-            category="electronics",
-            price=999.99
-        )
+    #         # Business context
+    #         productId="iphone-15",
+    #         category="electronics",
+    #         price=999.99
+    #     )
         
-        # Create GrowthBook with plugins (no client_key to avoid API calls)
-        gb = GrowthBook(
-            plugins=[
-                request_context_plugin(client_side_attributes=client_attrs),
-                growthbook_tracking_plugin(
-                    ingestor_host="https://demo.growthbook.io",
-                    batch_size=2,
-                    batch_timeout=1.0
-                )
-            ]
-        )
+    #     # Create GrowthBook with plugins (no client_key to avoid API calls)
+    #     gb = GrowthBook(
+    #         plugins=[
+    #             request_context_plugin(client_side_attributes=client_attrs),
+    #             growthbook_tracking_plugin(
+    #                 ingestor_host="https://demo.growthbook.io",
+    #                 batch_size=2,
+    #                 batch_timeout=1.0
+    #             )
+    #         ]
+    #     )
         
-        print(f"\n📱 User Context: {len(gb.get_attributes())} attributes")
-        for key, value in gb.get_attributes().items():
-            print(f"   {key}: {value}")
+    #     print(f"\n📱 User Context: {len(gb.get_attributes())} attributes")
+    #     for key, value in gb.get_attributes().items():
+    #         print(f"   {key}: {value}")
         
-        # Test features - set manually to avoid API calls
-        gb.set_features({
-            "express-checkout": {"defaultValue": True},
-            "price-alerts": {"defaultValue": False}
-        })
+    #     # Test features - set manually to avoid API calls
+    #     gb.set_features({
+    #         "express-checkout": {"defaultValue": True},
+    #         "price-alerts": {"defaultValue": False}
+    #     })
         
-        print(f"\n🎯 Feature Tests:")
-        express = gb.is_on("express-checkout")
-        alerts = gb.is_on("price-alerts")
-        print(f"   Express checkout: {express}")
-        print(f"   Price alerts: {alerts}")
+    #     print(f"\n🎯 Feature Tests:")
+    #     express = gb.is_on("express-checkout")
+    #     alerts = gb.is_on("price-alerts")
+    #     print(f"   Express checkout: {express}")
+    #     print(f"   Price alerts: {alerts}")
         
-        # Test experiment
-        print(f"\n🧪 A/B Test:")
-        ui_test = gb.run(Experiment(
-            key="ui-variant",
-            variations=["classic", "modern"]
-        ))
-        print(f"   UI variant: {ui_test.value}")
+    #     # Test experiment
+    #     print(f"\n🧪 A/B Test:")
+    #     ui_test = gb.run(Experiment(
+    #         key="ui-variant",
+    #         variations=["classic", "modern"]
+    #     ))
+    #     print(f"   UI variant: {ui_test.value}")
         
-        # Wait and cleanup
-        time.sleep(2)
-        gb.destroy()
-        time.sleep(0.5)
+    #     # Wait and cleanup
+    #     time.sleep(2)
+    #     gb.destroy()
+    #     time.sleep(0.5)
         
-        print(f"\n📊 Results:")
-        print(f"   Events captured: {len(mock_ingestor.events)}")
-        print(f"   HTTP requests: {len(mock_ingestor.requests)}")
-        print(f"   ✅ Demo completed successfully!")
+    #     print(f"\n📊 Results:")
+    #     print(f"   Events captured: {len(mock_ingestor.events)}")
+    #     print(f"   HTTP requests: {len(mock_ingestor.requests)}")
+    #     print(f"   ✅ Demo completed successfully!")
 
 
 if __name__ == "__main__":
