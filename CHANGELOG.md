@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.2.1](https://github.com/growthbook/growthbook-python/compare/v1.2.0...v1.2.1) (2024-XX-XX)
+
+### Bug Fixes
+
+* Fixed TTL cache issue where users weren't getting fresh feature flag values after cache expiry
+* Added callback system for automatic feature updates when cache expires
+* Improved async test compatibility for Python 3.7+
+* Fixed mypy errors in lazy refresh implementation
+
+### Features
+
+* Enhanced async client with better error handling and retry logic
+* Added comprehensive test coverage for async functionality
+
+All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
+
 ## **1.1.0** - Apr 11, 2024
 
 - Support for prerequisite feature flags
