@@ -14,7 +14,7 @@ from typing import Dict, Any, Optional, Callable
 from urllib.parse import urlparse, parse_qs
 from .base import GrowthBookPlugin
 
-# Optional web framework imports (type checking only)
+# Optional web framework imports
 try:
     from flask import session, g, request, has_request_context
 except ImportError:
