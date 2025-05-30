@@ -331,6 +331,7 @@ class GrowthBookClient:
         self._global_context: Optional[GlobalContext] = None
         self._context_lock = asyncio.Lock()
 
+
     def _track(self, experiment: Experiment, result: Result) -> None:
         """Thread-safe tracking implementation"""
         if not self.options.on_experiment_viewed:
@@ -372,6 +373,11 @@ class GrowthBookClient:
             except Exception:
                 logger.exception("Error in subscription callback")
 
+
+    async def set_features(self, features: dict) -> None:
+        await self._feature_update_callback({"features": features})
+        
+    
     async def _refresh_sticky_buckets(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
         """Refresh sticky bucket assignments only if attributes have changed"""
         if not self.options.sticky_bucket_service:
