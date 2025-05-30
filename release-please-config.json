@@ -1,0 +1,33 @@
+{
+  "packages": {
+    ".": {
+      "release-type": "python",
+      "package-name": "growthbook",
+      "include-v-in-tag": false,
+      "include-component-in-tag": false,
+      "bump-minor-pre-major": true,
+      "bump-patch-for-minor-pre-major": true,      
+      "version-file": "growthbook/__init__.py",
+      "extra-files": [
+          "CHANGELOG.md",
+          "growthbook/__init__.py"
+      ]
+    }
+  },
+  "plugins": [
+    "node-workspace"
+],
+"$schema": "https://raw.githubusercontent.com/googleapis/release-please/main/schemas/config.json",
+"changelog-sections": [
+    {"type": "feat", "section": "Features"},
+    {"type": "fix", "section": "Bug Fixes"},
+    {"type": "perf", "section": "Performance Improvements"},
+    {"type": "revert", "section": "Reverts"},
+    {"type": "docs", "section": "Documentation"},
+    {"type": "style", "section": "Styles"},
+    {"type": "refactor", "section": "Code Refactoring"},
+    {"type": "test", "section": "Tests"},
+    {"type": "build", "section": "Build System"},
+    {"type": "ci", "section": "Continuous Integration"}
+  ]
+} 
