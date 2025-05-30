@@ -7,4 +7,14 @@ from .growthbook_client import (
     BackoffStrategy
 )
 
+# Plugin support
+from .plugins import (
+    GrowthBookTrackingPlugin,
+    growthbook_tracking_plugin,
+    RequestContextPlugin,
+    ClientSideAttributes,
+    request_context_plugin,
+    client_side_attributes
+)
+
 __version__ = "1.2.1"
