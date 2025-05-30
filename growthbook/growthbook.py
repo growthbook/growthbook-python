@@ -443,7 +443,7 @@ class GrowthBook(object):
         sticky_bucket_identifier_attributes: List[str] = None,
         savedGroups: dict = {},
         streaming: bool = False,
-        plugins: List = None,  # NEW: Plugin support
+        plugins: List = None,
         # Deprecated args
         trackingCallback=None,
         qaMode: bool = False,
@@ -482,7 +482,7 @@ class GrowthBook(object):
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Any] = set()
 
-        # NEW: Plugin support
+        # support plugins
         self._plugins: List = plugins or []
         self._initialized_plugins: List = []
 
@@ -518,7 +518,6 @@ class GrowthBook(object):
         if self._client_key:
             feature_repo.add_feature_update_callback(self._on_feature_update)
 
-        # NEW: Initialize plugins
         self._initialize_plugins()
 
         if self._streaming:
