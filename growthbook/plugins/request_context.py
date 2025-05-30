@@ -5,11 +5,23 @@ This plugin extracts attributes from HTTP request context that's actually
 available server-side, rather than trying to mimic browser-side behavior.
 """
 
-import uuid
+import os
+import threading
 import logging
+import uuid
 import time
 from typing import Dict, Any, Optional, Callable
+from urllib.parse import urlparse, parse_qs
 from .base import GrowthBookPlugin
+
+# Optional web framework imports (type checking only)
+try:
+    from flask import session, g, request, has_request_context
+except ImportError:
+    session = None  # type: ignore
+    g = None  # type: ignore
+    request = None  # type: ignore
+    has_request_context = None  # type: ignore
 
 logger = logging.getLogger("growthbook.plugins.request_context")
 
@@ -150,7 +162,7 @@ class RequestContextPlugin(GrowthBookPlugin):
     
     def _extract_request_attributes(self) -> Dict[str, Any]:
         """Extract attributes from current HTTP request context."""
-        attributes = {}
+        attributes: Dict[str, Any] = {}
         
         # Get request object from web framework
         request = self._get_request_object()
@@ -213,7 +225,6 @@ class RequestContextPlugin(GrowthBookPlugin):
             # Flask: session or g.user
             if hasattr(request, 'environ'):  # Flask
                 try:
-                    from flask import session, g
                     if hasattr(g, 'user') and g.user:
                         return str(getattr(g.user, 'id', g.user))
                     return session.get('user_id')
@@ -239,7 +250,6 @@ class RequestContextPlugin(GrowthBookPlugin):
             
             # Flask
             try:
-                from flask import session
                 return session.get('_id') or session.get('session_id')
             except:
                 pass
@@ -258,7 +268,6 @@ class RequestContextPlugin(GrowthBookPlugin):
             # URL components
             url = self._get_full_url(request)
             if url:
-                from urllib.parse import urlparse
                 parsed = urlparse(url)
                 info['url'] = url
                 info['path'] = parsed.path
@@ -313,7 +322,7 @@ class RequestContextPlugin(GrowthBookPlugin):
     
     def _extract_user_agent_info(self, request) -> Dict[str, Any]:
         """Extract browser and device info from User-Agent."""
-        info = {}
+        info: Dict[str, Any] = {}
         
         try:
             user_agent = self._get_user_agent(request)
@@ -361,7 +370,6 @@ class RequestContextPlugin(GrowthBookPlugin):
         """Get request object from various web frameworks."""
         # Try Django
         try:
-            import threading
             if hasattr(threading.current_thread(), 'request'):
                 return threading.current_thread().request
         except:
@@ -369,10 +377,9 @@ class RequestContextPlugin(GrowthBookPlugin):
         
         # Try Flask
         try:
-            from flask import request, has_request_context
             if has_request_context():
                 return request
-        except ImportError:
+        except:
             pass
         
         # Try FastAPI (contextvars)
