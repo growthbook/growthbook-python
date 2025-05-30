@@ -443,6 +443,7 @@ class GrowthBook(object):
         sticky_bucket_identifier_attributes: List[str] = None,
         savedGroups: dict = {},
         streaming: bool = False,
+        plugins: List = None,  # NEW: Plugin support
         # Deprecated args
         trackingCallback=None,
         qaMode: bool = False,
@@ -481,6 +482,10 @@ class GrowthBook(object):
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Any] = set()
 
+        # NEW: Plugin support
+        self._plugins: List = plugins or []
+        self._initialized_plugins: List = []
+
         self._global_ctx = GlobalContext(
             options=Options(
                 url=self._url,
@@ -512,6 +517,9 @@ class GrowthBook(object):
         # Register for automatic feature updates when cache expires
         if self._client_key:
             feature_repo.add_feature_update_callback(self._on_feature_update)
+
+        # NEW: Initialize plugins
+        self._initialize_plugins()
 
         if self._streaming:
             self.load_features()
@@ -628,6 +636,9 @@ class GrowthBook(object):
         return self._attributes
 
     def destroy(self) -> None:
+        # Clean up plugins first
+        self._cleanup_plugins()
+        
         # Clean up feature update callback
         if self._client_key:
             feature_repo.remove_feature_update_callback(self._on_feature_update)
@@ -795,3 +806,33 @@ class GrowthBook(object):
         self._sticky_bucket_assignment_docs = self.sticky_bucket_service.get_all_assignments(attributes)
         # Update the user context with the new sticky bucket assignment docs
         self._user_ctx.sticky_bucket_assignment_docs = self._sticky_bucket_assignment_docs
+
+    def _initialize_plugins(self) -> None:
+        """Initialize all plugins with this GrowthBook instance."""
+        for plugin in self._plugins:
+            try:
+                if hasattr(plugin, 'initialize'):
+                    # Plugin is a class instance with initialize method
+                    plugin.initialize(self)
+                    self._initialized_plugins.append(plugin)
+                    logger.debug(f"Initialized plugin: {plugin.__class__.__name__}")
+                elif callable(plugin):
+                    # Plugin is a callable function
+                    plugin(self)
+                    self._initialized_plugins.append(plugin)
+                    logger.debug(f"Initialized callable plugin: {plugin.__name__}")
+                else:
+                    logger.warning(f"Plugin {plugin} is neither callable nor has initialize method")
+            except Exception as e:
+                logger.error(f"Failed to initialize plugin {plugin}: {e}")
+
+    def _cleanup_plugins(self) -> None:
+        """Cleanup all initialized plugins."""
+        for plugin in self._initialized_plugins:
+            try:
+                if hasattr(plugin, 'cleanup'):
+                    plugin.cleanup()
+                    logger.debug(f"Cleaned up plugin: {plugin.__class__.__name__}")
+            except Exception as e:
+                logger.error(f"Error cleaning up plugin {plugin}: {e}")
+        self._initialized_plugins.clear()
