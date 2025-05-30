@@ -16,7 +16,7 @@ from .base import GrowthBookPlugin
 
 # Optional web framework imports
 try:
-    from flask import session, g, request, has_request_context
+    from flask import session, g, request, has_request_context #type: ignore
 except ImportError:
     session = None  # type: ignore
     g = None  # type: ignore
