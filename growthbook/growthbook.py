@@ -15,8 +15,6 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Optional, Any, Set, Tuple, List, Dict, Callable
 
-from platformdirs import user_data_dir
-
 from .common_types import ( EvaluationContext, 
     Experiment, 
     FeatureResult, 
@@ -131,7 +129,7 @@ class FileFeatureCache(AbstractPersistentFeatureCache):
         self.cache: Dict[str, CacheEntry] = {}
 
     def _get_base_path(self) -> Path:
-        base_path = Path(user_data_dir(appname="GrowthBook-Cache")) 
+        base_path = Path("./GrowthBook-Cache") 
         base_path.mkdir(parents=True, exist_ok=True)
         return base_path
     
