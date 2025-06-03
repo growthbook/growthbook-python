@@ -105,6 +105,54 @@ class InMemoryFeatureCache(AbstractFeatureCache):
     def clear(self) -> None:
         self.cache.clear()
 
+class FileFeatureCache(AbstractFeatureCache):
+    def __init__(self, cache_file: str):
+        self.cache_file = cache_file
+        self.cache: Dict[str, CacheEntry] = {}
+        self._load_cache()
+
+    def _load_cache(self):
+        try:
+            with open(self.cache_file, "r") as f:
+                raw_cache = json.load(f)
+                now = time()
+                for key, entry_data in raw_cache.items():
+                    if entry_data["expires"] > now:
+                        self.cache[key] = CacheEntry(
+                            value=entry_data["value"], ttl=entry_data["expires"] - now
+                        )
+        except FileNotFoundError:
+            pass
+        except Exception as e:
+            logger.warning(f"Failed to load persistent cache: {e}")
+
+    def _save_cache(self):
+        raw_cache = {
+            key: {"value": entry.value, "expires": entry.expires}
+            for key, entry in self.cache.items()
+            if entry.expires > time()
+        }
+        try:
+            with open(self.cache_file, "w") as f:
+                json.dump(raw_cache, f)
+        except Exception as e:
+            logger.warning(f"Failed to save persistent cache: {e}")
+
+    def get(self, key: str) -> Optional[Dict]:
+        entry = self.cache.get(key)
+        if entry and entry.expires >= time():
+            return entry.value
+        return None
+
+    def set(self, key: str, value: Dict, ttl: int) -> None:
+        self.cache[key] = CacheEntry(value, ttl)
+        self._save_cache()
+
+    def clear(self) -> None:
+        self.cache.clear()
+        self._save_cache()
+
+
 class InMemoryStickyBucketService(AbstractStickyBucketService):
     def __init__(self) -> None:
         self.docs: Dict[str, Dict] = {}
@@ -248,16 +296,23 @@ class SSEClient:
 
 class FeatureRepository(object):
     def __init__(self) -> None:
-        self.cache: AbstractFeatureCache = InMemoryFeatureCache()
+        self.in_memory_cache: AbstractFeatureCache = InMemoryFeatureCache()
+        self.persistent_cache: AbstractFeatureCache=FileFeatureCache(cache_file="features_cache.json")
         self.http: Optional[PoolManager] = None
         self.sse_client: Optional[SSEClient] = None
         self._feature_update_callbacks: List[Callable[[Dict], None]] = []
 
-    def set_cache(self, cache: AbstractFeatureCache) -> None:
-        self.cache = cache
+        for key in list(self.persistent_cache.cache.keys()):
+            entry = self.persistent_cache.cache[key]
+            self.in_memory_cache.set(key, entry.value, int(entry.expires - time()))
+
+    def set_persistent_cache(self, cache: AbstractFeatureCache) -> None:
+        self.persistent_cache = cache
 
     def clear_cache(self):
-        self.cache.clear()
+        self.in_memory_cache.clear()
+        self.persistent_cache.сlear()
+
 
     def save_in_cache(self, key: str, res, ttl: int = 600):
         self.cache.set(key, res, ttl)
