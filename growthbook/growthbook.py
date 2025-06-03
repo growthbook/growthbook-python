@@ -5,6 +5,8 @@ feature flagging and A/B testing platform.
 More info at https://www.growthbook.io
 """
 
+import hashlib
+from pathlib import Path
 import sys
 import json
 import threading
@@ -12,6 +14,8 @@ import logging
 
 from abc import ABC, abstractmethod
 from typing import Optional, Any, Set, Tuple, List, Dict, Callable
+
+from platformdirs import user_data_dir
 
 from .common_types import ( EvaluationContext, 
     Experiment, 
@@ -106,14 +110,29 @@ class InMemoryFeatureCache(AbstractFeatureCache):
         self.cache.clear()
 
 class FileFeatureCache(AbstractFeatureCache):
-    def __init__(self, cache_file: str):
+    def __init__(self, cache_file: str, cache_key: str):
         self.cache_file = cache_file
         self.cache: Dict[str, CacheEntry] = {}
+        self._cache_key = self._sha256_hash(cache_key)
         self._load_cache()
+
+    def setCacheKey(self, key: str) -> None:
+        self._cache_key = self._sha256_hash(key)
+
+    def _sha256_hash(self, input_str: str) -> str:
+        return hashlib.sha256(input_str.encode('utf-8')).hexdigest()[:5]
+
+    def _get_base_path(self) -> Path:
+        base_path = Path(user_data_dir(appname="GrowthBook-Cache")) / self._cache_key
+        base_path.mkdir(parents=True, exist_ok=True)
+        return base_path
 
     def _load_cache(self):
         try:
-            with open(self.cache_file, "r") as f:
+            cache_path = self._get_base_path() / f"{self.cache_file}.json"
+            if not cache_path.exists():
+                return 
+            with open(cache_path, "r") as f:
                 raw_cache = json.load(f)
                 now = time()
                 for key, entry_data in raw_cache.items():
@@ -121,8 +140,6 @@ class FileFeatureCache(AbstractFeatureCache):
                         self.cache[key] = CacheEntry(
                             value=entry_data["value"], ttl=entry_data["expires"] - now
                         )
-        except FileNotFoundError:
-            pass
         except Exception as e:
             logger.warning(f"Failed to load persistent cache: {e}")
 
@@ -133,7 +150,7 @@ class FileFeatureCache(AbstractFeatureCache):
             if entry.expires > time()
         }
         try:
-            with open(self.cache_file, "w") as f:
+            with open(self._get_base_path(), "w") as f:
                 json.dump(raw_cache, f)
         except Exception as e:
             logger.warning(f"Failed to save persistent cache: {e}")
@@ -297,7 +314,7 @@ class SSEClient:
 class FeatureRepository(object):
     def __init__(self) -> None:
         self.in_memory_cache: AbstractFeatureCache = InMemoryFeatureCache()
-        self.persistent_cache: AbstractFeatureCache=FileFeatureCache(cache_file="features_cache.json")
+        self.persistent_cache: AbstractFeatureCache=FileFeatureCache(cache_file="features_cache.json", )
         self.http: Optional[PoolManager] = None
         self.sse_client: Optional[SSEClient] = None
         self._feature_update_callbacks: List[Callable[[Dict], None]] = []
