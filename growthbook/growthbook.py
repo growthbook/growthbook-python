@@ -66,7 +66,22 @@ def decrypt(encrypted_str: str, key_str: str) -> str:
 
     return bytestring.decode("utf-8")
 
+
+class CacheEntry(object):
+    def __init__(self, value: Dict, ttl: int) -> None:
+        self.value = value
+        self.ttl = ttl
+        self.expires = time() + ttl
+
+    def update(self, value: Dict):
+        self.value = value
+        self.expires = time() + self.ttl
+
 class AbstractFeatureCache(ABC):
+    @abstractmethod
+    def get_all_entries(self) -> Dict[str, CacheEntry]:
+        pass
+
     @abstractmethod
     def get(self, key: str) -> Optional[Dict]:
         pass
@@ -78,16 +93,18 @@ class AbstractFeatureCache(ABC):
     def clear(self) -> None:
         pass
 
+class AbstractPersistentFeatureCache(AbstractFeatureCache):
+    @abstractmethod
+    def load(self) -> None:
+        pass
 
-class CacheEntry(object):
-    def __init__(self, value: Dict, ttl: int) -> None:
-        self.value = value
-        self.ttl = ttl
-        self.expires = time() + ttl
+    @abstractmethod
+    def update_cache(self, cache: Dict[str, CacheEntry]) -> None:
+        pass
 
-    def update(self, value: Dict):
-        self.value = value
-        self.expires = time() + self.ttl
+    @abstractmethod
+    def set_cache_key(self, key: str) -> None:
+        pass
 
 
 class InMemoryFeatureCache(AbstractFeatureCache):
@@ -108,15 +125,16 @@ class InMemoryFeatureCache(AbstractFeatureCache):
 
     def clear(self) -> None:
         self.cache.clear()
+    
+    def get_all_entries(self) -> Dict[str, CacheEntry]:
+        return self.cache
 
-class FileFeatureCache(AbstractFeatureCache):
-    def __init__(self, cache_file: str, cache_key: str):
+class FileFeatureCache(AbstractPersistentFeatureCache):
+    def __init__(self, cache_file: str):
         self.cache_file = cache_file
         self.cache: Dict[str, CacheEntry] = {}
-        self._cache_key = self._sha256_hash(cache_key)
-        self._load_cache()
 
-    def setCacheKey(self, key: str) -> None:
+    def set_cache_key(self, key: str) -> None:
         self._cache_key = self._sha256_hash(key)
 
     def _sha256_hash(self, input_str: str) -> str:
@@ -126,8 +144,28 @@ class FileFeatureCache(AbstractFeatureCache):
         base_path = Path(user_data_dir(appname="GrowthBook-Cache")) / self._cache_key
         base_path.mkdir(parents=True, exist_ok=True)
         return base_path
+    
+    def get_all_entries(self) -> Dict[str, CacheEntry]:
+        return self.cache
+    
+    def update_cache(self, cache: Dict[str, CacheEntry]) -> None:
+        try:
+            cache_path = self._get_base_path() / f"{self.cache_file}.json"
+            raw_cache = {
+                key: {
+                    "value": entry.value,
+                    "expires": entry.expires  
+                }
+                for key, entry in cache.items()
+                if entry.expires > time()
+            }
+            with open(cache_path, "w") as f:
+                json.dump(raw_cache, f)
+        except Exception as e:
+            logger.warning(f"Failed to update persistent cache: {e}")
+            
 
-    def _load_cache(self):
+    def load(self):
         try:
             cache_path = self._get_base_path() / f"{self.cache_file}.json"
             if not cache_path.exists():
@@ -144,13 +182,14 @@ class FileFeatureCache(AbstractFeatureCache):
             logger.warning(f"Failed to load persistent cache: {e}")
 
     def _save_cache(self):
+        cache_path = self._get_base_path() / f"{self.cache_file}.json"
         raw_cache = {
             key: {"value": entry.value, "expires": entry.expires}
             for key, entry in self.cache.items()
             if entry.expires > time()
         }
         try:
-            with open(self._get_base_path(), "w") as f:
+            with open(cache_path, "w") as f:
                 json.dump(raw_cache, f)
         except Exception as e:
             logger.warning(f"Failed to save persistent cache: {e}")
@@ -314,7 +353,7 @@ class SSEClient:
 class FeatureRepository(object):
     def __init__(self) -> None:
         self.in_memory_cache: AbstractFeatureCache = InMemoryFeatureCache()
-        self.persistent_cache: AbstractFeatureCache=FileFeatureCache(cache_file="features_cache.json", )
+        self.persistent_cache: AbstractPersistentFeatureCache=FileFeatureCache(cache_file="features_cache.json")
         self.http: Optional[PoolManager] = None
         self.sse_client: Optional[SSEClient] = None
         self._feature_update_callbacks: List[Callable[[Dict], None]] = []
@@ -323,16 +362,19 @@ class FeatureRepository(object):
             entry = self.persistent_cache.cache[key]
             self.in_memory_cache.set(key, entry.value, int(entry.expires - time()))
 
-    def set_persistent_cache(self, cache: AbstractFeatureCache) -> None:
+    def load_features_from_persistent_cache(self) -> None:
+        self.persistent_cache.load()
+
+    def set_persistent_cache(self, cache: AbstractPersistentFeatureCache) -> None:
         self.persistent_cache = cache
 
     def clear_cache(self):
         self.in_memory_cache.clear()
-        self.persistent_cache.сlear()
+        self.persistent_cache.update_cache(self.in_memory_cache.get_all_entries())
 
 
     def save_in_cache(self, key: str, res, ttl: int = 600):
-        self.cache.set(key, res, ttl)
+        self.in_memory_cache.set(key, res, ttl)
 
     def add_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
         """Add a callback to be notified when features are updated due to cache expiry"""
@@ -361,11 +403,12 @@ class FeatureRepository(object):
         
         key = api_host + "::" + client_key
 
-        cached = self.cache.get(key)
+        cached = self.in_memory_cache.get(key)
         if not cached:
             res = self._fetch_features(api_host, client_key, decryption_key)
             if res is not None:
-                self.cache.set(key, res, ttl)
+                self.in_memory_cache.set(key, res, ttl)
+                self.persistent_cache.update_cache(self.in_memory_cache.get_all_entries())
                 logger.debug("Fetched features from API, stored in cache")
                 # Notify callbacks about fresh features
                 self._notify_feature_update_callbacks(res)
@@ -377,11 +420,12 @@ class FeatureRepository(object):
     ) -> Optional[Dict]:
         key = api_host + "::" + client_key
 
-        cached = self.cache.get(key)
+        cached = self.in_memory_cache.get(key)
         if not cached:
             res = await self._fetch_features_async(api_host, client_key, decryption_key)
             if res is not None:
-                self.cache.set(key, res, ttl)
+                self.in_memory_cache.set(key, res, ttl)
+                self.persistent_cache.update_cache(self.in_memory_cache.get_all_entries())
                 logger.debug("Fetched features from API, stored in cache")
                 # Notify callbacks about fresh features
                 self._notify_feature_update_callbacks(res)
