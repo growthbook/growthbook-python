@@ -5,6 +5,8 @@ feature flagging and A/B testing platform.
 More info at https://www.growthbook.io
 """
 
+import hashlib
+from pathlib import Path
 import sys
 import json
 import threading
@@ -62,7 +64,22 @@ def decrypt(encrypted_str: str, key_str: str) -> str:
 
     return bytestring.decode("utf-8")
 
+
+class CacheEntry(object):
+    def __init__(self, value: Dict, ttl: int) -> None:
+        self.value = value
+        self.ttl = ttl
+        self.expires = time() + ttl
+
+    def update(self, value: Dict):
+        self.value = value
+        self.expires = time() + self.ttl
+
 class AbstractFeatureCache(ABC):
+    @abstractmethod
+    def get_all_entries(self) -> Dict[str, CacheEntry]:
+        pass
+
     @abstractmethod
     def get(self, key: str) -> Optional[Dict]:
         pass
@@ -74,16 +91,14 @@ class AbstractFeatureCache(ABC):
     def clear(self) -> None:
         pass
 
+class AbstractPersistentFeatureCache(AbstractFeatureCache):
+    @abstractmethod
+    def load(self) -> None:
+        pass
 
-class CacheEntry(object):
-    def __init__(self, value: Dict, ttl: int) -> None:
-        self.value = value
-        self.ttl = ttl
-        self.expires = time() + ttl
-
-    def update(self, value: Dict):
-        self.value = value
-        self.expires = time() + self.ttl
+    @abstractmethod
+    def update_cache(self, cache: Dict[str, CacheEntry]) -> None:
+        pass
 
 
 class InMemoryFeatureCache(AbstractFeatureCache):
@@ -104,6 +119,82 @@ class InMemoryFeatureCache(AbstractFeatureCache):
 
     def clear(self) -> None:
         self.cache.clear()
+    
+    def get_all_entries(self) -> Dict[str, CacheEntry]:
+        return self.cache
+
+class FileFeatureCache(AbstractPersistentFeatureCache):
+    def __init__(self, cache_file: str):
+        self.cache_file = cache_file
+        self.cache: Dict[str, CacheEntry] = {}
+
+    def _get_base_path(self) -> Path:
+        base_path = Path("./GrowthBook-Cache") 
+        base_path.mkdir(parents=True, exist_ok=True)
+        return base_path
+    
+    def get_all_entries(self) -> Dict[str, CacheEntry]:
+        return self.cache
+    
+    def update_cache(self, cache: Dict[str, CacheEntry]) -> None:
+        try:
+            cache_path = self._get_base_path() / f"{self.cache_file}"
+            raw_cache = {
+                key: {
+                    "value": entry.value,
+                    "expires": entry.expires  
+                }
+                for key, entry in cache.items()
+                if entry.expires > time()
+            }
+            with open(cache_path, "w") as f:
+                json.dump(raw_cache, f)
+        except Exception as e:
+            logger.warning(f"Failed to update persistent cache: {e}")
+            
+
+    def load(self):
+        try:
+            cache_path = self._get_base_path() / f"{self.cache_file}"
+            if not cache_path.exists():
+                return 
+            with open(cache_path, "r") as f:
+                raw_cache = json.load(f)
+                now = time()
+                for key, entry_data in raw_cache.items():
+                    self.cache[key] = CacheEntry(
+                        value=entry_data["value"], ttl=entry_data["expires"] - now
+                    )
+        except Exception as e:
+            logger.warning(f"Failed to load persistent cache: {e}")
+
+    def _save_cache(self):
+        cache_path = self._get_base_path() / f"{self.cache_file}"
+        raw_cache = {
+            key: {"value": entry.value, "expires": entry.expires}
+            for key, entry in self.cache.items()
+            if entry.expires > time()
+        }
+        try:
+            with open(cache_path, "w") as f:
+                json.dump(raw_cache, f)
+        except Exception as e:
+            logger.warning(f"Failed to save persistent cache: {e}")
+
+    def get(self, key: str) -> Optional[Dict]:
+        entry = self.cache.get(key)
+        if entry and entry.expires >= time():
+            return entry.value
+        return None
+
+    def set(self, key: str, value: Dict, ttl: int) -> None:
+        self.cache[key] = CacheEntry(value, ttl)
+        self._save_cache()
+
+    def clear(self) -> None:
+        self.cache.clear()
+        self._save_cache()
+
 
 class InMemoryStickyBucketService(AbstractStickyBucketService):
     def __init__(self) -> None:
@@ -248,19 +339,28 @@ class SSEClient:
 
 class FeatureRepository(object):
     def __init__(self) -> None:
-        self.cache: AbstractFeatureCache = InMemoryFeatureCache()
+        self.in_memory_cache: AbstractFeatureCache = InMemoryFeatureCache()
+        self.persistent_cache: AbstractPersistentFeatureCache=FileFeatureCache(cache_file="features_cache.json")
         self.http: Optional[PoolManager] = None
         self.sse_client: Optional[SSEClient] = None
         self._feature_update_callbacks: List[Callable[[Dict], None]] = []
 
-    def set_cache(self, cache: AbstractFeatureCache) -> None:
-        self.cache = cache
+    def load_features_from_persistent_cache(self) -> None:
+        self.persistent_cache.load()
+        for key in list(self.persistent_cache.get_all_entries().keys()):
+            entry = self.persistent_cache.get_all_entries()[key]
+            self.in_memory_cache.set(key, entry.value, int(entry.expires - time()))
+
+    def set_persistent_cache(self, cache: AbstractPersistentFeatureCache) -> None:
+        self.persistent_cache = cache
 
     def clear_cache(self):
-        self.cache.clear()
+        self.in_memory_cache.clear()
+        self.persistent_cache.update_cache(self.in_memory_cache.get_all_entries())
+
 
     def save_in_cache(self, key: str, res, ttl: int = 600):
-        self.cache.set(key, res, ttl)
+        self.in_memory_cache.set(key, res, ttl)
 
     def add_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
         """Add a callback to be notified when features are updated due to cache expiry"""
@@ -289,11 +389,12 @@ class FeatureRepository(object):
         
         key = api_host + "::" + client_key
 
-        cached = self.cache.get(key)
+        cached = self.in_memory_cache.get(key)
         if not cached:
             res = self._fetch_features(api_host, client_key, decryption_key)
             if res is not None:
-                self.cache.set(key, res, ttl)
+                self.in_memory_cache.set(key, res, ttl)
+                self.persistent_cache.update_cache(self.in_memory_cache.get_all_entries())
                 logger.debug("Fetched features from API, stored in cache")
                 # Notify callbacks about fresh features
                 self._notify_feature_update_callbacks(res)
@@ -305,11 +406,12 @@ class FeatureRepository(object):
     ) -> Optional[Dict]:
         key = api_host + "::" + client_key
 
-        cached = self.cache.get(key)
+        cached = self.in_memory_cache.get(key)
         if not cached:
             res = await self._fetch_features_async(api_host, client_key, decryption_key)
             if res is not None:
-                self.cache.set(key, res, ttl)
+                self.in_memory_cache.set(key, res, ttl)
+                self.persistent_cache.update_cache(self.in_memory_cache.get_all_entries())
                 logger.debug("Fetched features from API, stored in cache")
                 # Notify callbacks about fresh features
                 self._notify_feature_update_callbacks(res)
@@ -505,6 +607,8 @@ class GrowthBook(object):
             overrides=self._overrides,
             sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs
         )
+
+        feature_repo.load_features_from_persistent_cache()
 
         if features:
             self.setFeatures(features)
