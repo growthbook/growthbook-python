@@ -102,10 +102,6 @@ class AbstractPersistentFeatureCache(AbstractFeatureCache):
     def update_cache(self, cache: Dict[str, CacheEntry]) -> None:
         pass
 
-    @abstractmethod
-    def set_cache_key(self, key: str) -> None:
-        pass
-
 
 class InMemoryFeatureCache(AbstractFeatureCache):
     def __init__(self) -> None:
@@ -134,14 +130,8 @@ class FileFeatureCache(AbstractPersistentFeatureCache):
         self.cache_file = cache_file
         self.cache: Dict[str, CacheEntry] = {}
 
-    def set_cache_key(self, key: str) -> None:
-        self._cache_key = self._sha256_hash(key)
-
-    def _sha256_hash(self, input_str: str) -> str:
-        return hashlib.sha256(input_str.encode('utf-8')).hexdigest()[:5]
-
     def _get_base_path(self) -> Path:
-        base_path = Path(user_data_dir(appname="GrowthBook-Cache")) / self._cache_key
+        base_path = Path(user_data_dir(appname="GrowthBook-Cache")) 
         base_path.mkdir(parents=True, exist_ok=True)
         return base_path
     
@@ -150,7 +140,7 @@ class FileFeatureCache(AbstractPersistentFeatureCache):
     
     def update_cache(self, cache: Dict[str, CacheEntry]) -> None:
         try:
-            cache_path = self._get_base_path() / f"{self.cache_file}.json"
+            cache_path = self._get_base_path() / f"{self.cache_file}"
             raw_cache = {
                 key: {
                     "value": entry.value,
@@ -167,22 +157,21 @@ class FileFeatureCache(AbstractPersistentFeatureCache):
 
     def load(self):
         try:
-            cache_path = self._get_base_path() / f"{self.cache_file}.json"
+            cache_path = self._get_base_path() / f"{self.cache_file}"
             if not cache_path.exists():
                 return 
             with open(cache_path, "r") as f:
                 raw_cache = json.load(f)
                 now = time()
                 for key, entry_data in raw_cache.items():
-                    if entry_data["expires"] > now:
-                        self.cache[key] = CacheEntry(
-                            value=entry_data["value"], ttl=entry_data["expires"] - now
-                        )
+                    self.cache[key] = CacheEntry(
+                        value=entry_data["value"], ttl=entry_data["expires"] - now
+                    )
         except Exception as e:
             logger.warning(f"Failed to load persistent cache: {e}")
 
     def _save_cache(self):
-        cache_path = self._get_base_path() / f"{self.cache_file}.json"
+        cache_path = self._get_base_path() / f"{self.cache_file}"
         raw_cache = {
             key: {"value": entry.value, "expires": entry.expires}
             for key, entry in self.cache.items()
@@ -358,12 +347,11 @@ class FeatureRepository(object):
         self.sse_client: Optional[SSEClient] = None
         self._feature_update_callbacks: List[Callable[[Dict], None]] = []
 
-        for key in list(self.persistent_cache.cache.keys()):
-            entry = self.persistent_cache.cache[key]
-            self.in_memory_cache.set(key, entry.value, int(entry.expires - time()))
-
     def load_features_from_persistent_cache(self) -> None:
         self.persistent_cache.load()
+        for key in list(self.persistent_cache.get_all_entries().keys()):
+            entry = self.persistent_cache.get_all_entries()[key]
+            self.in_memory_cache.set(key, entry.value, int(entry.expires - time()))
 
     def set_persistent_cache(self, cache: AbstractPersistentFeatureCache) -> None:
         self.persistent_cache = cache
@@ -621,6 +609,8 @@ class GrowthBook(object):
             overrides=self._overrides,
             sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs
         )
+
+        feature_repo.load_features_from_persistent_cache()
 
         if features:
             self.setFeatures(features)
