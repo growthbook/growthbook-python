@@ -1,13 +1,15 @@
 # Changelog
 
-## [1.2.1](https://github.com/growthbook/growthbook-python/compare/v1.2.0...v1.2.1) (2024-XX-XX)
+## [1.2.1](https://github.com/growthbook/growthbook-python/compare/v1.1.0...v) (2024-XX-XX)
 
 ### Bug Fixes
 
-* Fixed TTL cache issue where users weren't getting fresh feature flag values after cache expiry
-* Added callback system for automatic feature updates when cache expires
-* Improved async test compatibility for Python 3.7+
-* Fixed mypy errors in lazy refresh implementation
+* PEP-561 compatibility
+* Fix zero value evaluation for _getOrigHashValue
+* Saved groups, $inGroup $notInGroup operators, versionCompare
+* Added SSE client
+* Support for multi-context and Enhanced GrowthBookClient with Async processing
+* Update to test spec 0.7.1
 
 ### Features
 
