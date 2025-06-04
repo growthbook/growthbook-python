@@ -17,4 +17,6 @@ from .plugins import (
     client_side_attributes
 )
 
+# x-release-please-start-version
 __version__ = "1.2.1"
+# x-release-please-end
