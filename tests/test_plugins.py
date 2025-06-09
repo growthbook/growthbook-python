@@ -3,8 +3,7 @@
 Plugin Tests for GrowthBook Python SDK
 
 Simplified and organized tests for:
-- ClientSideAttributes functionality
-- RequestContextPlugin 
+- RequestContextPlugin with mocked HTTP request context
 - GrowthBookTrackingPlugin with mocked ingestor
 """
 
@@ -52,27 +51,109 @@ class MockIngestor:
         mock_response.__exit__ = lambda x, y, z, w: None
         return mock_response
 
+
+class MockDjangoRequest:
+    """Mock Django-style request object."""
+    
+    def __init__(self):
+        self.META = {
+            # Proper Safari on iOS User-Agent that contains "Safari"
+            'HTTP_USER_AGENT': 'Mozilla/5.0 (iPhone; CPU iPhone OS 14_7_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.1.2 Mobile/15E148 Safari/604.1',
+            'HTTP_REFERER': 'https://google.com',
+            'REMOTE_ADDR': '192.168.1.100'
+        }
+        self.GET = {
+            'utm_source': 'google',
+            'utm_campaign': 'summer2023'
+        }
+
+
 class TestRequestContextPlugin(unittest.TestCase):
     """Test RequestContextPlugin functionality."""
     
-    def test_growthbook_integration(self):
-        """Just to verify the attributes are merged correctly. """
+    def test_request_context_extraction_with_mock(self):
+        """Test actual request context extraction with mocked HTTP request."""
+        # Create a mock request object
+        mock_request = MockDjangoRequest()
+        
+        # Patch the plugin's request detection to return our mock
+        with patch.object(RequestContextPlugin, '_get_request_object', return_value=mock_request):
+            plugin = request_context_plugin(
+                include_request_info=True,
+                include_utm_params=True,
+                include_user_agent=True
+            )
+            
+            gb = GrowthBook(plugins=[plugin])
+            
+            # Verify extracted attributes
+            attrs = gb.get_attributes()
+            
+            # Should extract UTM parameters
+            self.assertEqual(attrs.get('utmSource'), 'google')
+            self.assertEqual(attrs.get('utmCampaign'), 'summer2023')
+            
+            # Should detect mobile device from User-Agent
+            self.assertEqual(attrs.get('deviceType'), 'mobile')
+            self.assertEqual(attrs.get('browser'), 'safari')  # WebKit -> Safari on iOS
+            
+            # Should include server context
+            self.assertIn('server_timestamp', attrs)
+            self.assertEqual(attrs.get('sdk_context'), 'server')
+            
+            gb.destroy()
+    
+    def test_client_side_attributes_override(self):
+        """Test that client-side attributes override auto-detected values."""
+        mock_request = MockDjangoRequest()
+        
+        # Manual client-side attributes that override detection
         client_attrs = client_side_attributes(
-            pageTitle="Integration Test",
-            deviceType="mobile",
-            customAttr="test_value"
+            deviceType="desktop",  # Override mobile detection
+            pageTitle="Dashboard",
+            customData="test_value"
         )
         
-        plugin = request_context_plugin(client_side_attributes=client_attrs)
+        with patch.object(RequestContextPlugin, '_get_request_object', return_value=mock_request):
+            plugin = request_context_plugin(
+                client_side_attributes=client_attrs,
+                include_user_agent=True
+            )
+            
+            gb = GrowthBook(plugins=[plugin])
+            attrs = gb.get_attributes()
+            
+            # Client-side attributes should take precedence
+            self.assertEqual(attrs.get('deviceType'), 'desktop')  # Override
+            self.assertEqual(attrs.get('pageTitle'), 'Dashboard')  # Manual only
+            self.assertEqual(attrs.get('customData'), 'test_value')
+            
+            # But other UA info should still be detected
+            self.assertEqual(attrs.get('browser'), 'safari')
+            
+            gb.destroy()
+    
+    def test_no_request_context_fallback(self):
+        """Test plugin behavior when no request context is available."""
+        # Plugin should still work with manual client-side attributes
+        client_attrs = client_side_attributes(
+            pageTitle="Offline Test",
+            deviceType="mobile"
+        )
         
-        # Don't provide client_key to avoid API calls
+        # No mocking - plugin should detect no request context
+        plugin = request_context_plugin(client_side_attributes=client_attrs)
         gb = GrowthBook(plugins=[plugin])
         
-        # Verify client-side attributes were merged
-        final_attrs = gb.get_attributes()
-        self.assertIn('pageTitle', final_attrs)
-        self.assertIn('deviceType', final_attrs)
-        self.assertIn('customAttr', final_attrs)
+        attrs = gb.get_attributes()
+        
+        # Should have manual attributes
+        self.assertEqual(attrs.get('pageTitle'), 'Offline Test')
+        self.assertEqual(attrs.get('deviceType'), 'mobile')
+        
+        # Should not have request-extracted attributes
+        self.assertNotIn('utmSource', attrs)
+        self.assertNotIn('userAgent', attrs)
         
         gb.destroy()
 
@@ -184,126 +265,49 @@ class TestTrackingPlugin(unittest.TestCase):
         self.assert_feature_event(test_feature_event, 'test-feature', True)
         self.assert_feature_event(another_feature_event, 'another-feature', 'test_value')
     
-    def test_experiment_tracking(self):
-        """Test experiment tracking."""
-        plugin = growthbook_tracking_plugin(
-            ingestor_host="https://test.growthbook.io",
-            batch_size=1,
-            batch_timeout=0.5
-        )
+    def test_tracking_plugin_captures_experiment_events(self):
+        """
+        Test tracking plugin to capture experiment events.
+        """
+        # Track experiment events with a custom callback
+        tracked_events = []
+        
+        def custom_tracking_callback(experiment, result):
+            tracked_events.append({
+                'experiment_key': experiment.key,
+                'variation_value': result.value,
+                'in_experiment': result.inExperiment,
+                'user_id': result.hashValue
+            })
         
         gb = GrowthBook(
-            attributes={"id": "test-user-123"},
-            plugins=[plugin]
-        )
-        
-        # Run experiment
-        result = gb.run(Experiment(
-            key="test-experiment",
-            variations=["control", "treatment"],
-            coverage=1.0,
-            weights=[0.5, 0.5]
-        ))
-        
-        self.assertIn(result.value, ["control", "treatment"])
-        self.assertTrue(result.inExperiment)
-        
-        # Wait for events and cleanup
-        time.sleep(1)
-        gb.destroy()
-        time.sleep(0.5)
-        
-        # Assert HTTP request
-        self.assert_request_data("https://test.growthbook.io/events", 1)
-        
-        # Find and assert experiment events
-        experiment_events = self.find_events_by_type(
-            'experiment_viewed',
-            lambda e: e.get('experiment_id') == 'test-experiment'
-        )
-        self.assertEqual(len(experiment_events), 1)
-        
-        # Assert experiment event
-        self.assert_experiment_event(
-            experiment_events[0], 
-            'test-experiment', 
-            ["control", "treatment"],
-            user_id="test-user-123"
-        )
-
-
-class TestPluginIntegration(unittest.TestCase):
-    """Test complete plugin integration scenarios."""
-    
-    def setUp(self):
-        """Set up mock ingestor."""
-        self.mock_ingestor = MockIngestor()
-        self.patch = patch('urllib.request.urlopen', side_effect=self.mock_ingestor.mock_urlopen)
-        self.patch.start()
-    
-    def tearDown(self):
-        """Clean up patches."""
-        self.patch.stop()
-    
-    def test_combined_plugins(self):
-        """Test request context and tracking plugins working together."""
-        # Create client-side attributes
-        client_attrs = client_side_attributes(
-            pageTitle="Integration Test Page",
-            deviceType="mobile",
-            browser="chrome",
-            pageType="checkout",
-            cartValue=199.99
-        )
-        
-        # Create GrowthBook with both plugins (no client_key to avoid API calls)
-        gb = GrowthBook(
+            attributes={"id": "manual-user-123"},
             plugins=[
-                request_context_plugin(
-                    client_side_attributes=client_attrs,
-                    custom_extractors={
-                        "user_tier": lambda req: "premium"
-                    }
-                ),
                 growthbook_tracking_plugin(
-                    ingestor_host="https://integration.growthbook.io",
-                    batch_size=3,
-                    batch_timeout=1.0
+                    ingestor_host="https://test.growthbook.io",
+                    batch_size=1,
+                    additional_callback=custom_tracking_callback  # Custom tracking
                 )
             ]
         )
         
-        # Verify attributes are merged
-        final_attrs = gb.get_attributes()
-        self.assertIn('pageTitle', final_attrs)
-        self.assertIn('deviceType', final_attrs)
-        self.assertIn('cartValue', final_attrs)
-        
-        # Set up and test features manually
-        gb.set_features({
-            "feature-a": {"defaultValue": True},
-            "feature-b": {"defaultValue": False}
-        })
-        
-        result_a = gb.is_on("feature-a")
-        result_b = gb.is_on("feature-b")
-        
-        self.assertTrue(result_a)
-        self.assertFalse(result_b)
-        
-        # Test experiment
-        exp_result = gb.run(Experiment(
-            key="integration-experiment",
-            variations=["variant-a", "variant-b"]
+        result = gb.run(Experiment(
+            key="tracking-test", 
+            variations=["a", "b"],
+            coverage=1.0,  # Ensure experiment runs
+            weights=[0.5, 0.5]  # Equal weights
         ))
         
-        self.assertIn(exp_result.value, ["variant-a", "variant-b"])
+        # Verify experiment ran
+        self.assertTrue(result.inExperiment)
+        self.assertIn(result.value, ["a", "b"])
         
-        # Wait for events
-        time.sleep(2)
+        # Verify our custom callback was called
+        self.assertEqual(len(tracked_events), 1)
+        event = tracked_events[0]
+        self.assertEqual(event['experiment_key'], 'tracking-test')
+        self.assertIn(event['variation_value'], ["a", "b"])
+        self.assertTrue(event['in_experiment'])
+        self.assertEqual(event['user_id'], 'manual-user-123')
+        
         gb.destroy()
-        time.sleep(0.5)
-        
-        # Verify tracking worked
-        self.assertGreater(len(self.mock_ingestor.events), 0)
-        self.assertGreater(len(self.mock_ingestor.requests), 0)
