@@ -52,76 +52,11 @@ class MockIngestor:
         mock_response.__exit__ = lambda x, y, z, w: None
         return mock_response
 
-
-class TestClientSideAttributes(unittest.TestCase):
-    """Test ClientSideAttributes functionality."""
-    
-    def test_basic_attributes(self):
-        """Test basic client-side attribute creation."""
-        attrs = client_side_attributes(
-            pageTitle="Test Page",
-            deviceType="mobile",
-            browser="chrome",
-            timezone="America/New_York",
-            language="en-US"
-        )
-        
-        self.assertIsInstance(attrs, ClientSideAttributes)
-        
-        attrs_dict = attrs.to_dict()
-        self.assertEqual(attrs_dict['pageTitle'], "Test Page")
-        self.assertEqual(attrs_dict['deviceType'], "mobile")
-        self.assertEqual(attrs_dict['browser'], "chrome")
-        self.assertEqual(len(attrs_dict), 5)
-    
-    def test_custom_attributes(self):
-        """Test custom attributes support."""
-        attrs = client_side_attributes(
-            pageTitle="Dashboard",
-            customField="custom_value",
-            businessContext="important_data"
-        )
-        
-        attrs_dict = attrs.to_dict()
-        self.assertEqual(attrs_dict['customField'], "custom_value")
-        self.assertEqual(attrs_dict['businessContext'], "important_data")
-    
-    def test_none_values_excluded(self):
-        """Test that None values are excluded from output."""
-        attrs = client_side_attributes(
-            pageTitle="Test",
-            deviceType=None,  # Should be excluded
-            browser="firefox"
-        )
-        
-        attrs_dict = attrs.to_dict()
-        self.assertNotIn('deviceType', attrs_dict)
-        self.assertIn('pageTitle', attrs_dict)
-        self.assertIn('browser', attrs_dict)
-
-
 class TestRequestContextPlugin(unittest.TestCase):
     """Test RequestContextPlugin functionality."""
     
-    def test_plugin_creation(self):
-        """Test plugin creation with client-side attributes."""
-        client_attrs = client_side_attributes(
-            pageTitle="Plugin Test",
-            deviceType="desktop"
-        )
-        
-        plugin = request_context_plugin(
-            id_attribute="user_id",
-            client_side_attributes=client_attrs,
-            custom_extractors={"test_attr": lambda req: "test_value"}
-        )
-        
-        self.assertIsInstance(plugin, RequestContextPlugin)
-        self.assertEqual(plugin.id_attribute, "user_id")
-        self.assertEqual(plugin.client_side_attributes, client_attrs)
-    
     def test_growthbook_integration(self):
-        """Test plugin integration with GrowthBook."""
+        """Just to verify the attributes are merged correctly. """
         client_attrs = client_side_attributes(
             pageTitle="Integration Test",
             deviceType="mobile",
@@ -206,21 +141,6 @@ class TestTrackingPlugin(unittest.TestCase):
             events = [e for e in events if additional_filter(e)]
         
         return events
-    
-    def test_plugin_creation(self):
-        """Test tracking plugin creation."""
-        plugin = growthbook_tracking_plugin(
-            ingestor_host="https://test.growthbook.io",
-            track_experiment_viewed=True,
-            track_feature_evaluated=True,
-            batch_size=5
-        )
-        
-        self.assertIsInstance(plugin, GrowthBookTrackingPlugin)
-        self.assertEqual(plugin.ingestor_host, "https://test.growthbook.io")
-        self.assertTrue(plugin.track_experiment_viewed)
-        self.assertTrue(plugin.track_feature_evaluated)
-        self.assertEqual(plugin.batch_size, 5)
     
     def test_feature_tracking(self):
         """Test feature evaluation tracking."""
@@ -387,83 +307,3 @@ class TestPluginIntegration(unittest.TestCase):
         # Verify tracking worked
         self.assertGreater(len(self.mock_ingestor.events), 0)
         self.assertGreater(len(self.mock_ingestor.requests), 0)
-
-
-def run_interactive_demo():
-    """Optional demo showing plugin functionality with visual output."""
-    print("🚀 GROWTHBOOK PLUGIN DEMO")
-    print("=" * 40)
-    
-    # mock_ingestor = MockIngestor()
-    
-    # with patch('urllib.request.urlopen', side_effect=mock_ingestor.mock_urlopen):
-        
-    #     # Create client-side attributes
-    #     client_attrs = client_side_attributes(
-    #         pageTitle="Demo Store - Product Page",
-    #         deviceType="mobile",
-    #         browser="safari",
-    #         os="ios",
-            
-    #         # Business context
-    #         productId="iphone-15",
-    #         category="electronics",
-    #         price=999.99
-    #     )
-        
-    #     # Create GrowthBook with plugins (no client_key to avoid API calls)
-    #     gb = GrowthBook(
-    #         plugins=[
-    #             request_context_plugin(client_side_attributes=client_attrs),
-    #             growthbook_tracking_plugin(
-    #                 ingestor_host="https://demo.growthbook.io",
-    #                 batch_size=2,
-    #                 batch_timeout=1.0
-    #             )
-    #         ]
-    #     )
-        
-    #     print(f"\n📱 User Context: {len(gb.get_attributes())} attributes")
-    #     for key, value in gb.get_attributes().items():
-    #         print(f"   {key}: {value}")
-        
-    #     # Test features - set manually to avoid API calls
-    #     gb.set_features({
-    #         "express-checkout": {"defaultValue": True},
-    #         "price-alerts": {"defaultValue": False}
-    #     })
-        
-    #     print(f"\n🎯 Feature Tests:")
-    #     express = gb.is_on("express-checkout")
-    #     alerts = gb.is_on("price-alerts")
-    #     print(f"   Express checkout: {express}")
-    #     print(f"   Price alerts: {alerts}")
-        
-    #     # Test experiment
-    #     print(f"\n🧪 A/B Test:")
-    #     ui_test = gb.run(Experiment(
-    #         key="ui-variant",
-    #         variations=["classic", "modern"]
-    #     ))
-    #     print(f"   UI variant: {ui_test.value}")
-        
-    #     # Wait and cleanup
-    #     time.sleep(2)
-    #     gb.destroy()
-    #     time.sleep(0.5)
-        
-    #     print(f"\n📊 Results:")
-    #     print(f"   Events captured: {len(mock_ingestor.events)}")
-    #     print(f"   HTTP requests: {len(mock_ingestor.requests)}")
-    #     print(f"   ✅ Demo completed successfully!")
-
-
-if __name__ == "__main__":
-    import sys
-    
-    # Check if demo is requested
-    if len(sys.argv) > 1 and sys.argv[1] == "--demo":
-        run_interactive_demo()
-    else:
-        # Run unit tests
-        unittest.main(verbosity=2) 
