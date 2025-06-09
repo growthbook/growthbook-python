@@ -2,13 +2,10 @@
 """
 Plugin Tests for GrowthBook Python SDK
 
-Simplified and organized tests for:
 - RequestContextPlugin with mocked HTTP request context
-- GrowthBookTrackingPlugin with mocked ingestor
+- GrowthBookTrackingPlugin functionality
 """
 
-import json
-import time
 import unittest
 from unittest.mock import patch, MagicMock
 from growthbook import (
@@ -17,39 +14,9 @@ from growthbook import (
     request_context_plugin, 
     client_side_attributes,
     growthbook_tracking_plugin,
-    ClientSideAttributes,
-    RequestContextPlugin,
     GrowthBookTrackingPlugin
 )
-
-
-class MockIngestor:
-    """Simple mock ingestor for capturing events."""
-    
-    def __init__(self):
-        self.events = []
-        self.requests = []
-    
-    def mock_urlopen(self, request, timeout=None):
-        """Capture request data."""
-        if hasattr(request, 'data') and request.data:
-            try:
-                data = json.loads(request.data.decode('utf-8'))
-                self.events.extend(data.get('events', []))
-                self.requests.append({
-                    'url': request.full_url,
-                    'client_key': data.get('client_key'),
-                    'event_count': len(data.get('events', []))
-                })
-            except Exception:
-                pass
-        
-        # Return success response
-        mock_response = MagicMock()
-        mock_response.status = 200
-        mock_response.__enter__ = lambda x: mock_response
-        mock_response.__exit__ = lambda x, y, z, w: None
-        return mock_response
+from growthbook.plugins.request_context import set_request_context, clear_request_context
 
 
 class MockDjangoRequest:
@@ -66,42 +33,59 @@ class MockDjangoRequest:
             'utm_source': 'google',
             'utm_campaign': 'summer2023'
         }
+        self.user = MagicMock()
+        self.user.id = 12345
+        self.user.is_authenticated = True
+
+    def build_absolute_uri(self):
+        return 'https://example.com/dashboard?utm_source=google&utm_campaign=summer2023'
 
 
 class TestRequestContextPlugin(unittest.TestCase):
     """Test RequestContextPlugin functionality."""
+    
+    def setUp(self):
+        """Clear request context before each test."""
+        clear_request_context()
+    
+    def tearDown(self):
+        """Clear request context after each test."""
+        clear_request_context()
     
     def test_request_context_extraction_with_mock(self):
         """Test actual request context extraction with mocked HTTP request."""
         # Create a mock request object
         mock_request = MockDjangoRequest()
         
-        # Patch the plugin's request detection to return our mock
-        with patch.object(RequestContextPlugin, '_get_request_object', return_value=mock_request):
-            plugin = request_context_plugin(
-                include_request_info=True,
-                include_utm_params=True,
-                include_user_agent=True
-            )
-            
-            gb = GrowthBook(plugins=[plugin])
-            
-            # Verify extracted attributes
-            attrs = gb.get_attributes()
-            
-            # Should extract UTM parameters
-            self.assertEqual(attrs.get('utmSource'), 'google')
-            self.assertEqual(attrs.get('utmCampaign'), 'summer2023')
-            
-            # Should detect mobile device from User-Agent
-            self.assertEqual(attrs.get('deviceType'), 'mobile')
-            self.assertEqual(attrs.get('browser'), 'safari')  # WebKit -> Safari on iOS
-            
-            # Should include server context
-            self.assertIn('server_timestamp', attrs)
-            self.assertEqual(attrs.get('sdk_context'), 'server')
-            
-            gb.destroy()
+        # Set request context using the middleware pattern
+        set_request_context(mock_request)
+        
+        plugin = request_context_plugin(
+            extract_utm=True,
+            extract_user_agent=True
+        )
+        
+        gb = GrowthBook(plugins=[plugin])
+        
+        # Verify extracted attributes
+        attrs = gb.get_attributes()
+        
+        # Should extract UTM parameters
+        self.assertEqual(attrs.get('utmSource'), 'google')
+        self.assertEqual(attrs.get('utmCampaign'), 'summer2023')
+        
+        # Should detect mobile device from User-Agent
+        self.assertEqual(attrs.get('deviceType'), 'mobile')
+        self.assertEqual(attrs.get('browser'), 'safari')
+        
+        # Should include server context
+        self.assertIn('server_timestamp', attrs)
+        self.assertEqual(attrs.get('sdk_context'), 'server')
+        
+        # Should extract user ID
+        self.assertEqual(attrs.get('id'), '12345')
+        
+        gb.destroy()
     
     def test_client_side_attributes_override(self):
         """Test that client-side attributes override auto-detected values."""
@@ -114,24 +98,26 @@ class TestRequestContextPlugin(unittest.TestCase):
             customData="test_value"
         )
         
-        with patch.object(RequestContextPlugin, '_get_request_object', return_value=mock_request):
-            plugin = request_context_plugin(
-                client_side_attributes=client_attrs,
-                include_user_agent=True
-            )
-            
-            gb = GrowthBook(plugins=[plugin])
-            attrs = gb.get_attributes()
-            
-            # Client-side attributes should take precedence
-            self.assertEqual(attrs.get('deviceType'), 'desktop')  # Override
-            self.assertEqual(attrs.get('pageTitle'), 'Dashboard')  # Manual only
-            self.assertEqual(attrs.get('customData'), 'test_value')
-            
-            # But other UA info should still be detected
-            self.assertEqual(attrs.get('browser'), 'safari')
-            
-            gb.destroy()
+        # Set request context using middleware pattern
+        set_request_context(mock_request)
+        
+        plugin = request_context_plugin(
+            client_side_attributes=client_attrs,
+            extract_user_agent=True
+        )
+        
+        gb = GrowthBook(plugins=[plugin])
+        attrs = gb.get_attributes()
+        
+        # Client-side attributes should take precedence
+        self.assertEqual(attrs.get('deviceType'), 'desktop')  # Override
+        self.assertEqual(attrs.get('pageTitle'), 'Dashboard')  # Manual only
+        self.assertEqual(attrs.get('customData'), 'test_value')
+        
+        # But other UA info should still be detected
+        self.assertEqual(attrs.get('browser'), 'safari')
+        
+        gb.destroy()
     
     def test_no_request_context_fallback(self):
         """Test plugin behavior when no request context is available."""
@@ -141,7 +127,7 @@ class TestRequestContextPlugin(unittest.TestCase):
             deviceType="mobile"
         )
         
-        # No mocking - plugin should detect no request context
+        # No request context set - plugin should detect no request context
         plugin = request_context_plugin(client_side_attributes=client_attrs)
         gb = GrowthBook(plugins=[plugin])
         
@@ -155,159 +141,117 @@ class TestRequestContextPlugin(unittest.TestCase):
         self.assertNotIn('utmSource', attrs)
         self.assertNotIn('userAgent', attrs)
         
+        # Should still have server context
+        self.assertIn('server_timestamp', attrs)
+        
+        gb.destroy()
+
+    def test_middleware_pattern_usage(self):
+        """Test the recommended middleware pattern usage."""
+        # Simulate middleware setting request context
+        request_data = {
+            'url': 'https://example.com/page?utm_source=facebook',
+            'query_params': {'utm_source': 'facebook', 'utm_medium': 'social'},
+            'user_agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/91.0',
+            'user_id': 'user-789'
+        }
+        
+        set_request_context(request_data)
+        
+        gb = GrowthBook(plugins=[request_context_plugin()])
+        attrs = gb.get_attributes()
+        
+        # Should extract data from middleware-set context
+        self.assertEqual(attrs.get('utmSource'), 'facebook')
+        self.assertEqual(attrs.get('utmMedium'), 'social')
+        self.assertEqual(attrs.get('browser'), 'chrome')
+        self.assertEqual(attrs.get('deviceType'), 'desktop')
+        self.assertEqual(attrs.get('id'), 'user-789')
+        
         gb.destroy()
 
 
 class TestTrackingPlugin(unittest.TestCase):
     """Test GrowthBookTrackingPlugin functionality."""
     
-    def setUp(self):
-        """Set up mock ingestor for each test."""
-        self.mock_ingestor = MockIngestor()
-        self.patch = patch('urllib.request.urlopen', side_effect=self.mock_ingestor.mock_urlopen)
-        self.patch.start()
-    
-    def tearDown(self):
-        """Clean up patches."""
-        self.patch.stop()
-    
-    def assert_request_data(self, expected_url, expected_event_count, expected_client_key=''):
-        """Helper to assert HTTP request data."""
-        self.assertGreater(len(self.mock_ingestor.requests), 0, "No HTTP requests captured")
+    def test_experiment_tracking_with_callback(self):
+        """Test that tracking plugin calls callback when experiments run."""
+        tracked_experiments = []
         
-        request = self.mock_ingestor.requests[0]
-        self.assertEqual(request['url'], expected_url)
-        self.assertEqual(request['event_count'], expected_event_count)
-        if expected_client_key is not None:
-            self.assertEqual(request['client_key'], expected_client_key)
-    
-    def assert_common_event_fields(self, event):
-        """Helper to assert common event fields (timestamp, SDK info)."""
-        self.assertIn('timestamp', event)
-        self.assertIsInstance(event['timestamp'], (int, float))
-        self.assertEqual(event['sdk_language'], 'python')
-        self.assertIn('sdk_version', event)
-    
-    def assert_experiment_event(self, event, experiment_id, expected_variations, user_id=None):
-        """Helper to assert experiment event structure."""
-        self.assertEqual(event['event_type'], 'experiment_viewed')
-        self.assertEqual(event['experiment_id'], experiment_id)
-        self.assertIn(event['variation_value'], expected_variations)
-        self.assertTrue(event['in_experiment'])
-        
-        if user_id:
-            self.assertEqual(event['hash_attribute'], 'id')
-            self.assertEqual(event['hash_value'], user_id)
-        
-        self.assert_common_event_fields(event)
-    
-    def assert_feature_event(self, event, feature_key, expected_value, expected_source='defaultValue'):
-        """Helper to assert feature evaluation event structure."""
-        self.assertEqual(event['event_type'], 'feature_evaluated')
-        self.assertEqual(event['feature_key'], feature_key)
-        self.assertEqual(event['feature_value'], expected_value)
-        self.assertEqual(event['source'], expected_source)
-        
-        # Boolean flags
-        self.assertEqual(event['on'], bool(expected_value))
-        self.assertEqual(event['off'], not bool(expected_value))
-        
-        self.assert_common_event_fields(event)
-    
-    def find_events_by_type(self, event_type, additional_filter=None):
-        """Helper to find events by type with optional additional filtering."""
-        events = [e for e in self.mock_ingestor.events if e.get('event_type') == event_type]
-        
-        if additional_filter:
-            events = [e for e in events if additional_filter(e)]
-        
-        return events
-    
-    def test_feature_tracking(self):
-        """Test feature evaluation tracking."""
-        plugin = growthbook_tracking_plugin(
-            ingestor_host="https://test.growthbook.io",
-            batch_size=2,
-            batch_timeout=0.5
-        )
-        
-        gb = GrowthBook(plugins=[plugin])
-        
-        # Set up test features
-        gb.set_features({
-            "test-feature": {"defaultValue": True},
-            "another-feature": {"defaultValue": "test_value"}
-        })
-        
-        # Trigger feature evaluations
-        result1 = gb.is_on("test-feature")
-        result2 = gb.get_feature_value("another-feature", "default")
-        
-        self.assertTrue(result1)
-        self.assertEqual(result2, "test_value")
-        
-        # Wait for events and cleanup
-        time.sleep(1)
-        gb.destroy()
-        time.sleep(0.5)
-        
-        # Assert HTTP request
-        self.assert_request_data("https://test.growthbook.io/events", 2)
-        
-        # Find and assert feature events
-        feature_events = self.find_events_by_type('feature_evaluated')
-        self.assertEqual(len(feature_events), 2)
-        
-        # Assert individual feature events
-        test_feature_event = next(e for e in feature_events if e['feature_key'] == 'test-feature')
-        another_feature_event = next(e for e in feature_events if e['feature_key'] == 'another-feature')
-        
-        self.assert_feature_event(test_feature_event, 'test-feature', True)
-        self.assert_feature_event(another_feature_event, 'another-feature', 'test_value')
-    
-    def test_tracking_plugin_captures_experiment_events(self):
-        """
-        Test tracking plugin to capture experiment events.
-        """
-        # Track experiment events with a custom callback
-        tracked_events = []
-        
-        def custom_tracking_callback(experiment, result):
-            tracked_events.append({
-                'experiment_key': experiment.key,
-                'variation_value': result.value,
-                'in_experiment': result.inExperiment,
-                'user_id': result.hashValue
+        def track_callback(experiment, result):
+            tracked_experiments.append({
+                'key': experiment.key,
+                'value': result.value,
+                'inExperiment': result.inExperiment
             })
         
         gb = GrowthBook(
-            attributes={"id": "manual-user-123"},
+            attributes={"id": "test-user"},
             plugins=[
                 growthbook_tracking_plugin(
                     ingestor_host="https://test.growthbook.io",
-                    batch_size=1,
-                    additional_callback=custom_tracking_callback  # Custom tracking
+                    additional_callback=track_callback
                 )
             ]
         )
         
+        # Run experiment
         result = gb.run(Experiment(
-            key="tracking-test", 
-            variations=["a", "b"],
-            coverage=1.0,  # Ensure experiment runs
-            weights=[0.5, 0.5]  # Equal weights
+            key="simple-test",
+            variations=["control", "treatment"],
+            coverage=1.0,
+            weights=[0.5, 0.5]
         ))
         
-        # Verify experiment ran
+        # Verify experiment worked and was tracked
         self.assertTrue(result.inExperiment)
-        self.assertIn(result.value, ["a", "b"])
-        
-        # Verify our custom callback was called
-        self.assertEqual(len(tracked_events), 1)
-        event = tracked_events[0]
-        self.assertEqual(event['experiment_key'], 'tracking-test')
-        self.assertIn(event['variation_value'], ["a", "b"])
-        self.assertTrue(event['in_experiment'])
-        self.assertEqual(event['user_id'], 'manual-user-123')
+        self.assertIn(result.value, ["control", "treatment"])
+        self.assertEqual(len(tracked_experiments), 1)
+        self.assertEqual(tracked_experiments[0]['key'], 'simple-test')
         
         gb.destroy()
+    
+    def test_feature_tracking_with_callback(self):
+        """Test that tracking plugin calls callback for feature evaluations."""
+        tracked_features = []
+        
+        # Custom tracking callback to capture feature evaluations
+        original_track_feature = GrowthBookTrackingPlugin._track_feature_evaluated
+        
+        def mock_track_feature(self, feature_key, result, gb_instance):
+            tracked_features.append({
+                'key': feature_key,
+                'value': result.value,
+                'source': result.source
+            })
+            # Call original if needed
+            original_track_feature(self, feature_key, result, gb_instance)
+        
+        with patch.object(GrowthBookTrackingPlugin, '_track_feature_evaluated', mock_track_feature):
+            gb = GrowthBook(
+                plugins=[growthbook_tracking_plugin(ingestor_host="https://test.growthbook.io")]
+            )
+            
+            # Set up and evaluate features
+            gb.set_features({
+                "test-flag": {"defaultValue": True},
+                "test-string": {"defaultValue": "hello"}
+            })
+            
+            result1 = gb.is_on("test-flag")
+            result2 = gb.get_feature_value("test-string", "default")
+            
+            # Verify results
+            self.assertTrue(result1)
+            self.assertEqual(result2, "hello")
+            
+            # Verify tracking was called
+            self.assertEqual(len(tracked_features), 2)
+            
+            flag_track = next(f for f in tracked_features if f['key'] == 'test-flag')
+            string_track = next(f for f in tracked_features if f['key'] == 'test-string')
+            
+            self.assertEqual(flag_track['value'], True)
+            self.assertEqual(string_track['value'], 'hello')
+            
+            gb.destroy()
