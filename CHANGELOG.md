@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.0](https://github.com/growthbook/growthbook-python/compare/v1.2.0...v1.3.0) (2025-06-11)
+
+
+### Features
+
+* tracking plugins ([fde4d42](https://github.com/growthbook/growthbook-python/commit/fde4d4283343758ca1ec034052b8bdb2c0639b22))
+
 ## [1.2.1](https://github.com/growthbook/growthbook-python/compare/v1.1.0...v) (2024-XX-XX)
 
 ### Bug Fixes
