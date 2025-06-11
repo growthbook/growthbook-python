@@ -1,19 +1,21 @@
 # GrowthBook Python SDK
 
-Powerful Feature flagging and A/B testing for Python apps.
-
 ![Build Status](https://github.com/growthbook/growthbook-python/workflows/Build/badge.svg)
 [![PyPI](https://img.shields.io/pypi/v/growthbook.svg?maxAge=2592000)](https://pypi.org/project/growthbook/)
 [![PyPI](https://img.shields.io/pypi/pyversions/growthbook.svg)](https://pypi.org/project/growthbook/)
 
+## Overview
+
+Powerful Feature flagging and A/B testing for Python apps.
+
 - **Lightweight and fast**
 - **Local evaluation**, no network requests required
-- Python 3.6+
-- 100% test coverage
 - Flexible **targeting**
 - **Use your existing event tracking** (GA, Segment, Mixpanel, custom)
 - **Remote configuration** to change feature flags without deploying new code
 - **Async support** with real-time feature updates
+- Python 3.6+
+- 100% test coverage
 
 ## Installation
 
