@@ -3,6 +3,8 @@
 Powerful Feature flagging and A/B testing for Python apps.
 
 ![Build Status](https://github.com/growthbook/growthbook-python/workflows/Build/badge.svg)
+[![PyPI](https://img.shields.io/pypi/v/growthbook.svg?maxAge=2592000)](https://pypi.org/project/growthbook/)
+[![PyPI](https://img.shields.io/pypi/pyversions/growthbook.svg)](https://pypi.org/project/growthbook/)
 
 - **Lightweight and fast**
 - **Local evaluation**, no network requests required
@@ -375,6 +377,33 @@ gb = GrowthBook(
   on_experiment_viewed = on_experiment_viewed
 )
 ```
+
+#### Built-in Tracking Plugin
+
+For easier setup, you can use the built-in tracking plugin that automatically sends experiment and feature events to GrowthBook's data warehouse:
+
+```python
+from growthbook import GrowthBook
+from growthbook.plugins import growthbook_tracking_plugin, request_context_plugin
+
+gb = GrowthBook(
+  attributes={"id": "user-123"},
+  plugins=[
+    request_context_plugin(),  # Extracts request data
+    growthbook_tracking_plugin(
+      ingestor_host="https://gb-ingest.growthbook.io",
+      # Optional: Add custom tracking callback
+      additional_callback=my_custom_tracker
+    )
+  ]
+)
+
+# Events are now automatically tracked for experiments and features
+result = gb.run(experiment)  # -> Tracked automatically
+is_enabled = gb.is_on("my-feature")  # -> Tracked automatically
+```
+
+The tracking plugin provides batching, error handling, and works alongside your existing tracking callbacks. See the [plugin documentation](https://docs.growthbook.io/lib/python#tracking-plugins) for more details.
 
 ## Using Features
 
