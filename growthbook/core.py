@@ -536,12 +536,20 @@ def eval_prereqs(parentConditions: List[dict], evalContext: EvaluationContext) -
         # Reset the stack in each iteration
         evalContext.stack.evaluated_features = evaluated_features.copy()
 
-        parentRes = eval_feature(key=parentCondition.get("id", None), evalContext=evalContext)
+        parent_id = parentCondition.get("id")
+        if parent_id is None:
+            continue  # Skip if no valid ID
+            
+        parentRes = eval_feature(key=parent_id, evalContext=evalContext)
 
         if parentRes.source == "cyclicPrerequisite":
             return "cyclic"
 
-        if not evalCondition({'value': parentRes.value}, parentCondition.get("condition", None), evalContext.global_ctx.saved_groups):
+        parent_condition = parentCondition.get("condition")
+        if parent_condition is None:
+            continue  # Skip if no valid condition
+            
+        if not evalCondition({'value': parentRes.value}, parent_condition, evalContext.global_ctx.saved_groups):
             if parentCondition.get("gate", False):
                 return "gate"
             return "fail"
