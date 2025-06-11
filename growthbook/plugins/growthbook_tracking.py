@@ -5,10 +5,11 @@ import time
 from typing import Dict, Any, Optional, List, Callable
 from .base import GrowthBookPlugin
 
+requests: Any = None
 try:
     import requests
 except ImportError:
-    requests = None
+    pass
 
 logger = logging.getLogger("growthbook.plugins.growthbook_tracking")
 
