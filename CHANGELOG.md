@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.3.1](https://github.com/growthbook/growthbook-python/compare/v1.3.0...v1.3.1) (2025-06-13)
+
+
+### Bug Fixes
+
+* Tracking linked experiments ([becee2c](https://github.com/growthbook/growthbook-python/commit/becee2c7b306fd0e0f450c3a5676de77e39c9410))
+
 ## [1.3.0](https://github.com/growthbook/growthbook-python/compare/v1.2.0...v1.3.0) (2025-06-11)
 
 
