@@ -708,7 +708,8 @@ class GrowthBook(object):
     def eval_feature(self, key: str) -> FeatureResult:
         return core_eval_feature(key=key, 
                                  evalContext=self._get_eval_context(), 
-                                 callback_subscription=self._fireSubscriptions
+                                 callback_subscription=self._fireSubscriptions,
+                                 tracking_cb=self._track
                                  )
 
     # @deprecated, use get_all_results
