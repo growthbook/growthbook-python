@@ -413,7 +413,8 @@ def getBucketRanges(
 def eval_feature(
     key: str,
     evalContext: EvaluationContext = None,
-    callback_subscription: Callable[[Experiment, Result], None] = None
+    callback_subscription: Callable[[Experiment, Result], None] = None,
+    tracking_cb: Callable[[Experiment, Result], None] = None
 ) -> FeatureResult:
     """Core feature evaluation logic as a standalone function"""
 
@@ -506,7 +507,7 @@ def eval_feature(
             minBucketVersion=rule.minBucketVersion,
         )
 
-        result = run_experiment(experiment=exp, featureId=key, evalContext=evalContext)
+        result = run_experiment(experiment=exp, featureId=key, evalContext=evalContext, tracking_cb=tracking_cb)
 
         if callback_subscription:
             callback_subscription(exp, result)
