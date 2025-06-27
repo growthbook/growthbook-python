@@ -776,6 +776,12 @@ class GrowthBook(object):
         if not self.sticky_bucket_identifier_attributes:
             return attributes
         
+        self._user_ctx.attributes = self._attributes
+        self._user_ctx.url = self._url
+        self._user_ctx.overrides = self._overrides
+        # set the url for every evaluation. (unlikely to change)
+        self._global_ctx.options.url = self._url
+        
         evalCtx = EvaluationContext(
             global_ctx = self._global_ctx,
             user = self._user_ctx,
