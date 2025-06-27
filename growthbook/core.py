@@ -531,17 +531,24 @@ def eval_feature(
 
 def eval_prereqs(parentConditions: List[dict], evalContext: EvaluationContext) -> str:
     evaluated_features = evalContext.stack.evaluated_features.copy()
-
     for parentCondition in parentConditions:
         # Reset the stack in each iteration
         evalContext.stack.evaluated_features = evaluated_features.copy()
 
-        parentRes = eval_feature(key=parentCondition.get("id", None), evalContext=evalContext)
+        key = parentCondition.get("id")
+        if not isinstance(key, str):
+            continue 
+
+        condition = parentCondition.get("condition")
+        if not isinstance(condition, dict):
+            condition = {}
+
+        parentRes = eval_feature(key=key, evalContext=evalContext)
 
         if parentRes.source == "cyclicPrerequisite":
             return "cyclic"
 
-        if not evalCondition({'value': parentRes.value}, parentCondition.get("condition", None), evalContext.global_ctx.saved_groups):
+        if not evalCondition({'value': parentRes.value}, condition, evalContext.global_ctx.saved_groups):
             if parentCondition.get("gate", False):
                 return "gate"
             return "fail"
