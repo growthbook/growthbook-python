@@ -1,5 +1,42 @@
 # Changelog
 
+## [1.3.1](https://github.com/growthbook/growthbook-python/compare/v1.3.0...v1.3.1) (2025-06-13)
+
+
+### Bug Fixes
+
+* Tracking linked experiments ([becee2c](https://github.com/growthbook/growthbook-python/commit/becee2c7b306fd0e0f450c3a5676de77e39c9410))
+
+## [1.3.0](https://github.com/growthbook/growthbook-python/compare/v1.2.0...v1.3.0) (2025-06-11)
+
+
+### Features
+
+* tracking plugins ([fde4d42](https://github.com/growthbook/growthbook-python/commit/fde4d4283343758ca1ec034052b8bdb2c0639b22))
+
+
+### Bug Fixes
+
+* tracking plugins and Caching ([ef6529a](https://github.com/growthbook/growthbook-python/commit/ef6529a113f5c1b074a9b700232d2e3343a6b152))
+
+## [1.2.1](https://github.com/growthbook/growthbook-python/compare/v1.1.0...v) (2024-XX-XX)
+
+### Bug Fixes
+
+* PEP-561 compatibility
+* Fix zero value evaluation for _getOrigHashValue
+* Saved groups, $inGroup $notInGroup operators, versionCompare
+* Added SSE client
+* Support for multi-context and Enhanced GrowthBookClient with Async processing
+* Update to test spec 0.7.1
+
+### Features
+
+* Enhanced async client with better error handling and retry logic
+* Added comprehensive test coverage for async functionality
+
+All notable changes to this project will be documented in this file. See [standard-version](https://github.com/conventional-changelog/standard-version) for commit guidelines.
+
 ## **1.1.0** - Apr 11, 2024
 
 - Support for prerequisite feature flags
