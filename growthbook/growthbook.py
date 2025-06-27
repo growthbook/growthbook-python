@@ -775,9 +775,14 @@ class GrowthBook(object):
 
         if not self.sticky_bucket_identifier_attributes:
             return attributes
+        
+        evalCtx = EvaluationContext(
+            global_ctx = self._global_ctx,
+            user = self._user_ctx,
+            stack = StackContext(evaluated_features=set()))
 
         for attr in self.sticky_bucket_identifier_attributes:
-            _, hash_value = _getHashValue(attr=attr, eval_context=self._get_eval_context())
+            _, hash_value = _getHashValue(attr=attr, eval_context=evalCtx)
             if hash_value:
                 attributes[attr] = hash_value
         return attributes
