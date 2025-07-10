@@ -9,6 +9,7 @@ import sys
 import json
 import threading
 import logging
+import warnings
 
 from abc import ABC, abstractmethod
 from typing import Optional, Any, Set, Tuple, List, Dict, Callable
@@ -532,7 +533,6 @@ class GrowthBook(object):
             self._saved_groups = features_data["savedGroups"]
 
     def load_features(self) -> None:
-
         response = feature_repo.load_features(
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
         )
@@ -593,8 +593,8 @@ class GrowthBook(object):
     def stopAutoRefresh(self):
         feature_repo.stopAutoRefresh()
 
-    # @deprecated, use set_features
     def setFeatures(self, features: dict) -> None:
+        warnings.warn(f"setFeatures is deprecated, use set_features instead", DeprecationWarning)
         return self.set_features(features)
 
     def set_features(self, features: dict) -> None:
@@ -612,23 +612,23 @@ class GrowthBook(object):
         self._global_ctx.saved_groups = self._saved_groups
         self.refresh_sticky_buckets()
 
-    # @deprecated, use get_features
     def getFeatures(self) -> Dict[str, Feature]:
+        warnings.warn(f"getFeatures is deprecated, use get_features instead", DeprecationWarning)
         return self.get_features()
 
     def get_features(self) -> Dict[str, Feature]:
         return self._features
 
-    # @deprecated, use set_attributes
     def setAttributes(self, attributes: dict) -> None:
+        warnings.warn(f"setAttributes is deprecated, use set_attributes instead", DeprecationWarning)
         return self.set_attributes(attributes)
 
     def set_attributes(self, attributes: dict) -> None:
         self._attributes = attributes
         self.refresh_sticky_buckets()
 
-    # @deprecated, use get_attributes
     def getAttributes(self) -> dict:
+        warnings.warn(f"getAttributes is deprecated, use get_attributes instead", DeprecationWarning)
         return self.get_attributes()
 
     def get_attributes(self) -> dict:
@@ -652,30 +652,30 @@ class GrowthBook(object):
         self._attributes.clear()
         self._features.clear()
 
-    # @deprecated, use is_on
     def isOn(self, key: str) -> bool:
+        warnings.warn(f"isOn is deprecated, use is_on instead", DeprecationWarning)
         return self.is_on(key)
 
     def is_on(self, key: str) -> bool:
-        return self.evalFeature(key).on
+        return self.eval_feature(key).on
 
-    # @deprecated, use is_off
     def isOff(self, key: str) -> bool:
+        warnings.warn(f"isOff is deprecated, use is_off instead", DeprecationWarning)
         return self.is_off(key)
 
     def is_off(self, key: str) -> bool:
-        return self.evalFeature(key).off
+        return self.eval_feature(key).off
 
-    # @deprecated, use get_feature_value
     def getFeatureValue(self, key: str, fallback):
+        warnings.warn(f"getFeatureValue is deprecated, use get_feature_value instead", DeprecationWarning)
         return self.get_feature_value(key, fallback)
 
     def get_feature_value(self, key: str, fallback):
-        res = self.evalFeature(key)
+        res = self.eval_feature(key)
         return res.value if res.value is not None else fallback
 
-    # @deprecated, use eval_feature
     def evalFeature(self, key: str) -> FeatureResult:
+        warnings.warn(f"evalFeature is deprecated, use eval_feature instead", DeprecationWarning)
         return self.eval_feature(key)
     
     def _ensure_fresh_features(self) -> None:
@@ -712,8 +712,8 @@ class GrowthBook(object):
                                  tracking_cb=self._track
                                  )
 
-    # @deprecated, use get_all_results
     def getAllResults(self):
+        warnings.warn(f"getAllResults is deprecated, use get_all_results instead", DeprecationWarning)
         return self.get_all_results()
 
     def get_all_results(self):
@@ -766,8 +766,8 @@ class GrowthBook(object):
             try:
                 self._trackingCallback(experiment=experiment, result=result)
                 self._tracked[key] = True
-            except Exception:
-                pass
+            except Exception as e:
+                logger.exception(e)
 
     def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
         attributes = set()
