@@ -594,7 +594,7 @@ class GrowthBook(object):
         feature_repo.stopAutoRefresh()
 
     def setFeatures(self, features: dict) -> None:
-        warnings.warn(f"setFeatures is deprecated, use set_features instead", DeprecationWarning)
+        warnings.warn("setFeatures is deprecated, use set_features instead", DeprecationWarning)
         return self.set_features(features)
 
     def set_features(self, features: dict) -> None:
@@ -613,14 +613,14 @@ class GrowthBook(object):
         self.refresh_sticky_buckets()
 
     def getFeatures(self) -> Dict[str, Feature]:
-        warnings.warn(f"getFeatures is deprecated, use get_features instead", DeprecationWarning)
+        warnings.warn("getFeatures is deprecated, use get_features instead", DeprecationWarning)
         return self.get_features()
 
     def get_features(self) -> Dict[str, Feature]:
         return self._features
 
     def setAttributes(self, attributes: dict) -> None:
-        warnings.warn(f"setAttributes is deprecated, use set_attributes instead", DeprecationWarning)
+        warnings.warn("setAttributes is deprecated, use set_attributes instead", DeprecationWarning)
         return self.set_attributes(attributes)
 
     def set_attributes(self, attributes: dict) -> None:
@@ -628,7 +628,7 @@ class GrowthBook(object):
         self.refresh_sticky_buckets()
 
     def getAttributes(self) -> dict:
-        warnings.warn(f"getAttributes is deprecated, use get_attributes instead", DeprecationWarning)
+        warnings.warn("getAttributes is deprecated, use get_attributes instead", DeprecationWarning)
         return self.get_attributes()
 
     def get_attributes(self) -> dict:
@@ -653,21 +653,21 @@ class GrowthBook(object):
         self._features.clear()
 
     def isOn(self, key: str) -> bool:
-        warnings.warn(f"isOn is deprecated, use is_on instead", DeprecationWarning)
+        warnings.warn("isOn is deprecated, use is_on instead", DeprecationWarning)
         return self.is_on(key)
 
     def is_on(self, key: str) -> bool:
         return self.eval_feature(key).on
 
     def isOff(self, key: str) -> bool:
-        warnings.warn(f"isOff is deprecated, use is_off instead", DeprecationWarning)
+        warnings.warn("isOff is deprecated, use is_off instead", DeprecationWarning)
         return self.is_off(key)
 
     def is_off(self, key: str) -> bool:
         return self.eval_feature(key).off
 
     def getFeatureValue(self, key: str, fallback):
-        warnings.warn(f"getFeatureValue is deprecated, use get_feature_value instead", DeprecationWarning)
+        warnings.warn("getFeatureValue is deprecated, use get_feature_value instead", DeprecationWarning)
         return self.get_feature_value(key, fallback)
 
     def get_feature_value(self, key: str, fallback):
@@ -675,7 +675,7 @@ class GrowthBook(object):
         return res.value if res.value is not None else fallback
 
     def evalFeature(self, key: str) -> FeatureResult:
-        warnings.warn(f"evalFeature is deprecated, use eval_feature instead", DeprecationWarning)
+        warnings.warn("evalFeature is deprecated, use eval_feature instead", DeprecationWarning)
         return self.eval_feature(key)
     
     def _ensure_fresh_features(self) -> None:
@@ -713,7 +713,7 @@ class GrowthBook(object):
                                  )
 
     def getAllResults(self):
-        warnings.warn(f"getAllResults is deprecated, use get_all_results instead", DeprecationWarning)
+        warnings.warn("getAllResults is deprecated, use get_all_results instead", DeprecationWarning)
         return self.get_all_results()
 
     def get_all_results(self):
