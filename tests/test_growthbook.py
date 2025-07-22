@@ -656,6 +656,8 @@ class MockHttpResp:
 
 
 def test_feature_repository(mocker):
+    feature_repo.clear_cache()
+
     m = mocker.patch.object(feature_repo, "_get")
     expected = {"features": {"feature": {"defaultValue": 5}}}
     m.return_value = MockHttpResp(200, json.dumps(expected))
@@ -670,9 +672,20 @@ def test_feature_repository(mocker):
     assert features == expected
 
     # Does a new request if cache entry is expired
-    feature_repo.cache.cache["https://cdn.growthbook.io::sdk-abc123"].expires = (
-        time() - 10
-    )
+    cache_key_to_expire = "https://cdn.growthbook.io::sdk-abc123"
+
+    # Access the _primary_cache (which is InMemoryFeatureCache) and then its internal _cache dict
+    # Use getattr for safer access in tests, though direct access is fine if you're sure of the structure
+    if hasattr(feature_repo.feature_cache, '_primary_cache') and \
+        hasattr(feature_repo.feature_cache._primary_cache, '_cache') and \
+        cache_key_to_expire in feature_repo.feature_cache._primary_cache._cache:
+
+        feature_repo.feature_cache._primary_cache._cache[cache_key_to_expire].expires = (time() - 10)
+        logger.debug(f"Manually expired cache key: {cache_key_to_expire}")
+    else:
+        logger.warning(
+            f"Failed to manually expire cache key {cache_key_to_expire}. Cache structure might have changed or key not found.")
+
     features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
     assert m.call_count == 2
     assert features == expected
@@ -681,6 +694,8 @@ def test_feature_repository(mocker):
 
 
 def test_feature_repository_error(mocker):
+    feature_repo.clear_cache()
+
     m = mocker.patch.object(feature_repo, "_get")
     m.return_value = MockHttpResp(400, "400 Error")
     features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
@@ -703,6 +718,8 @@ def test_feature_repository_error(mocker):
 
 
 def test_feature_repository_encrypted(mocker):
+    feature_repo.clear_cache()
+
     m = mocker.patch.object(feature_repo, "_get")
     m.return_value = MockHttpResp(
         200,
@@ -728,6 +745,8 @@ def test_feature_repository_encrypted(mocker):
 
 
 def test_load_features(mocker):
+    feature_repo.clear_cache()
+
     m = mocker.patch.object(feature_repo, "_get")
     m.return_value = MockHttpResp(
         200, json.dumps({"features": {"feature": {"defaultValue": 5}}})
@@ -747,6 +766,8 @@ def test_load_features(mocker):
 
 
 def test_loose_unmarshalling(mocker):
+    feature_repo.clear_cache()
+
     m = mocker.patch.object(feature_repo, "_get")
     m.return_value = MockHttpResp(200, json.dumps({
         "features": {
@@ -921,6 +942,8 @@ def test_sticky_bucket_service(mocker):
 def test_ttl_automatic_feature_refresh(mocker):
     """Test that GrowthBook instances automatically get updated features when cache expires during evaluation"""
     # Mock responses to simulate feature flag changes
+    feature_repo.clear_cache()
+
     mock_responses = [
         {"features": {"test_feature": {"defaultValue": False}}, "savedGroups": {}},
         {"features": {"test_feature": {"defaultValue": True}}, "savedGroups": {}}
@@ -950,9 +973,19 @@ def test_ttl_automatic_feature_refresh(mocker):
         assert call_count == 1
 
         # Manually expire the cache by setting expiry time to past
-        cache_key = "https://cdn.growthbook.io::test-key"
-        if hasattr(feature_repo.cache, 'cache') and cache_key in feature_repo.cache.cache:
-            feature_repo.cache.cache[cache_key].expires = time() - 10
+        cache_key_to_expire = "https://cdn.growthbook.io::sdk-abc123"
+
+        # Access the _primary_cache (which is InMemoryFeatureCache) and then its internal _cache dict
+        # Use getattr for safer access in tests, though direct access is fine if you're sure of the structure
+        if hasattr(feature_repo.feature_cache, '_primary_cache') and \
+            hasattr(feature_repo.feature_cache._primary_cache, '_cache') and \
+            cache_key_to_expire in feature_repo.feature_cache._primary_cache._cache:
+
+            feature_repo.feature_cache._primary_cache._cache[cache_key_to_expire].expires = (time() - 10)
+            logger.debug(f"Manually expired cache key: {cache_key_to_expire}")
+        else:
+            logger.warning(
+                f"Failed to manually expire cache key {cache_key_to_expire}. Cache structure might have changed or key not found.")
 
         # Next evaluation should automatically refresh cache and update features
         assert gb.is_on('test_feature') == True
@@ -965,6 +998,8 @@ def test_ttl_automatic_feature_refresh(mocker):
 
 def test_multiple_instances_get_updated_on_cache_expiry(mocker):
     """Test that multiple GrowthBook instances all get updated when cache expires during evaluation"""
+    feature_repo.clear_cache()
+
     mock_responses = [
         {"features": {"test_feature": {"defaultValue": "v1"}}, "savedGroups": {}},
         {"features": {"test_feature": {"defaultValue": "v2"}}, "savedGroups": {}}
@@ -994,9 +1029,19 @@ def test_multiple_instances_get_updated_on_cache_expiry(mocker):
         assert call_count == 1  # Still 1, used cache
 
         # Manually expire the cache
-        cache_key = "https://cdn.growthbook.io::test-key"
-        if hasattr(feature_repo.cache, 'cache') and cache_key in feature_repo.cache.cache:
-            feature_repo.cache.cache[cache_key].expires = time() - 10
+        cache_key_to_expire = "https://cdn.growthbook.io::sdk-abc123"
+
+        # Access the _primary_cache (which is InMemoryFeatureCache) and then its internal _cache dict
+        # Use getattr for safer access in tests, though direct access is fine if you're sure of the structure
+        if hasattr(feature_repo.feature_cache, '_primary_cache') and \
+            hasattr(feature_repo.feature_cache._primary_cache, '_cache') and \
+            cache_key_to_expire in feature_repo.feature_cache._primary_cache._cache:
+
+            feature_repo.feature_cache._primary_cache._cache[cache_key_to_expire].expires = (time() - 10)
+            logger.debug(f"Manually expired cache key: {cache_key_to_expire}")
+        else:
+            logger.warning(
+                f"Failed to manually expire cache key {cache_key_to_expire}. Cache structure might have changed or key not found.")
 
         # Next evaluation should automatically refresh and notify both instances via callbacks
         assert gb1.get_feature_value('test_feature', 'default') == "v2"
