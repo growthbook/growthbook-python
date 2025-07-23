@@ -681,6 +681,7 @@ def test_feature_repository(mocker):
         cache_key_to_expire in feature_repo.feature_cache._primary_cache._cache:
 
         feature_repo.feature_cache._primary_cache._cache[cache_key_to_expire].expires = (time() - 10)
+        feature_repo.feature_cache._secondary_cache._cache[cache_key_to_expire].expires = (time() - 10)
         logger.debug(f"Manually expired cache key: {cache_key_to_expire}")
     else:
         logger.warning(
@@ -973,7 +974,7 @@ def test_ttl_automatic_feature_refresh(mocker):
         assert call_count == 1
 
         # Manually expire the cache by setting expiry time to past
-        cache_key_to_expire = "https://cdn.growthbook.io::sdk-abc123"
+        cache_key_to_expire = "https://cdn.growthbook.io::test-key"
 
         # Access the _primary_cache (which is InMemoryFeatureCache) and then its internal _cache dict
         # Use getattr for safer access in tests, though direct access is fine if you're sure of the structure
@@ -982,6 +983,7 @@ def test_ttl_automatic_feature_refresh(mocker):
             cache_key_to_expire in feature_repo.feature_cache._primary_cache._cache:
 
             feature_repo.feature_cache._primary_cache._cache[cache_key_to_expire].expires = (time() - 10)
+            feature_repo.feature_cache._secondary_cache._cache[cache_key_to_expire].expires = (time() - 10)
             logger.debug(f"Manually expired cache key: {cache_key_to_expire}")
         else:
             logger.warning(
@@ -1029,7 +1031,7 @@ def test_multiple_instances_get_updated_on_cache_expiry(mocker):
         assert call_count == 1  # Still 1, used cache
 
         # Manually expire the cache
-        cache_key_to_expire = "https://cdn.growthbook.io::sdk-abc123"
+        cache_key_to_expire = "https://cdn.growthbook.io::test-key"
 
         # Access the _primary_cache (which is InMemoryFeatureCache) and then its internal _cache dict
         # Use getattr for safer access in tests, though direct access is fine if you're sure of the structure
@@ -1038,6 +1040,8 @@ def test_multiple_instances_get_updated_on_cache_expiry(mocker):
             cache_key_to_expire in feature_repo.feature_cache._primary_cache._cache:
 
             feature_repo.feature_cache._primary_cache._cache[cache_key_to_expire].expires = (time() - 10)
+            feature_repo.feature_cache._secondary_cache._cache[cache_key_to_expire].expires = (time() - 10)
+
             logger.debug(f"Manually expired cache key: {cache_key_to_expire}")
         else:
             logger.warning(
