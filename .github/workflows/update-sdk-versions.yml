@@ -3,7 +3,12 @@ name: Update SDK Version
 on:
   release:
     types: [published]  # Triggers when a release is published
-  workflow_dispatch: {}  # Manual trigger without inputs
+  workflow_dispatch: 
+    inputs:
+      version:
+        description: 'Version to update (leave empty to use latest release)'
+        required: false
+        type: string
 
 jobs:
   update-versions:
@@ -13,20 +18,39 @@ jobs:
       pull-requests: write
 
     steps:
+      - name: Debug Release Info
+        if: github.event_name == 'release'
+        run: |
+          echo "Release event detected!"
+          echo "Event action: ${{ github.event.action }}"
+          echo "Release tag: ${{ github.event.release.tag_name }}"
+          echo "Release name: ${{ github.event.release.name }}"
+          echo "Is prerelease: ${{ github.event.release.prerelease }}"
+          echo "Is draft: ${{ github.event.release.draft }}"
+
       - name: Get Latest Release
         id: latest_release
         run: |
-          LATEST_TAG=$(gh api repos/growthbook/growthbook-python/releases/latest --jq .tag_name)
-          echo "version=${LATEST_TAG#v}" >> $GITHUB_OUTPUT
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ] && [ -n "${{ inputs.version }}" ]; then
+            echo "Using manually specified version: ${{ inputs.version }}"
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.event_name }}" == "release" ]; then
+            echo "Using release event version: ${{ github.event.release.tag_name }}"
+            VERSION="${{ github.event.release.tag_name }}"
+            echo "version=${VERSION#v}" >> $GITHUB_OUTPUT
+          else
+            echo "Getting latest release from API..."
+            LATEST_TAG=$(gh api repos/growthbook/growthbook-python/releases/latest --jq .tag_name)
+            echo "version=${LATEST_TAG#v}" >> $GITHUB_OUTPUT
+          fi
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Update SDK Versions Repository
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Trigger Update in Main GrowthBook Repository
         run: |
           # Get version from latest release
           VERSION=${{ steps.latest_release.outputs.version }}
+          echo "Triggering update for version: $VERSION"
           
           # Validate version format (semver)
           if ! echo "$VERSION" | grep -qE '^[0-9]+\.[0-9]+\.[0-9]+$'; then
@@ -34,38 +58,14 @@ jobs:
             exit 1
           fi
           
-          # Remove directory if it exists and clone fresh
-          rm -rf growthbook || true
-          git clone https://github.com/growthbook/growthbook.git || {
-            echo "Failed to clone repository"
-            exit 1
-          }
-          cd growthbook/packages/shared/src/sdk-versioning/sdk-versions
-          
-          # Check if version already exists
-          if jq -e --arg v "$VERSION" '.versions[] | select(.version == $v)' python.json > /dev/null; then
-            echo "Version $VERSION already exists in python.json"
-            exit 0  # Exit successfully since this is not an error condition
-          fi
-          
-          # Create a new branch
-          git checkout -b update-python-sdk-${VERSION}
-          
-          # Update the JSON file
-          jq --arg v "$VERSION" \
-             '.versions = ([{"version": $v}] + .versions)' \
-             python.json > python.json.tmp && mv python.json.tmp python.json
-          
-          # Commit and push changes
-          git config user.name "github-actions"
-          git config user.email "github-actions@github.com"
-          git add python.json
-          git commit -m "chore: update Python SDK to ${VERSION}"
-          git push origin update-python-sdk-${VERSION}
-          
-          # Create Pull Request
-          gh pr create \
-            --title "Update Python SDK to ${VERSION}" \
-            --body "Automated PR to update Python SDK version to ${VERSION} in capabilities matrix" \
-            --repo growthbook/growthbook \
-            --base main
+          # Trigger repository_dispatch event in the main GrowthBook repo
+          gh api repos/growthbook/growthbook/dispatches \
+            --method POST \
+            --field event_type='update-sdk-version' \
+            --field client_payload='{"version":"'$VERSION'","sdk":"python","source_repo":"growthbook/growthbook-python"}'
+            
+          echo "✅ Successfully triggered update workflow in growthbook/growthbook"
+          echo "📋 Version: $VERSION"
+          echo "🔗 Check progress at: https://github.com/growthbook/growthbook/actions"
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

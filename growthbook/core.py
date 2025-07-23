@@ -413,7 +413,8 @@ def getBucketRanges(
 def eval_feature(
     key: str,
     evalContext: EvaluationContext = None,
-    callback_subscription: Callable[[Experiment, Result], None] = None
+    callback_subscription: Callable[[Experiment, Result], None] = None,
+    tracking_cb: Callable[[Experiment, Result], None] = None
 ) -> FeatureResult:
     """Core feature evaluation logic as a standalone function"""
 
@@ -506,7 +507,7 @@ def eval_feature(
             minBucketVersion=rule.minBucketVersion,
         )
 
-        result = run_experiment(experiment=exp, featureId=key, evalContext=evalContext)
+        result = run_experiment(experiment=exp, featureId=key, evalContext=evalContext, tracking_cb=tracking_cb)
 
         if callback_subscription:
             callback_subscription(exp, result)
@@ -536,12 +537,20 @@ def eval_prereqs(parentConditions: List[dict], evalContext: EvaluationContext) -
         # Reset the stack in each iteration
         evalContext.stack.evaluated_features = evaluated_features.copy()
 
-        parentRes = eval_feature(key=parentCondition.get("id", None), evalContext=evalContext)
+        parent_id = parentCondition.get("id")
+        if parent_id is None:
+            continue  # Skip if no valid ID
+            
+        parentRes = eval_feature(key=parent_id, evalContext=evalContext)
 
         if parentRes.source == "cyclicPrerequisite":
             return "cyclic"
 
-        if not evalCondition({'value': parentRes.value}, parentCondition.get("condition", None), evalContext.global_ctx.saved_groups):
+        parent_condition = parentCondition.get("condition")
+        if parent_condition is None:
+            continue  # Skip if no valid condition
+            
+        if not evalCondition({'value': parentRes.value}, parent_condition, evalContext.global_ctx.saved_groups):
             if parentCondition.get("gate", False):
                 return "gate"
             return "fail"
