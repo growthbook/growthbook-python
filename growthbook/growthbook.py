@@ -120,12 +120,13 @@ class InMemoryStickyBucketService(AbstractStickyBucketService):
 
 
 class SSEClient:
-    def __init__(self, api_host, client_key, on_event, reconnect_delay=5, headers=None):
+    def __init__(self, api_host, client_key, on_event, reconnect_delay=5, timeout=30, headers=None):
         self.api_host = api_host
         self.client_key = client_key
 
         self.on_event = on_event
         self.reconnect_delay = reconnect_delay
+        self.timeout = timeout
 
         self._sse_session = None
         self._sse_thread = None
@@ -410,7 +411,7 @@ class FeatureRepository(object):
     def startAutoRefresh(self, api_host, client_key, cb):
         if not client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
-        self.sse_client = self.sse_client or SSEClient(api_host=api_host, client_key=client_key, on_event=cb)
+        self.sse_client = self.sse_client or SSEClient(api_host=api_host, client_key=client_key, on_event=cb, timeout=self._streaming_timeout)
         self.sse_client.connect()
 
     def stopAutoRefresh(self):
@@ -443,6 +444,7 @@ class GrowthBook(object):
         sticky_bucket_identifier_attributes: List[str] = None,
         savedGroups: dict = {},
         streaming: bool = False,
+        streaming_timeout: int = 30,
         plugins: List = None,
         # Deprecated args
         trackingCallback=None,
@@ -471,6 +473,7 @@ class GrowthBook(object):
         self._trackingCallback = on_experiment_viewed or trackingCallback
 
         self._streaming = streaming
+        self._streaming_timeout = streaming_timeout
 
         # Deprecated args
         self._user = user
