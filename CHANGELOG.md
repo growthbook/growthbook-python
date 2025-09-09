@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.0](https://github.com/growthbook/growthbook-python/compare/v1.3.1...v1.4.0) (2025-09-09)
+
+
+### Features
+
+* Tracking Plugins Compatibility with Async & Sync Clients ([a54c06d](https://github.com/growthbook/growthbook-python/commit/a54c06d22726a3702bacbf895165ef5bff02061b))
+
 ## [1.3.1](https://github.com/growthbook/growthbook-python/compare/v1.3.0...v1.3.1) (2025-06-13)
 
 
