@@ -317,6 +317,10 @@ class GrowthBookClient:
         }
         self._sticky_bucket_cache_lock = False
         
+        # Plugin support
+        self._tracking_plugins: List[Any] = self.options.tracking_plugins or []
+        self._initialized_plugins: List[Any] = []
+        
         self._features_repository = (
             EnhancedFeatureRepository(
                 self.options.api_host or "https://cdn.growthbook.io", 
@@ -330,6 +334,9 @@ class GrowthBookClient:
         
         self._global_context: Optional[GlobalContext] = None
         self._context_lock = asyncio.Lock()
+        
+        # Initialize plugins
+        self._initialize_plugins()
 
 
     def _track(self, experiment: Experiment, result: Result, user_context: UserContext) -> None:
@@ -540,3 +547,36 @@ class GrowthBookClient:
         # Clear context
         async with self._context_lock:
             self._global_context = None
+            
+        # Cleanup plugins
+        self._cleanup_plugins()
+
+    def _initialize_plugins(self) -> None:
+        """Initialize all tracking plugins with this GrowthBookClient instance."""
+        for plugin in self._tracking_plugins:
+            try:
+                if hasattr(plugin, 'initialize'):
+                    # Plugin is a class instance with initialize method
+                    plugin.initialize(self)
+                    self._initialized_plugins.append(plugin)
+                    logger.debug(f"Initialized plugin: {plugin.__class__.__name__}")
+                elif callable(plugin):
+                    # Plugin is a callable function
+                    plugin(self)
+                    self._initialized_plugins.append(plugin)
+                    logger.debug(f"Initialized callable plugin: {plugin.__name__}")
+                else:
+                    logger.warning(f"Plugin {plugin} is neither callable nor has initialize method")
+            except Exception as e:
+                logger.error(f"Failed to initialize plugin {plugin}: {e}")
+
+    def _cleanup_plugins(self) -> None:
+        """Cleanup all initialized plugins."""
+        for plugin in self._initialized_plugins:
+            try:
+                if hasattr(plugin, 'cleanup'):
+                    plugin.cleanup()
+                    logger.debug(f"Cleaned up plugin: {plugin.__class__.__name__}")
+            except Exception as e:
+                logger.error(f"Error cleaning up plugin {plugin}: {e}")
+        self._initialized_plugins.clear()

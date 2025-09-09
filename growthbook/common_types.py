@@ -426,6 +426,7 @@ class Options:
     sticky_bucket_service: Optional[AbstractStickyBucketService] = None
     sticky_bucket_identifier_attributes: Optional[List[str]] = None
     on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], None]] = None
+    tracking_plugins: Optional[List[Any]] = None
 
 
 @dataclass
