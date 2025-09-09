@@ -2,13 +2,16 @@ import json
 import logging
 import threading
 import time
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Callable, TYPE_CHECKING
 from .base import GrowthBookPlugin
 
-try:
-    import requests
-except ImportError:
-    requests = None
+if TYPE_CHECKING:
+    import requests  # type: ignore
+else:
+    try:
+        import requests  # type: ignore
+    except ImportError:
+        requests = None
 
 logger = logging.getLogger("growthbook.plugins.growthbook_tracking")
 
