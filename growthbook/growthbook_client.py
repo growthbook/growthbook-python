@@ -332,7 +332,7 @@ class GrowthBookClient:
         self._context_lock = asyncio.Lock()
 
 
-    def _track(self, experiment: Experiment, result: Result) -> None:
+    def _track(self, experiment: Experiment, result: Result, user_context: UserContext) -> None:
         """Thread-safe tracking implementation"""
         if not self.options.on_experiment_viewed:
             return
@@ -348,7 +348,7 @@ class GrowthBookClient:
         with self._tracked_lock:
             if not self._tracked.get(key):
                 try:
-                    self.options.on_experiment_viewed(experiment=experiment, result=result)
+                    self.options.on_experiment_viewed(experiment=experiment, result=result, user_context=user_context)
                     self._tracked[key] = True
                 except Exception:
                     logger.exception("Error in tracking callback")
@@ -492,25 +492,25 @@ class GrowthBookClient:
         """Evaluate a feature with proper async context management"""
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
-            result = core_eval_feature(key=key, evalContext=context)
+            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             return result
 
     async def is_on(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is enabled with proper async context management"""
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
-            return core_eval_feature(key=key, evalContext=context).on
+            return core_eval_feature(key=key, evalContext=context, tracking_cb=self._track).on
     
     async def is_off(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is set to off with proper async context management"""
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
-            return core_eval_feature(key=key, evalContext=context).off
+            return core_eval_feature(key=key, evalContext=context, tracking_cb=self._track).off
     
     async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext) -> Any:
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
-            result = core_eval_feature(key=key, evalContext=context)
+            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             return result.value if result.value is not None else fallback
 
     async def run(self, experiment: Experiment, user_context: UserContext) -> Result:

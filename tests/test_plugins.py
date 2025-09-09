@@ -178,11 +178,12 @@ class TestTrackingPlugin(unittest.TestCase):
         """Test that tracking plugin calls callback when experiments run."""
         tracked_experiments = []
         
-        def track_callback(experiment, result):
+        def track_callback(experiment, result, user_context):
             tracked_experiments.append({
                 'key': experiment.key,
                 'value': result.value,
-                'inExperiment': result.inExperiment
+                'inExperiment': result.inExperiment,
+                'user_context': user_context
             })
         
         gb = GrowthBook(

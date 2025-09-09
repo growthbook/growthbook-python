@@ -177,8 +177,8 @@ def test_stickyBucket(stickyBucket_data):
 def getTrackingMock(gb: GrowthBook):
     calls = []
 
-    def track(experiment, result):
-        return calls.append([experiment, result])
+    def track(experiment, result, user_context):
+        return calls.append([experiment, result, user_context])
 
     gb._trackingCallback = track
     return lambda: calls
@@ -207,9 +207,10 @@ def test_tracking():
 
     calls = getMockedCalls()
     assert len(calls) == 3
-    assert calls[0] == [exp1, res1]
-    assert calls[1] == [exp2, res4]
-    assert calls[2] == [exp2, res5]
+    # validate experiment and result only
+    assert calls[0][0] == exp1 and calls[0][1] == res1
+    assert calls[1][0] == exp2 and calls[1][1] == res4
+    assert calls[2][0] == exp2 and calls[2][1] == res5
 
     gb.destroy()
 

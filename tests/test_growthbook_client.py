@@ -657,8 +657,8 @@ async def getTrackingMock(client: GrowthBookClient):
     """Helper function to mock tracking for tests"""
     calls = []
 
-    def track(experiment, result):
-        calls.append([experiment, result])
+    def track(experiment, result, user_context):
+        calls.append([experiment, result, user_context])
 
     client.options.on_experiment_viewed = track
     return lambda: calls
@@ -713,12 +713,23 @@ async def test_tracking():
             # Verify tracking calls
             calls = getMockedCalls()
             assert len(calls) == 3, "Expected exactly 3 tracking calls"
-            assert calls[0] == [exp1, res1], "First tracking call mismatch"
-            assert calls[1] == [exp2, res4], "Second tracking call mismatch"
-            assert calls[2] == [exp2, res5], "Third tracking call mismatch"
+            assert calls[0] == [exp1, res1, user_context], "First tracking call mismatch"
+            assert calls[1] == [exp2, res4, user_context], "Second tracking call mismatch"
+            assert calls[2] == [exp2, res5, user_context], "Third tracking call mismatch"
 
     finally:
         await client.close()
+
+async def getFailedTrackingMock(client: GrowthBookClient):
+    """Helper function to mock tracking for tests"""
+    calls = []
+    # Set up tracking callback that raises an error
+    def failing_track(experiment, result, user_context):
+        calls.append([experiment, result, user_context])
+        raise Exception("Tracking failed")
+
+    client.options.on_experiment_viewed = failing_track
+    return lambda: calls
 
 @pytest.mark.asyncio
 async def test_handles_tracking_errors():
@@ -729,11 +740,7 @@ async def test_handles_tracking_errors():
         enabled=True
     ))
 
-    # Set up tracking callback that raises an error
-    def failing_track(experiment, result):
-        raise Exception("Tracking failed")
-
-    client.options.on_experiment_viewed = failing_track
+    getMockedTrackingCalls = await getFailedTrackingMock(client)
 
     # Create test experiment
     exp = Experiment(
@@ -756,6 +763,9 @@ async def test_handles_tracking_errors():
             # Should not raise exception despite tracking error
             result = await client.run(exp, user_context)
             assert result is not None, "Experiment should run despite tracking error"
+
+            calls = getMockedTrackingCalls()
+            assert len(calls) == 1, "Expected exactly 1 tracking call"
 
     finally:
         await client.close()

@@ -671,7 +671,7 @@ class GrowthBook(object):
         return self.get_feature_value(key, fallback)
 
     def get_feature_value(self, key: str, fallback):
-        res = self.evalFeature(key)
+        res = self.eval_feature(key)
         return res.value if res.value is not None else fallback
 
     # @deprecated, use eval_feature
@@ -753,7 +753,7 @@ class GrowthBook(object):
         self._subscriptions.add(callback)
         return lambda: self._subscriptions.remove(callback)
 
-    def _track(self, experiment: Experiment, result: Result) -> None:
+    def _track(self, experiment: Experiment, result: Result, user_context: UserContext) -> None:
         if not self._trackingCallback:
             return None
         key = (
@@ -764,7 +764,7 @@ class GrowthBook(object):
         )
         if not self._tracked.get(key):
             try:
-                self._trackingCallback(experiment=experiment, result=result)
+                self._trackingCallback(experiment=experiment, result=result, user_context=user_context)
                 self._tracked[key] = True
             except Exception:
                 pass

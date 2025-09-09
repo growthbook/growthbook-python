@@ -4,7 +4,7 @@ import json
 
 from urllib.parse import urlparse, parse_qs
 from typing import Callable, Optional, Any, Set, Tuple, List, Dict
-from .common_types import EvaluationContext, FeatureResult, Experiment, Filter, Result, VariationMeta
+from .common_types import EvaluationContext, FeatureResult, Experiment, Filter, Result, UserContext, VariationMeta
 
 
 logger = logging.getLogger("growthbook.core")
@@ -414,7 +414,7 @@ def eval_feature(
     key: str,
     evalContext: EvaluationContext = None,
     callback_subscription: Callable[[Experiment, Result], None] = None,
-    tracking_cb: Callable[[Experiment, Result], None] = None
+    tracking_cb: Callable[[Experiment, Result, UserContext], None] = None
 ) -> FeatureResult:
     """Core feature evaluation logic as a standalone function"""
 
@@ -634,7 +634,7 @@ def _get_sticky_bucket_variation(
 def run_experiment(experiment: Experiment, 
                    featureId: Optional[str] = None, 
                    evalContext: EvaluationContext = None, 
-                   tracking_cb: Callable[[Experiment, Result], None] = None
+                   tracking_cb: Callable[[Experiment, Result, UserContext], None] = None
                 ) -> Result:
     if evalContext is None:
         raise ValueError("evalContext is required - run_experiment")
@@ -859,7 +859,7 @@ def run_experiment(experiment: Experiment,
 
     # 14. Fire the tracking callback if set
     if tracking_cb:
-        tracking_cb(experiment, result)
+        tracking_cb(experiment, result, evalContext.user)
 
     # 15. Return the result
     logger.debug("Assigned variation %d in experiment %s", assigned, experiment.key)

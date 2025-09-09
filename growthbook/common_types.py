@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import sys
+from token import OP
 # Only require typing_extensions if using Python 3.7 or earlier
 if sys.version_info >= (3, 8):
     from typing import TypedDict
@@ -8,7 +9,7 @@ else:
     from typing_extensions import TypedDict
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Union, Set, Tuple
 from enum import Enum
 from abc import ABC, abstractmethod
 
@@ -400,6 +401,15 @@ class StackContext:
 class FeatureRefreshStrategy(Enum):
     STALE_WHILE_REVALIDATE = 'HTTP_REFRESH'
     SERVER_SENT_EVENTS = 'SSE'
+@dataclass
+class UserContext:
+    # user_id: Optional[str] = None
+    url: str = ""
+    attributes: Dict[str, Any] = field(default_factory=dict)
+    groups: Dict[str, str] = field(default_factory=dict)
+    forced_variations: Dict[str, Any] = field(default_factory=dict)
+    overrides: Dict[str, Any] = field(default_factory=dict)
+    sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class Options:
@@ -415,17 +425,8 @@ class Options:
     refresh_strategy: Optional[FeatureRefreshStrategy] = FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
     sticky_bucket_service: Optional[AbstractStickyBucketService] = None
     sticky_bucket_identifier_attributes: Optional[List[str]] = None
-    on_experiment_viewed=None
+    on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], None]] = None
 
-@dataclass
-class UserContext:
-    # user_id: Optional[str] = None
-    url: str = ""
-    attributes: Dict[str, Any] = field(default_factory=dict)
-    groups: Dict[str, str] = field(default_factory=dict)
-    forced_variations: Dict[str, Any] = field(default_factory=dict)
-    overrides: Dict[str, Any] = field(default_factory=dict)
-    sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class GlobalContext:

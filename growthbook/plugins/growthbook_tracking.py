@@ -91,17 +91,17 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
         """Setup experiment tracking."""
         original_callback = getattr(gb_instance, '_trackingCallback', None)
         
-        def tracking_wrapper(experiment, result):
+        def tracking_wrapper(experiment, result, user_context=None):
             # Track to ingestor
             self._track_experiment_viewed(experiment, result)
             
             # Call additional callback
             if self.additional_callback:
-                self._safe_execute(self.additional_callback, experiment, result)
+                self._safe_execute(self.additional_callback, experiment, result, user_context)
             
             # Call original callback
             if original_callback:
-                self._safe_execute(original_callback, experiment, result)
+                self._safe_execute(original_callback, experiment, result, user_context)
         
         gb_instance._trackingCallback = tracking_wrapper
     
