@@ -256,3 +256,173 @@ class TestTrackingPlugin(unittest.TestCase):
             self.assertEqual(string_track['value'], 'hello')
             
             gb.destroy()
+
+
+class TestGrowthBookClientPlugins(unittest.TestCase):
+    """Test plugin integration with GrowthBookClient (async client)."""
+    
+    def setUp(self):
+        """Set up test fixtures."""
+        self.tracked_events = []
+        
+    def tearDown(self):
+        """Clean up after tests."""
+        self.tracked_events.clear()
+        # Clear request context
+        clear_request_context()
+    
+    def test_plugins_work_with_both_client_types(self):
+        """Test that plugins work with both legacy GrowthBook and async GrowthBookClient."""
+        import asyncio
+        from unittest.mock import patch, AsyncMock
+        from growthbook.growthbook_client import GrowthBookClient
+        from growthbook.common_types import Options, Experiment, UserContext
+        from growthbook import GrowthBook
+        
+        # Set up request context for testing
+        mock_request = MockDjangoRequest()
+        set_request_context(mock_request)
+        
+        async def test_async_client():
+            """Test with async GrowthBookClient."""
+            tracked_events = []
+            
+            def track_callback(experiment, result, user_context):
+                tracked_events.append({
+                    'client_type': 'async',
+                    'experiment_key': experiment.key,
+                    'result_value': result.value,
+                    'user_id': user_context.attributes.get('id') if user_context else None
+                })
+            
+            # Create plugins
+            tracking_plugin = growthbook_tracking_plugin(
+                ingestor_host="https://test.growthbook.io",
+                additional_callback=track_callback,
+                batch_size=1
+            )
+            
+            context_plugin = request_context_plugin(
+                extract_utm=True,
+                extract_user_agent=True
+            )
+            
+            # Create async client with plugins
+            client = GrowthBookClient(
+                Options(
+                    api_host="https://cdn.growthbook.io",
+                    client_key="test-key",
+                    tracking_plugins=[context_plugin, tracking_plugin]
+                )
+            )
+            
+            try:
+                # Verify plugins initialized
+                self.assertEqual(len(client._initialized_plugins), 2)
+                self.assertTrue(tracking_plugin.is_initialized())
+                self.assertTrue(context_plugin.is_initialized())
+                
+                # Verify context plugin extracted attributes (stored for async client)
+                extracted_attrs = context_plugin.get_extracted_attributes()
+                self.assertIn('utmSource', extracted_attrs)
+                self.assertEqual(extracted_attrs['utmSource'], 'google')
+                
+                with patch('growthbook.FeatureRepository.load_features_async', 
+                          new_callable=AsyncMock, return_value={"features": {}, "savedGroups": {}}), \
+                     patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+                          new_callable=AsyncMock), \
+                     patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+                          new_callable=AsyncMock), \
+                     patch('requests.post') as mock_post:
+                    
+                    mock_post.return_value.status_code = 200
+                    
+                    await client.initialize()
+                    
+                    # Run experiment
+                    exp = Experiment(key="dual-client-test", variations=[0, 1])
+                    user_context = UserContext(attributes={"id": "async-user"})
+                    
+                    result = await client.run(exp, user_context)
+                    await asyncio.sleep(0.1)  # Wait for async tracking
+                    
+                    # Verify tracking worked
+                    self.assertEqual(len(tracked_events), 1)
+                    self.assertEqual(tracked_events[0]['client_type'], 'async')
+                    self.assertEqual(tracked_events[0]['experiment_key'], 'dual-client-test')
+                    
+            finally:
+                await client.close()
+            
+            return tracked_events
+        
+        def test_legacy_client():
+            """Test with legacy GrowthBook client."""
+            tracked_events = []
+            
+            def track_callback(experiment, result, user_context):
+                tracked_events.append({
+                    'client_type': 'legacy',
+                    'experiment_key': experiment.key,
+                    'result_value': result.value,
+                    'user_id': user_context.attributes.get('id') if user_context else None
+                })
+            
+            # Create plugins (same instances can be reused)
+            tracking_plugin = growthbook_tracking_plugin(
+                ingestor_host="https://test.growthbook.io",
+                additional_callback=track_callback,
+                batch_size=1
+            )
+            
+            context_plugin = request_context_plugin(
+                extract_utm=True,
+                extract_user_agent=True
+            )
+            
+            # Create legacy client with plugins
+            gb = GrowthBook(
+                attributes={"id": "legacy-user"},
+                plugins=[context_plugin, tracking_plugin]
+            )
+            
+            try:
+                # Verify plugins initialized
+                self.assertTrue(tracking_plugin.is_initialized())
+                self.assertTrue(context_plugin.is_initialized())
+                
+                # Verify context plugin set attributes on legacy client
+                attrs = gb.get_attributes()
+                self.assertIn('utmSource', attrs)
+                self.assertEqual(attrs['utmSource'], 'google')
+                self.assertEqual(attrs['id'], 'legacy-user')  # Original should be preserved
+                
+                with patch('requests.post') as mock_post:
+                    mock_post.return_value.status_code = 200
+                    
+                    # Run experiment
+                    exp = Experiment(key="dual-client-test", variations=[0, 1])
+                    result = gb.run(exp)
+                    
+                    # Verify tracking worked
+                    self.assertEqual(len(tracked_events), 1)
+                    self.assertEqual(tracked_events[0]['client_type'], 'legacy')
+                    self.assertEqual(tracked_events[0]['experiment_key'], 'dual-client-test')
+                    
+            finally:
+                gb.destroy()
+            
+            return tracked_events
+        
+        # Test both client types
+        async_events = asyncio.run(test_async_client())
+        legacy_events = test_legacy_client()
+        
+        # Verify both worked
+        self.assertEqual(len(async_events), 1)
+        self.assertEqual(len(legacy_events), 1)
+        self.assertEqual(async_events[0]['client_type'], 'async')
+        self.assertEqual(legacy_events[0]['client_type'], 'legacy')
+        
+        # Clean up request context
+        clear_request_context()
