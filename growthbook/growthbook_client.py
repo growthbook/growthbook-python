@@ -355,7 +355,7 @@ class GrowthBookClient:
         with self._tracked_lock:
             if not self._tracked.get(key):
                 try:
-                    self.options.on_experiment_viewed(experiment=experiment, result=result, user_context=user_context)
+                    self.options.on_experiment_viewed(experiment, result, user_context)
                     self._tracked[key] = True
                 except Exception:
                     logger.exception("Error in tracking callback")

@@ -77,7 +77,7 @@ class RequestContextPlugin(GrowthBookPlugin):
         self.client_side_attributes = client_side_attributes
         self.extract_utm = extract_utm
         self.extract_user_agent = extract_user_agent
-        self._extracted_attributes = {}
+        self._extracted_attributes: Dict[str, Any] = {}
         
     def initialize(self, gb_instance) -> None:
         """Initialize plugin - extract attributes from request context."""
