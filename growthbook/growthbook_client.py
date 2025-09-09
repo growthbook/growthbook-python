@@ -317,6 +317,10 @@ class GrowthBookClient:
         }
         self._sticky_bucket_cache_lock = False
         
+        # Plugin support
+        self._tracking_plugins: List[Any] = self.options.tracking_plugins or []
+        self._initialized_plugins: List[Any] = []
+        
         self._features_repository = (
             EnhancedFeatureRepository(
                 self.options.api_host or "https://cdn.growthbook.io", 
@@ -330,9 +334,12 @@ class GrowthBookClient:
         
         self._global_context: Optional[GlobalContext] = None
         self._context_lock = asyncio.Lock()
+        
+        # Initialize plugins
+        self._initialize_plugins()
 
 
-    def _track(self, experiment: Experiment, result: Result) -> None:
+    def _track(self, experiment: Experiment, result: Result, user_context: UserContext) -> None:
         """Thread-safe tracking implementation"""
         if not self.options.on_experiment_viewed:
             return
@@ -348,7 +355,7 @@ class GrowthBookClient:
         with self._tracked_lock:
             if not self._tracked.get(key):
                 try:
-                    self.options.on_experiment_viewed(experiment=experiment, result=result)
+                    self.options.on_experiment_viewed(experiment, result, user_context)
                     self._tracked[key] = True
                 except Exception:
                     logger.exception("Error in tracking callback")
@@ -492,25 +499,25 @@ class GrowthBookClient:
         """Evaluate a feature with proper async context management"""
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
-            result = core_eval_feature(key=key, evalContext=context)
+            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             return result
 
     async def is_on(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is enabled with proper async context management"""
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
-            return core_eval_feature(key=key, evalContext=context).on
+            return core_eval_feature(key=key, evalContext=context, tracking_cb=self._track).on
     
     async def is_off(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is set to off with proper async context management"""
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
-            return core_eval_feature(key=key, evalContext=context).off
+            return core_eval_feature(key=key, evalContext=context, tracking_cb=self._track).off
     
     async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext) -> Any:
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
-            result = core_eval_feature(key=key, evalContext=context)
+            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             return result.value if result.value is not None else fallback
 
     async def run(self, experiment: Experiment, user_context: UserContext) -> Result:
@@ -540,3 +547,36 @@ class GrowthBookClient:
         # Clear context
         async with self._context_lock:
             self._global_context = None
+            
+        # Cleanup plugins
+        self._cleanup_plugins()
+
+    def _initialize_plugins(self) -> None:
+        """Initialize all tracking plugins with this GrowthBookClient instance."""
+        for plugin in self._tracking_plugins:
+            try:
+                if hasattr(plugin, 'initialize'):
+                    # Plugin is a class instance with initialize method
+                    plugin.initialize(self)
+                    self._initialized_plugins.append(plugin)
+                    logger.debug(f"Initialized plugin: {plugin.__class__.__name__}")
+                elif callable(plugin):
+                    # Plugin is a callable function
+                    plugin(self)
+                    self._initialized_plugins.append(plugin)
+                    logger.debug(f"Initialized callable plugin: {plugin.__name__}")
+                else:
+                    logger.warning(f"Plugin {plugin} is neither callable nor has initialize method")
+            except Exception as e:
+                logger.error(f"Failed to initialize plugin {plugin}: {e}")
+
+    def _cleanup_plugins(self) -> None:
+        """Cleanup all initialized plugins."""
+        for plugin in self._initialized_plugins:
+            try:
+                if hasattr(plugin, 'cleanup'):
+                    plugin.cleanup()
+                    logger.debug(f"Cleaned up plugin: {plugin.__class__.__name__}")
+            except Exception as e:
+                logger.error(f"Error cleaning up plugin {plugin}: {e}")
+        self._initialized_plugins.clear()
