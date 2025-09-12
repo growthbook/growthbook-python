@@ -120,7 +120,7 @@ class InMemoryStickyBucketService(AbstractStickyBucketService):
 
 
 class SSEClient:
-    def __init__(self, api_host, client_key, on_event, reconnect_delay=5, headers=None, timeout=30):
+    def __init__(self, api_host, client_key, on_event, reconnect_delay=5, headers=None, timeout = 30):
         self.api_host = api_host
         self.client_key = client_key
 
@@ -409,7 +409,7 @@ class FeatureRepository(object):
         return data
 
 
-    def startAutoRefresh(self, api_host, client_key, cb, streaming_timeout):
+    def startAutoRefresh(self, api_host, client_key, cb, streaming_timeout=30):
         if not client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
         self.sse_client = self.sse_client or SSEClient(api_host=api_host, client_key=client_key, on_event=cb, timeout=streaming_timeout)
