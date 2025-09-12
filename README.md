@@ -14,7 +14,7 @@ Powerful Feature flagging and A/B testing for Python apps.
 - **Use your existing event tracking** (GA, Segment, Mixpanel, custom)
 - **Remote configuration** to change feature flags without deploying new code
 - **Async support** with real-time feature updates
-- Python 3.6+
+- Python 3.9+
 - 100% test coverage
 
 ## Installation
@@ -625,7 +625,7 @@ gb.run(Experiment(
   key = "by-company-id",
   variations = ["A", "B"],
   hashAttribute = "company"
-))
+)) 
 ```
 
 ## Logging
