@@ -120,7 +120,7 @@ class InMemoryStickyBucketService(AbstractStickyBucketService):
 
 
 class SSEClient:
-    def __init__(self, api_host, client_key, on_event, reconnect_delay=5, headers=None, timeout = 30):
+    def __init__(self, api_host, client_key, on_event, reconnect_delay=5, headers=None, timeout=30):
         self.api_host = api_host
         self.client_key = client_key
 
@@ -175,7 +175,7 @@ class SSEClient:
         while self.is_running:
             try:
                 async with aiohttp.ClientSession(headers=self.headers, 
-                    timeout=aiohttp.ClientTimeout(total=self.timeout)) as session:
+                    timeout=aiohttp.ClientTimeout(connect=self.timeout)) as session:
                     self._sse_session = session
 
                     async with session.get(url) as response:
@@ -216,7 +216,7 @@ class SSEClient:
             self.on_event(event_data)
 
     async def _wait_for_reconnect(self):
-        logger.debug(f"Attempting to reconnect streaming in {self.reconnect_delay}")
+        logger.info(f"Attempting to reconnect streaming in {self.reconnect_delay} seconds")
         await asyncio.sleep(self.reconnect_delay)
 
     async def _close_session(self):
@@ -445,7 +445,7 @@ class GrowthBook(object):
         sticky_bucket_identifier_attributes: List[str] = None,
         savedGroups: dict = {},
         streaming: bool = False,
-        streaming_timeout: int = 30,
+        streaming_connection_timeout: int = 30,
         plugins: List = None,
         # Deprecated args
         trackingCallback=None,
@@ -474,7 +474,7 @@ class GrowthBook(object):
         self._trackingCallback = on_experiment_viewed or trackingCallback
 
         self._streaming = streaming
-        self._streaming_timeout = streaming_timeout
+        self._streaming_timeout = streaming_connection_timeout
 
         # Deprecated args
         self._user = user
