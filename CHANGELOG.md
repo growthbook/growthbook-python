@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.2](https://github.com/growthbook/growthbook-python/compare/v1.4.1...v1.4.2) (2025-09-12)
+
+
+### Bug Fixes
+
+* Keep the Socket open with a configurable connection timeout ([f4783fc](https://github.com/growthbook/growthbook-python/commit/f4783fc451fdf7544b764239e71d89895ba8096c))
+
 ## [1.4.1](https://github.com/growthbook/growthbook-python/compare/v1.4.0...v1.4.1) (2025-09-12)
 
 
