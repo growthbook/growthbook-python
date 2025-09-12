@@ -43,6 +43,12 @@ from urllib3 import PoolManager
 
 from .core import _getHashValue, eval_feature as core_eval_feature, run_experiment
 
+# Import version for User-Agent header
+try:
+    from . import __version__
+except ImportError:
+    __version__ = "1.4.0"  # Fallback version
+
 logger = logging.getLogger("growthbook")
 
 def decrypt(encrypted_str: str, key_str: str) -> str:
@@ -319,7 +325,10 @@ class FeatureRepository(object):
     # Perform the GET request (separate method for easy mocking)
     def _get(self, url: str):
         self.http = self.http or PoolManager()
-        return self.http.request("GET", url)
+        headers = {
+            'User-Agent': f'GrowthBook-Python-SDK/{__version__}'
+        }
+        return self.http.request("GET", url, headers=headers)
     
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
         try:
