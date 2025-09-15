@@ -52,7 +52,7 @@ def decrypt(encrypted_str: str, key_str: str) -> str:
     iv = b64decode(iv_str)
     ct = b64decode(ct_str)
 
-    cipher = Cipher(algorithms.AES128(key), modes.CBC(iv))
+    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
     decryptor = cipher.decryptor()
 
     decrypted = decryptor.update(ct) + decryptor.finalize()
@@ -608,7 +608,7 @@ class GrowthBook(object):
     def load_features(self) -> None:
 
         response = feature_repo.load_features(
-            self._api_host, self._client_key, self._decryption_key, self._cache_ttl, self._remoteEval, self_payload
+            self._api_host, self._client_key, self._decryption_key, self._cache_ttl, self._remoteEval, self._payload
         )
         if response is not None and "features" in response.keys():
             self.setFeatures(response["features"])

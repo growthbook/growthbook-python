@@ -481,7 +481,7 @@ def eval_feature(
 
             tracks =  rule.tracks
 
-            if tracks:
+            if tracks and tracking_cb:
                 for track in tracks:
                     tracked_experiment = track.experiment
                     tracked_experiment_result = track.result.experimentResult
@@ -866,7 +866,8 @@ def run_experiment(experiment: Experiment,
             evalContext.global_ctx.options.sticky_bucket_service.save_assignments(doc)
 
     # 14. Fire the tracking callback if set
-    tracking_cb(experiment, result, evalContext.user)
+    if tracking_cb:
+        tracking_cb(experiment, result, evalContext.user)
 
     # 15. Return the result
     logger.debug("Assigned variation %d in experiment %s", assigned, experiment.key)

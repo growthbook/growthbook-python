@@ -442,7 +442,7 @@ class FeatureRule(object):
             data["minBucketVersion"] = self.minBucketVersion
         if self.parentConditions:
             data["parentConditions"] = self.parentConditions
-        if self.tracks is not None:
+        if self.tracks:
             data["tracks"] = [track.to_dict() for track in self.tracks]
 
         return data

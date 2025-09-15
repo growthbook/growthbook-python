@@ -2,6 +2,8 @@
 
 import json
 import os
+from typing import Optional, Any, Dict
+
 from growthbook import (
     FeatureRule,
     GrowthBook,
@@ -928,7 +930,7 @@ def test_ttl_automatic_feature_refresh(mocker):
     ]
 
     call_count = 0
-    def mock_fetch_features(api_host, client_key, decryption_key=""):
+    def mock_fetch_features(api_host, client_key, decryption_key="", remote_eval: bool = False, payload: Optional[Dict[str, Any]] = None):
         nonlocal call_count
         response = mock_responses[min(call_count, len(mock_responses) - 1)]
         call_count += 1
@@ -972,7 +974,7 @@ def test_multiple_instances_get_updated_on_cache_expiry(mocker):
     ]
 
     call_count = 0
-    def mock_fetch_features(api_host, client_key, decryption_key=""):
+    def mock_fetch_features(api_host, client_key, decryption_key="", remote_eval: bool = False, payload: Optional[Dict[str, Any]] = None):
         nonlocal call_count
         response = mock_responses[min(call_count, len(mock_responses) - 1)]
         call_count += 1
