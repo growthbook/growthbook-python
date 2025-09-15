@@ -10,7 +10,7 @@ from growthbook import (
     InMemoryStickyBucketService,
     decrypt,
     feature_repo,
-    logger,
+    logger, FeatureRepository,
 )
 
 from growthbook.core import (
@@ -160,7 +160,7 @@ def test_stickyBucket(stickyBucket_data):
 
     gb = GrowthBook(**ctx)
     res = gb.eval_feature(key)
-    
+
     if not res.experimentResult:
       assert None == expected_result
     else:
@@ -926,39 +926,39 @@ def test_ttl_automatic_feature_refresh(mocker):
         {"features": {"test_feature": {"defaultValue": False}}, "savedGroups": {}},
         {"features": {"test_feature": {"defaultValue": True}}, "savedGroups": {}}
     ]
-    
+
     call_count = 0
     def mock_fetch_features(api_host, client_key, decryption_key=""):
         nonlocal call_count
         response = mock_responses[min(call_count, len(mock_responses) - 1)]
         call_count += 1
         return response
-    
+
     # Clear cache and mock the fetch method
     feature_repo.clear_cache()
     m = mocker.patch.object(feature_repo, '_fetch_features', side_effect=mock_fetch_features)
-    
+
     # Create GrowthBook instance with short TTL
     gb = GrowthBook(
         api_host="https://cdn.growthbook.io",
         client_key="test-key",
         cache_ttl=1  # 1 second TTL for testing
     )
-    
+
     try:
         # Initial evaluation - should trigger first load
         assert gb.is_on('test_feature') == False
         assert call_count == 1
-        
+
         # Manually expire the cache by setting expiry time to past
         cache_key = "https://cdn.growthbook.io::test-key"
         if hasattr(feature_repo.cache, 'cache') and cache_key in feature_repo.cache.cache:
             feature_repo.cache.cache[cache_key].expires = time() - 10
-        
+
         # Next evaluation should automatically refresh cache and update features
         assert gb.is_on('test_feature') == True
         assert call_count == 2
-        
+
     finally:
         gb.destroy()
         feature_repo.clear_cache()
@@ -970,43 +970,84 @@ def test_multiple_instances_get_updated_on_cache_expiry(mocker):
         {"features": {"test_feature": {"defaultValue": "v1"}}, "savedGroups": {}},
         {"features": {"test_feature": {"defaultValue": "v2"}}, "savedGroups": {}}
     ]
-    
+
     call_count = 0
     def mock_fetch_features(api_host, client_key, decryption_key=""):
         nonlocal call_count
         response = mock_responses[min(call_count, len(mock_responses) - 1)]
         call_count += 1
         return response
-    
+
     feature_repo.clear_cache()
     m = mocker.patch.object(feature_repo, '_fetch_features', side_effect=mock_fetch_features)
-    
+
     # Create multiple GrowthBook instances
     gb1 = GrowthBook(api_host="https://cdn.growthbook.io", client_key="test-key")
     gb2 = GrowthBook(api_host="https://cdn.growthbook.io", client_key="test-key")
-    
+
     try:
         # Initial evaluation from first instance - should trigger first load
         assert gb1.get_feature_value('test_feature', 'default') == "v1"
         assert call_count == 1
-        
+
         # Second instance should use cached value (no additional API call)
         assert gb2.get_feature_value('test_feature', 'default') == "v1"
         assert call_count == 1  # Still 1, used cache
-        
+
         # Manually expire the cache
         cache_key = "https://cdn.growthbook.io::test-key"
         if hasattr(feature_repo.cache, 'cache') and cache_key in feature_repo.cache.cache:
             feature_repo.cache.cache[cache_key].expires = time() - 10
-        
+
         # Next evaluation should automatically refresh and notify both instances via callbacks
         assert gb1.get_feature_value('test_feature', 'default') == "v2"
         assert call_count == 2
-        
+
         # Second instance should also have the updated value due to callbacks
         assert gb2.get_feature_value('test_feature', 'default') == "v2"
-        
+
     finally:
         gb1.destroy()
         gb2.destroy()
         feature_repo.clear_cache()
+
+
+def test_post_request(mocker):
+    fetcher = feature_repo
+    mock_http = mocker.Mock()
+    mock_response = mocker.Mock()
+    mock_response.status = 200
+    mock_response.data = b'{"ok": true}'
+
+    mock_http.request.return_value = mock_response
+    fetcher.http = mock_http
+
+    result = fetcher._post("https://cdn.growthbook.io/api/eval/abc123", {"foo": "bar"})
+
+    mock_http.request.assert_called_once_with(
+        "POST",
+        "https://cdn.growthbook.io/api/eval/abc123",
+        body=json.dumps({"foo": "bar"}).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+    )
+    assert result.data == b'{"ok": true}'
+
+def test_fetch_and_decode_remote_eval(mocker):
+    fetcher = feature_repo
+    mock_response = mocker.Mock()
+    mock_response.status = 200
+    mock_response.data = b'{"feature": "value"}'
+
+    mocker.patch.object(fetcher, "_post", return_value=mock_response)
+
+    result = fetcher._fetch_and_decode_post(
+        "https://cdn.growthbook.io",
+        "abc123",
+        payload={"id": "user_1"}
+    )
+
+    assert result == {"feature": "value"}
+
+def test_get_features_url_remote_eval():
+    url = feature_repo._get_features_url("https://cdn.growthbook.io", "abc123", remote_eval=True)
+    assert url == "https://cdn.growthbook.io/api/eval/abc123"

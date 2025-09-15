@@ -13,14 +13,14 @@ import logging
 from abc import ABC, abstractmethod
 from typing import Optional, Any, Set, Tuple, List, Dict, Callable
 
-from .common_types import ( EvaluationContext, 
-    Experiment, 
-    FeatureResult, 
+from .common_types import ( EvaluationContext,
+    Experiment,
+    FeatureResult,
     Feature,
-    GlobalContext, 
-    Options, 
-    Result, StackContext, 
-    UserContext, 
+    GlobalContext,
+    Options,
+    Result, StackContext,
+    UserContext,
     AbstractStickyBucketService,
     FeatureRule
 )
@@ -170,7 +170,7 @@ class SSEClient:
 
     async def _init_session(self):
         url = self._get_sse_url(self.api_host, self.client_key)
-        
+
         while self.is_running:
             try:
                 async with aiohttp.ClientSession(headers=self.headers) as session:
@@ -224,7 +224,7 @@ class SSEClient:
 
     def _run_sse_channel(self):
         self._loop = asyncio.new_event_loop()
-        
+
         try:
             self._loop.run_until_complete(self._init_session())
         except asyncio.CancelledError:
@@ -282,16 +282,16 @@ class FeatureRepository(object):
 
     # Loads features with an in-memory cache in front using stale-while-revalidate approach
     def load_features(
-        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 600
+        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 600, remote_eval: bool = False, payload: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict]:
         if not client_key:
             raise ValueError("Must specify `client_key` to refresh features")
-        
+
         key = api_host + "::" + client_key
 
         cached = self.cache.get(key)
         if not cached:
-            res = self._fetch_features(api_host, client_key, decryption_key)
+            res = self._fetch_features(api_host, client_key, decryption_key, remote_eval, payload)
             if res is not None:
                 self.cache.set(key, res, ttl)
                 logger.debug("Fetched features from API, stored in cache")
@@ -299,15 +299,16 @@ class FeatureRepository(object):
                 self._notify_feature_update_callbacks(res)
                 return res
         return cached
-    
+
     async def load_features_async(
-        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 600
+        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 600, remote_eval: bool = False,
+        payload: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict]:
         key = api_host + "::" + client_key
 
         cached = self.cache.get(key)
         if not cached:
-            res = await self._fetch_features_async(api_host, client_key, decryption_key)
+            res = await self._fetch_features_async(api_host, client_key, decryption_key, remote_eval, payload)
             if res is not None:
                 self.cache.set(key, res, ttl)
                 logger.debug("Fetched features from API, stored in cache")
@@ -320,7 +321,37 @@ class FeatureRepository(object):
     def _get(self, url: str):
         self.http = self.http or PoolManager()
         return self.http.request("GET", url)
-    
+
+    def _post(self, url: str, payload: Dict, headers: Optional[Dict] = None):
+        self.http = self.http or PoolManager()
+        encoded_body = json.dumps(payload).encode("utf-8")
+        return self.http.request(
+            "POST",
+            url,
+            body=encoded_body,
+            headers=headers or {"Content-Type": "application/json"},
+        )
+
+    def _fetch_and_decode_post(self, api_host: str, client_key: str, payload: Dict) -> Optional[Dict]:
+        try:
+            r = self._post(
+                self._get_features_url(api_host, client_key, remote_eval=True),
+                payload=payload
+            )
+
+            if r.status >= 400:
+                logger.warning(
+                    "Failed to fetch features, received status code %d", r.status
+                )
+                return None
+
+            decoded = json.loads(r.data.decode("utf-8"))
+            return decoded
+
+        except Exception as e:
+            logger.warning("Failed to decode feature JSON from API: %s", e)
+            return None
+
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
         try:
             r = self._get(self._get_features_url(api_host, client_key))
@@ -334,7 +365,7 @@ class FeatureRepository(object):
         except Exception:
             logger.warning("Failed to decode feature JSON from GrowthBook API")
             return None
-        
+
     async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
         try:
             url = self._get_features_url(api_host, client_key)
@@ -351,7 +382,28 @@ class FeatureRepository(object):
         except Exception as e:
             logger.warning("Failed to decode feature JSON from GrowthBook API: %s", e)
             return None
-        
+
+    async def _fetch_and_decode_post_async(self, api_host: str, client_key: str, payload: Dict) -> Optional[Dict]:
+        try:
+            url = self._get_features_url(api_host, client_key, remote_eval=True)
+
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload) as response:
+                    if response.status >= 400:
+                        logger.warning("Failed to fetch features for remote evaluation, received status code %d", response.status)
+                        return None
+
+                    # aiohttp's .json() method decodes the JSON response
+                    decoded = await response.json()
+                    return decoded
+
+        except aiohttp.ClientError as e:
+            logger.warning(f"HTTP request failed: {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to decode feature JSON from API in _fetch_and_decode_post_async function: {e}")
+            return None
+
     def decrypt_response(self, data, decryption_key: str):
         if "encryptedFeatures" in data:
             if not decryption_key:
@@ -367,7 +419,7 @@ class FeatureRepository(object):
                 return None
         elif "features" not in data:
             logger.warning("GrowthBook API response missing features")
-        
+
         if "encryptedSavedGroups" in data:
             if not decryption_key:
                 raise ValueError("Must specify decryption_key")
@@ -380,25 +432,41 @@ class FeatureRepository(object):
                 logger.warning(
                     "Failed to decrypt saved groups from GrowthBook API response"
                 )
-            
+
         return data
 
     # Fetch features from the GrowthBook API
     def _fetch_features(
-        self, api_host: str, client_key: str, decryption_key: str = ""
+        self, api_host: str, client_key: str, decryption_key: str = "", remote_eval: bool = False, payload: Optional[Dict[str, Any]] = None,
     ) -> Optional[Dict]:
-        decoded = self._fetch_and_decode(api_host, client_key)
+
+        if remote_eval:
+            if not payload:
+                logger.error("Payload is required for remote_eval POST request.")
+                return None
+            decoded = self._fetch_and_decode_post(api_host, client_key, payload)
+        else:
+            decoded = self._fetch_and_decode(api_host, client_key)
+
         if not decoded:
             return None
 
         data = self.decrypt_response(decoded, decryption_key)
 
         return data
-        
+
     async def _fetch_features_async(
-        self, api_host: str, client_key: str, decryption_key: str = ""
+        self, api_host: str, client_key: str, decryption_key: str = "", remote_eval: bool = False,
+        payload: Optional[Dict[str, Any]] = None
     ) -> Optional[Dict]:
-        decoded = await self._fetch_and_decode_async(api_host, client_key)
+        if remote_eval:
+            if not payload:
+                logger.error("Payload is required for remote_eval POST request.")
+                return None
+            decoded = await self._fetch_and_decode_post_async(api_host, client_key, payload)
+        else:
+            decoded = await self._fetch_and_decode_async(api_host, client_key)
+
         if not decoded:
             return None
 
@@ -417,9 +485,10 @@ class FeatureRepository(object):
         self.sse_client.disconnect()
 
     @staticmethod
-    def _get_features_url(api_host: str, client_key: str) -> str:
+    def _get_features_url(api_host: str, client_key: str, remote_eval: bool = False) -> str:
         api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
-        return api_host + "/api/features/" + client_key
+        remote_eval_path = api_host + "/api/eval/" + client_key
+        return remote_eval_path if remote_eval else api_host + "/api/features/" + client_key
 
 
 # Singleton instance
@@ -451,6 +520,8 @@ class GrowthBook(object):
         groups: dict = {},
         overrides: dict = {},
         forcedVariations: dict = {},
+        remoteEval: bool = False,
+        payload: Optional[Dict[str, Any]] = None
     ):
         self._enabled = enabled
         self._attributes = attributes
@@ -486,6 +557,9 @@ class GrowthBook(object):
         self._plugins: List = plugins or []
         self._initialized_plugins: List = []
 
+        self._remoteEval = remoteEval
+        self._payload = payload
+
         self._global_ctx = GlobalContext(
             options=Options(
                 url=self._url,
@@ -500,7 +574,7 @@ class GrowthBook(object):
             ),
             features={},
             saved_groups=self._saved_groups
-        )       
+        )
         # Create a user context for the current user
         self._user_ctx: UserContext = UserContext(
             url=self._url,
@@ -534,7 +608,7 @@ class GrowthBook(object):
     def load_features(self) -> None:
 
         response = feature_repo.load_features(
-            self._api_host, self._client_key, self._decryption_key, self._cache_ttl
+            self._api_host, self._client_key, self._decryption_key, self._cache_ttl, self._remoteEval, self_payload
         )
         if response is not None and "features" in response.keys():
             self.setFeatures(response["features"])
@@ -561,7 +635,7 @@ class GrowthBook(object):
         decoded = json.loads(features)
         if not decoded:
             return None
-        
+
         data = feature_repo.decrypt_response(decoded, self._decryption_key)
 
         if data is not None:
@@ -583,9 +657,9 @@ class GrowthBook(object):
     def startAutoRefresh(self):
         if not self._client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
-       
+
         feature_repo.startAutoRefresh(
-            api_host=self._api_host, 
+            api_host=self._api_host,
             client_key=self._client_key,
             cb=self._dispatch_sse_event
         )
@@ -627,6 +701,9 @@ class GrowthBook(object):
         self._attributes = attributes
         self.refresh_sticky_buckets()
 
+    def set_payload(self, payload: Optional[Dict[str, Any]] = None) -> None:
+        self._payload = payload
+
     # @deprecated, use get_attributes
     def getAttributes(self) -> dict:
         return self.get_attributes()
@@ -637,11 +714,11 @@ class GrowthBook(object):
     def destroy(self) -> None:
         # Clean up plugins first
         self._cleanup_plugins()
-        
+
         # Clean up feature update callback
         if self._client_key:
             feature_repo.remove_feature_update_callback(self._on_feature_update)
-            
+
         self._subscriptions.clear()
         self._tracked.clear()
         self._assigned.clear()
@@ -677,10 +754,10 @@ class GrowthBook(object):
     # @deprecated, use eval_feature
     def evalFeature(self, key: str) -> FeatureResult:
         return self.eval_feature(key)
-    
+
     def _ensure_fresh_features(self) -> None:
         """Lazy refresh: Check cache expiry and refresh if needed, but only if client_key is provided"""
-        
+
         if self._streaming or not self._client_key:
             return  # Skip cache checks - SSE handles freshness for streaming users
 
@@ -692,7 +769,7 @@ class GrowthBook(object):
     def _get_eval_context(self) -> EvaluationContext:
         # Lazy refresh: ensure features are fresh before evaluation
         self._ensure_fresh_features()
-        
+
         # use the latest attributes for every evaluation.
         self._user_ctx.attributes = self._attributes
         self._user_ctx.url = self._url
@@ -706,8 +783,8 @@ class GrowthBook(object):
         )
 
     def eval_feature(self, key: str) -> FeatureResult:
-        return core_eval_feature(key=key, 
-                                 evalContext=self._get_eval_context(), 
+        return core_eval_feature(key=key,
+                                 evalContext=self._get_eval_context(),
                                  callback_subscription=self._fireSubscriptions,
                                  tracking_cb=self._track
                                  )
@@ -722,7 +799,7 @@ class GrowthBook(object):
     def _fireSubscriptions(self, experiment: Experiment, result: Result):
         if experiment is None:
             return
-        
+
         prev = self._assigned.get(experiment.key, None)
         if (
             not prev
@@ -741,7 +818,7 @@ class GrowthBook(object):
 
     def run(self, experiment: Experiment) -> Result:
         # result = self._run(experiment)
-        result = run_experiment(experiment=experiment, 
+        result = run_experiment(experiment=experiment,
                                 evalContext=self._get_eval_context(),
                                 tracking_cb=self._track
                                 )

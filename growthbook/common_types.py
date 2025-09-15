@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import sys
+from collections import OrderedDict
 from token import OP
 # Only require typing_extensions if using Python 3.7 or earlier
 if sys.version_info >= (3, 8):
@@ -12,6 +13,22 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Union, Set, Tuple
 from enum import Enum
 from abc import ABC, abstractmethod
+
+class ExperimentTracker:
+    def __init__(self):
+        self.tracked_experiments: Dict[str, bool] = OrderedDict()
+
+    def track_experiment(self, experiment_id: str) -> None:
+        self.tracked_experiments[experiment_id] = True
+        if len(self.tracked_experiments) > 30:
+            self.tracked_experiments.popitem()
+
+    def is_experiment_tracked(self, experiment_id: str) -> bool:
+
+        return self.tracked_experiments.get(experiment_id) is not None
+
+    def clear_tracked_experiments(self) -> None:
+        self.tracked_experiments.clear()
 
 class VariationMeta(TypedDict):
     key: str
@@ -197,6 +214,25 @@ class Result(object):
             obj["passthrough"] = True
 
         return obj
+    @staticmethod
+    def from_dict(data: dict) -> "Result":
+        return Result(
+            variationId=data.get("variationId"),
+            inExperiment=data.get("inExperiment"),
+            value=data.get("value"),
+            hashUsed=data.get("hashUsed"),
+            hashAttribute=data.get("hashAttribute"),
+            hashValue=data.get("hashValue"),
+            featureId=data.get("featureId"),
+            bucket=data.get("bucket"),
+            stickyBucketUsed=data.get("stickyBucketUsed", False),
+            # meta передамо як окремий словник
+            meta={
+                "name": data.get("name"),
+                "key": data.get("key"),
+                "passthrough": data.get("passthrough"),
+            }
+        )
 
 class FeatureResult(object):
     def __init__(
@@ -230,6 +266,17 @@ class FeatureResult(object):
 
         return data
 
+    @staticmethod
+    def from_dict(data: dict) -> "FeatureResult":
+        return FeatureResult(
+            value=data.get("value"),
+            source=data.get("source"),
+            experiment=Experiment(**data["experiment"]) if isinstance(data.get("experiment"), dict) else data.get(
+                "experiment"),
+            experimentResult=Result.from_dict(data["experimentResult"]) if isinstance(data.get("experimentResult"), dict) else data.get("experimentResult"),
+            ruleId=data.get("ruleId"),
+        )
+
 class Feature(object):
     def __init__(self, defaultValue=None, rules: list = []) -> None:
         self.defaultValue = defaultValue
@@ -261,12 +308,24 @@ class Feature(object):
                     bucketVersion=rule.get("bucketVersion", None),
                     minBucketVersion=rule.get("minBucketVersion", None),
                     parentConditions=rule.get("parentConditions", None),
+                    tracks=rule.get("tracks", None),
                 ))
 
     def to_dict(self) -> dict:
         return {
             "defaultValue": self.defaultValue,
             "rules": [rule.to_dict() for rule in self.rules],
+        }
+
+@dataclass
+class TrackData:
+    experiment: Experiment
+    result: FeatureResult
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "experiment": self.experiment.to_dict() if hasattr(self.experiment, 'to_dict') else self.experiment,
+            "result": self.result.to_dict() if hasattr(self.result, 'to_dict') else self.result
         }
 
 class FeatureRule(object):
@@ -294,6 +353,7 @@ class FeatureRule(object):
         bucketVersion: int = None,
         minBucketVersion: int = None,
         parentConditions: List[dict] = None,
+        tracks: List[TrackData] = None
     ) -> None:
 
         if disableStickyBucketing:
@@ -321,6 +381,20 @@ class FeatureRule(object):
         self.bucketVersion = bucketVersion or 0
         self.minBucketVersion = minBucketVersion or 0
         self.parentConditions = parentConditions
+        self.tracks = []
+        if tracks:
+            for t in tracks:
+                if isinstance(t, TrackData):
+                    self.tracks.append(t)
+                else:
+                    self.tracks.append(
+                        TrackData(
+                            experiment=Experiment(**t["experiment"]) if isinstance(t.get("experiment"),
+                                                                                   dict) else t.get("experiment"),
+                            result=FeatureResult.from_dict(t["result"]) if isinstance(t.get("result"), dict) else t.get(
+                                "result")
+                        )
+                    )
 
     def to_dict(self) -> dict:
         data: Dict[str, Any] = {}
@@ -368,6 +442,8 @@ class FeatureRule(object):
             data["minBucketVersion"] = self.minBucketVersion
         if self.parentConditions:
             data["parentConditions"] = self.parentConditions
+        if self.tracks is not None:
+            data["tracks"] = [track.to_dict() for track in self.tracks]
 
         return data
 
@@ -394,7 +470,7 @@ class AbstractStickyBucketService(ABC):
         return docs
 
 @dataclass
-class StackContext: 
+class StackContext:
     id: Optional[str] = None
     evaluated_features: Set[str] = field(default_factory=set)
 
@@ -421,19 +497,22 @@ class Options:
     enabled: bool = True
     qa_mode: bool = False
     enable_dev_mode: bool = False
-    # forced_variations: Dict[str, Any] = field(default_factory=dict)
+    forced_variations: Dict[str, Any] = field(default_factory=dict)
     refresh_strategy: Optional[FeatureRefreshStrategy] = FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
     sticky_bucket_service: Optional[AbstractStickyBucketService] = None
     sticky_bucket_identifier_attributes: Optional[List[str]] = None
     on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], None]] = None
     tracking_plugins: Optional[List[Any]] = None
-
+    remote_eval: bool = False
+    global_attributes: Dict[str, Any] = field(default_factory=dict)
+    forced_features: Dict[str, Any] = None
 
 @dataclass
 class GlobalContext:
     options: Options
     features: Dict[str, Any] = field(default_factory=dict)
     saved_groups: Dict[str, Any] = field(default_factory=dict)
+    experiment_tracker: ExperimentTracker = ExperimentTracker()
 
 @dataclass
 class EvaluationContext:
