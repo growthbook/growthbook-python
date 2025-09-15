@@ -423,7 +423,6 @@ class GrowthBookClient:
             payload = None
 
             if self.options.remote_eval:
-                # Формуємо payload, аналогічно вашій логіці на Java
                 forced_features_for_payload = []
                 if self.options.forced_features:
                     forced_features_for_payload = [
