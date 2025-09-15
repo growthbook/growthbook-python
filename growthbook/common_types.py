@@ -488,7 +488,7 @@ class Options:
     tracking_plugins: Optional[List[Any]] = None
     remote_eval: bool = False
     global_attributes: Dict[str, Any] = field(default_factory=dict)
-    forced_features: Dict[str, Any] = None
+    forced_features: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class GlobalContext:
