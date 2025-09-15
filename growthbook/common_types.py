@@ -14,22 +14,6 @@ from typing import Any, Callable, Dict, List, Optional, Union, Set, Tuple
 from enum import Enum
 from abc import ABC, abstractmethod
 
-class ExperimentTracker:
-    def __init__(self):
-        self.tracked_experiments: Dict[str, bool] = OrderedDict()
-
-    def track_experiment(self, experiment_id: str) -> None:
-        self.tracked_experiments[experiment_id] = True
-        if len(self.tracked_experiments) > 30:
-            self.tracked_experiments.popitem()
-
-    def is_experiment_tracked(self, experiment_id: str) -> bool:
-
-        return self.tracked_experiments.get(experiment_id) is not None
-
-    def clear_tracked_experiments(self) -> None:
-        self.tracked_experiments.clear()
-
 class VariationMeta(TypedDict):
     key: str
     name: str
@@ -160,14 +144,14 @@ class Experiment(object):
 class Result(object):
     def __init__(
         self,
-        variationId: int,
-        inExperiment: bool,
+        variationId: Optional[int],
+        inExperiment: Optional[bool],
         value,
-        hashUsed: bool,
-        hashAttribute: str,
-        hashValue: str,
+        hashUsed: Optional[bool],
+        hashAttribute: Optional[str],
+        hashValue: Optional[str],
         featureId: Optional[str],
-        meta: VariationMeta = None,
+        meta: Optional[VariationMeta] = None,
         bucket: float = None,
         stickyBucketUsed: bool = False,
     ) -> None:
@@ -181,17 +165,17 @@ class Result(object):
         self.bucket = bucket
         self.stickyBucketUsed = stickyBucketUsed
 
-        self.key = str(variationId)
+        self.key = str(variationId) if variationId is not None else ""
         self.name = ""
         self.passthrough = False
 
         if meta:
-            if "name" in meta:
-                self.name = meta["name"]
-            if "key" in meta:
-                self.key = meta["key"]
-            if "passthrough" in meta:
-                self.passthrough = meta["passthrough"]
+            if "name" in meta and meta["name"] is not None:
+                self.name = str(meta["name"])
+            if "key" in meta and meta["key"] is not None:
+                self.key = str(meta["key"])
+            if "passthrough" in meta and meta["passthrough"] is not None:
+                self.passthrough = bool(meta["passthrough"])
 
     def to_dict(self) -> dict:
         obj = {
@@ -226,7 +210,6 @@ class Result(object):
             featureId=data.get("featureId"),
             bucket=data.get("bucket"),
             stickyBucketUsed=data.get("stickyBucketUsed", False),
-            # meta передамо як окремий словник
             meta={
                 "name": data.get("name"),
                 "key": data.get("key"),
@@ -238,10 +221,10 @@ class FeatureResult(object):
     def __init__(
         self,
         value,
-        source: str,
-        experiment: Experiment = None,
-        experimentResult: Result = None,
-        ruleId: str = None,
+        source: Optional[str] = None,
+        experiment: Optional["Experiment"] = None,
+        experimentResult: Optional["Result"] = None,
+        ruleId: Optional[str] = None,
     ) -> None:
         self.value = value
         self.source = source
@@ -254,7 +237,7 @@ class FeatureResult(object):
     def to_dict(self) -> dict:
         data = {
             "value": self.value,
-            "source": self.source,
+            "source": self.source or "",
             "on": self.on,
             "off": self.off,
             "ruleId": self.ruleId or "",
@@ -512,7 +495,6 @@ class GlobalContext:
     options: Options
     features: Dict[str, Any] = field(default_factory=dict)
     saved_groups: Dict[str, Any] = field(default_factory=dict)
-    experiment_tracker: ExperimentTracker = ExperimentTracker()
 
 @dataclass
 class EvaluationContext:

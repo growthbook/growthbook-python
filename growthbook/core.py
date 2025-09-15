@@ -4,8 +4,7 @@ import json
 
 from urllib.parse import urlparse, parse_qs
 from typing import Callable, Optional, Any, Set, Tuple, List, Dict
-from .common_types import EvaluationContext, FeatureResult, Experiment, Filter, Result, UserContext, VariationMeta, \
-    ExperimentTracker
+from .common_types import EvaluationContext, FeatureResult, Experiment, Filter, Result, UserContext, VariationMeta
 
 logger = logging.getLogger("growthbook.core")
 
