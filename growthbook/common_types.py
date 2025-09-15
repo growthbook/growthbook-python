@@ -15,9 +15,9 @@ from enum import Enum
 from abc import ABC, abstractmethod
 
 class VariationMeta(TypedDict):
-    key: str
-    name: str
-    passthrough: bool
+    key: Optional[str]
+    name: Optional[str]
+    passthrough: Optional[bool]
 
 
 class Filter(TypedDict):

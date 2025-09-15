@@ -352,10 +352,10 @@ class GrowthBookClient:
 
         # Create unique key for this tracking event
         key = (
-            result.hashAttribute
-            + str(result.hashValue)
-            + experiment.key
-            + str(result.variationId)
+            (result.hashAttribute or "")
+            + str(result.hashValue or "")
+            + (experiment.key or "")
+            + str(result.variationId or "")
         )
 
         with self._tracked_lock:

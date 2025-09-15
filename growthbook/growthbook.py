@@ -834,10 +834,10 @@ class GrowthBook(object):
         if not self._trackingCallback:
             return None
         key = (
-            result.hashAttribute
-            + str(result.hashValue)
-            + experiment.key
-            + str(result.variationId)
+            (result.hashAttribute or "")
+            + str(result.hashValue or "")
+            + (experiment.key or "")
+            + str(result.variationId or "")
         )
         if not self._tracked.get(key):
             try:
@@ -845,6 +845,7 @@ class GrowthBook(object):
                 self._tracked[key] = True
             except Exception:
                 pass
+        return None
 
     def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
         attributes = set()
