@@ -151,17 +151,32 @@ class SSEClient:
         self._sse_thread = threading.Thread(target=self._run_sse_channel)
         self._sse_thread.start()
 
-    def disconnect(self):
+    def disconnect(self, timeout=10):
+        """Gracefully disconnect with timeout"""
+        logger.debug("Initiating SSE client disconnect")
         self.is_running = False
+        
         if self._loop and self._loop.is_running():
-            future = asyncio.run_coroutine_threadsafe(self._stop_session(), self._loop)
+            future = asyncio.run_coroutine_threadsafe(self._stop_session(timeout), self._loop)
             try:
-                future.result()
+                # Wait with timeout for clean shutdown
+                future.result(timeout=timeout)
+                logger.debug("SSE session stopped cleanly")
             except Exception as e:
-                logger.error(f"Streaming disconnect error: {e}")
+                logger.warning(f"Error during SSE disconnect: {e}")
+                # Force close the loop if clean shutdown failed
+                if self._loop and self._loop.is_running():
+                    try:
+                        self._loop.call_soon_threadsafe(self._loop.stop)
+                    except Exception:
+                        pass
 
         if self._sse_thread:
-            self._sse_thread.join(timeout=5)
+            self._sse_thread.join(timeout=timeout)
+            if self._sse_thread.is_alive():
+                logger.warning("SSE thread did not terminate gracefully within timeout")
+            else:
+                logger.debug("SSE thread terminated")
 
         logger.debug("Streaming session disconnected")
 
@@ -172,52 +187,84 @@ class SSEClient:
     async def _init_session(self):
         url = self._get_sse_url(self.api_host, self.client_key)
         
-        while self.is_running:
-            try:
-                async with aiohttp.ClientSession(headers=self.headers, 
-                    timeout=aiohttp.ClientTimeout(connect=self.timeout)) as session:
-                    self._sse_session = session
+        try:
+            while self.is_running:
+                try:
+                    async with aiohttp.ClientSession(headers=self.headers, 
+                        timeout=aiohttp.ClientTimeout(connect=self.timeout)) as session:
+                        self._sse_session = session
 
-                    async with session.get(url) as response:
-                        response.raise_for_status()
-                        await self._process_response(response)
-            except ClientResponseError as e:
-                logger.error(f"Streaming error, closing connection: {e.status} {e.message}")
-                self.is_running = False
-                break
-            except (ClientConnectorError, ClientPayloadError) as e:
-                logger.error(f"Streaming error: {e}")
-                if not self.is_running:
+                        async with session.get(url) as response:
+                            response.raise_for_status()
+                            await self._process_response(response)
+                except ClientResponseError as e:
+                    logger.error(f"Streaming error, closing connection: {e.status} {e.message}")
+                    self.is_running = False
                     break
-                await self._wait_for_reconnect()
-            except TimeoutError:
-                logger.warning(f"Streaming connection timed out after {self.timeout} seconds.")
-                await self._wait_for_reconnect()
-            except asyncio.CancelledError:
-                logger.debug("Streaming was cancelled.")
-                break
-            finally:
-                await self._close_session()
+                except (ClientConnectorError, ClientPayloadError) as e:
+                    logger.error(f"Streaming error: {e}")
+                    if not self.is_running:
+                        break
+                    await self._wait_for_reconnect()
+                except TimeoutError:
+                    logger.warning(f"Streaming connection timed out after {self.timeout} seconds.")
+                    if not self.is_running:
+                        break
+                    await self._wait_for_reconnect()
+                except asyncio.CancelledError:
+                    logger.debug("SSE session cancelled")
+                    break
+                finally:
+                    await self._close_session()
+        except asyncio.CancelledError:
+            logger.debug("SSE _init_session cancelled")
+            pass
+        finally:
+            # Ensure session is closed on any exit
+            await self._close_session()
 
     async def _process_response(self, response):
         event_data = {}
-        async for line in response.content:
-            decoded_line = line.decode('utf-8').strip()
-            if decoded_line.startswith("event:"):
-                event_data['type'] = decoded_line[len("event:"):].strip()
-            elif decoded_line.startswith("data:"):
-                event_data['data'] = event_data.get('data', '') + f"\n{decoded_line[len('data:'):].strip()}"
-            elif not decoded_line:
-                if 'type' in event_data and 'data' in event_data:
+        try:
+            async for line in response.content:
+                # Check for cancellation before processing each line
+                if not self.is_running:
+                    logger.debug("SSE processing stopped - is_running is False")
+                    break
+                    
+                decoded_line = line.decode('utf-8').strip()
+                if decoded_line.startswith("event:"):
+                    event_data['type'] = decoded_line[len("event:"):].strip()
+                elif decoded_line.startswith("data:"):
+                    event_data['data'] = event_data.get('data', '') + f"\n{decoded_line[len('data:'):].strip()}"
+                elif not decoded_line:
+                    if 'type' in event_data and 'data' in event_data:
+                        try:
+                            self.on_event(event_data)
+                        except Exception as e:
+                            logger.warning(f"Error in event handler: {e}")
+                    event_data = {}
+            
+            # Process any remaining event data
+            if 'type' in event_data and 'data' in event_data:
+                try:
                     self.on_event(event_data)
-                event_data = {}
-
-        if 'type' in event_data and 'data' in event_data:
-            self.on_event(event_data)
+                except Exception as e:
+                    logger.warning(f"Error in final event handler: {e}")
+        except asyncio.CancelledError:
+            logger.debug("SSE response processing cancelled")
+            raise
+        except Exception as e:
+            logger.warning(f"Error processing SSE response: {e}")
+            raise
 
     async def _wait_for_reconnect(self):
         logger.info(f"Attempting to reconnect streaming in {self.reconnect_delay} seconds")
-        await asyncio.sleep(self.reconnect_delay)
+        try:
+            await asyncio.sleep(self.reconnect_delay)
+        except asyncio.CancelledError:
+            logger.debug("Reconnect wait cancelled")
+            raise
 
     async def _close_session(self):
         if self._sse_session:
@@ -235,18 +282,44 @@ class SSEClient:
             self._loop.run_until_complete(self._loop.shutdown_asyncgens())
             self._loop.close()
 
-    async def _stop_session(self):
-        if self._sse_session:
-            await self._sse_session.close()
+    async def _stop_session(self, timeout=10):
+        """Stop the SSE session and cancel all tasks with timeout"""
+        logger.debug("Stopping SSE session")
+        
+        # Close the session first
+        if self._sse_session and not self._sse_session.closed:
+            try:
+                await self._sse_session.close()
+                logger.debug("SSE session closed")
+            except Exception as e:
+                logger.warning(f"Error closing SSE session: {e}")
 
+        # Cancel all tasks in this loop
         if self._loop and self._loop.is_running():
-            tasks = [task for task in asyncio.all_tasks(self._loop) if not task.done()]
-            for task in tasks:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
+            try:
+                # Get all tasks for this specific loop
+                tasks = [task for task in asyncio.all_tasks(self._loop) 
+                        if not task.done() and task is not asyncio.current_task(self._loop)]
+                
+                if tasks:
+                    logger.debug(f"Cancelling {len(tasks)} SSE tasks")
+                    # Cancel all tasks
+                    for task in tasks:
+                        task.cancel()
+                    
+                    # Wait for tasks to complete with timeout
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.gather(*tasks, return_exceptions=True),
+                            timeout=timeout
+                        )
+                        logger.debug("All SSE tasks cancelled successfully")
+                    except asyncio.TimeoutError:
+                        logger.warning("Some SSE tasks did not cancel within timeout")
+                    except Exception as e:
+                        logger.warning(f"Error during task cancellation: {e}")
+            except Exception as e:
+                logger.warning(f"Error during SSE task cleanup: {e}")
 
 class FeatureRepository(object):
     def __init__(self) -> None:
@@ -415,8 +488,11 @@ class FeatureRepository(object):
         self.sse_client = self.sse_client or SSEClient(api_host=api_host, client_key=client_key, on_event=cb, timeout=streaming_timeout)
         self.sse_client.connect()
 
-    def stopAutoRefresh(self):
-        self.sse_client.disconnect()
+    def stopAutoRefresh(self, timeout=10):
+        """Stop auto refresh with timeout"""
+        if self.sse_client:
+            self.sse_client.disconnect(timeout=timeout)
+            self.sse_client = None
 
     @staticmethod
     def _get_features_url(api_host: str, client_key: str) -> str:
@@ -595,8 +671,15 @@ class GrowthBook(object):
             streaming_timeout=self._streaming_timeout
         )
 
-    def stopAutoRefresh(self):
-        feature_repo.stopAutoRefresh()
+    def stopAutoRefresh(self, timeout=10):
+        """Stop auto refresh with timeout"""
+        try:
+            if hasattr(feature_repo, 'sse_client') and feature_repo.sse_client:
+                feature_repo.sse_client.disconnect(timeout=timeout)
+            else:
+                feature_repo.stopAutoRefresh()
+        except Exception as e:
+            logger.warning(f"Error stopping auto refresh: {e}")
 
     # @deprecated, use set_features
     def setFeatures(self, features: dict) -> None:
@@ -639,23 +722,44 @@ class GrowthBook(object):
     def get_attributes(self) -> dict:
         return self._attributes
 
-    def destroy(self) -> None:
-        # Clean up plugins first
-        self._cleanup_plugins()
+    def destroy(self, timeout=10) -> None:
+        """Gracefully destroy the GrowthBook instance"""
+        logger.debug("Starting GrowthBook destroy process")
         
-        # Clean up feature update callback
-        if self._client_key:
-            feature_repo.remove_feature_update_callback(self._on_feature_update)
-            
-        self._subscriptions.clear()
-        self._tracked.clear()
-        self._assigned.clear()
-        self._trackingCallback = None
-        self._forcedVariations.clear()
-        self._overrides.clear()
-        self._groups.clear()
-        self._attributes.clear()
-        self._features.clear()
+        try:
+            # Clean up plugins
+            logger.debug("Cleaning up plugins")
+            self._cleanup_plugins()
+        except Exception as e:
+            logger.warning(f"Error cleaning up plugins: {e}")
+        
+        try:
+            logger.debug("Stopping auto refresh during destroy")
+            self.stopAutoRefresh(timeout=timeout)
+        except Exception as e:
+            logger.warning(f"Error stopping auto refresh during destroy: {e}")
+        
+        try:
+            # Clean up feature update callback
+            if self._client_key:
+                feature_repo.remove_feature_update_callback(self._on_feature_update)
+        except Exception as e:
+            logger.warning(f"Error removing feature update callback: {e}")
+        
+        # Clear all internal state
+        try:
+            self._subscriptions.clear()
+            self._tracked.clear()
+            self._assigned.clear()
+            self._trackingCallback = None
+            self._forcedVariations.clear()
+            self._overrides.clear()
+            self._groups.clear()
+            self._attributes.clear()
+            self._features.clear()
+            logger.debug("GrowthBook instance destroyed successfully")
+        except Exception as e:
+            logger.warning(f"Error clearing internal state: {e}")
 
     # @deprecated, use is_on
     def isOn(self, key: str) -> bool:
