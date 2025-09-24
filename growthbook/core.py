@@ -532,7 +532,6 @@ def eval_feature(
 
 def eval_prereqs(parentConditions: List[dict], evalContext: EvaluationContext) -> str:
     evaluated_features = evalContext.stack.evaluated_features.copy()
-
     for parentCondition in parentConditions:
         # Reset the stack in each iteration
         evalContext.stack.evaluated_features = evaluated_features.copy()
