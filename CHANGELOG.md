@@ -1,5 +1,26 @@
 # Changelog
 
+## [1.4.3](https://github.com/growthbook/growthbook-python/compare/v1.4.2...v1.4.3) (2025-09-19)
+
+
+### Bug Fixes
+
+* Fixes for graceful shutdown ([ab158ad](https://github.com/growthbook/growthbook-python/commit/ab158ad7a748bd7380c9ad0fda46cc91acc3b473))
+
+## [1.4.2](https://github.com/growthbook/growthbook-python/compare/v1.4.1...v1.4.2) (2025-09-12)
+
+
+### Bug Fixes
+
+* Keep the Socket open with a configurable connection timeout ([f4783fc](https://github.com/growthbook/growthbook-python/commit/f4783fc451fdf7544b764239e71d89895ba8096c))
+
+## [1.4.1](https://github.com/growthbook/growthbook-python/compare/v1.4.0...v1.4.1) (2025-09-12)
+
+
+### Bug Fixes
+
+* add timeout to SSE client ([ff6c2a7](https://github.com/growthbook/growthbook-python/commit/ff6c2a77269d691da984ef2e6b88405cf465caec))
+
 ## [1.4.0](https://github.com/growthbook/growthbook-python/compare/v1.3.1...v1.4.0) (2025-09-09)
 
 
