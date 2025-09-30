@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.4](https://github.com/growthbook/growthbook-python/compare/v1.4.3...v1.4.4) (2025-09-30)
+
+
+### Bug Fixes
+
+* Background Refresh task for Features ([bda8050](https://github.com/growthbook/growthbook-python/commit/bda8050c7c1b72cf4589fd64e9bca884dcbb629c))
+
 ## [1.4.3](https://github.com/growthbook/growthbook-python/compare/v1.4.2...v1.4.3) (2025-09-19)
 
 
