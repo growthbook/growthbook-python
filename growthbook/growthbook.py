@@ -100,7 +100,8 @@ class InMemoryFeatureCache(AbstractFeatureCache):
     def set(self, key: str, value: Dict, ttl: int) -> None:
         if key in self.cache:
             self.cache[key].update(value)
-        self.cache[key] = CacheEntry(value, ttl)
+        else:
+            self.cache[key] = CacheEntry(value, ttl)
 
     def clear(self) -> None:
         self.cache.clear()
@@ -327,6 +328,11 @@ class FeatureRepository(object):
         self.http: Optional[PoolManager] = None
         self.sse_client: Optional[SSEClient] = None
         self._feature_update_callbacks: List[Callable[[Dict], None]] = []
+        
+        # Background refresh support
+        self._refresh_thread: Optional[threading.Thread] = None
+        self._refresh_stop_event = threading.Event()
+        self._refresh_lock = threading.Lock()
 
     def set_cache(self, cache: AbstractFeatureCache) -> None:
         self.cache = cache
@@ -374,6 +380,7 @@ class FeatureRepository(object):
                 self._notify_feature_update_callbacks(res)
                 return res
         return cached
+    
     
     async def load_features_async(
         self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 600
@@ -493,6 +500,52 @@ class FeatureRepository(object):
         if self.sse_client:
             self.sse_client.disconnect(timeout=timeout)
             self.sse_client = None
+    
+    def start_background_refresh(self, api_host: str, client_key: str, decryption_key: str, ttl: int = 600, refresh_interval: int = 300) -> None:
+        """Start periodic background refresh task"""
+        with self._refresh_lock:
+            if self._refresh_thread is not None:
+                return  # Already running
+            
+            self._refresh_stop_event.clear()
+            self._refresh_thread = threading.Thread(
+                target=self._background_refresh_worker,
+                args=(api_host, client_key, decryption_key, ttl, refresh_interval),
+                daemon=True
+            )
+            self._refresh_thread.start()
+            logger.debug("Started background refresh task")
+    
+    def _background_refresh_worker(self, api_host: str, client_key: str, decryption_key: str, ttl: int, refresh_interval: int) -> None:
+        """Worker method for periodic background refresh"""
+        while not self._refresh_stop_event.is_set():
+            try:
+                # Wait for the refresh interval or stop event
+                if self._refresh_stop_event.wait(refresh_interval):
+                    break  # Stop event was set
+                
+                logger.debug("Background refresh for Features - started")
+                res = self._fetch_features(api_host, client_key, decryption_key)
+                if res is not None:
+                    cache_key = api_host + "::" + client_key
+                    self.cache.set(cache_key, res, ttl)
+                    logger.debug("Background refresh completed")
+                    # Notify callbacks about fresh features
+                    self._notify_feature_update_callbacks(res)
+                else:
+                    logger.warning("Background refresh failed")
+            except Exception as e:
+                logger.warning(f"Background refresh error: {e}")
+    
+    def stop_background_refresh(self) -> None:
+        """Stop background refresh task"""
+        self._refresh_stop_event.set()
+        
+        with self._refresh_lock:
+            if self._refresh_thread is not None:
+                self._refresh_thread.join(timeout=1.0)  # Wait up to 1 second
+                self._refresh_thread = None
+                logger.debug("Stopped background refresh task")
 
     @staticmethod
     def _get_features_url(api_host: str, client_key: str) -> str:
@@ -522,6 +575,8 @@ class GrowthBook(object):
         savedGroups: dict = {},
         streaming: bool = False,
         streaming_connection_timeout: int = 30,
+        stale_while_revalidate: bool = False,
+        stale_ttl: int = 300,  # 5 minutes default
         plugins: List = None,
         # Deprecated args
         trackingCallback=None,
@@ -551,6 +606,8 @@ class GrowthBook(object):
 
         self._streaming = streaming
         self._streaming_timeout = streaming_connection_timeout
+        self._stale_while_revalidate = stale_while_revalidate
+        self._stale_ttl = stale_ttl
 
         # Deprecated args
         self._user = user
@@ -603,6 +660,13 @@ class GrowthBook(object):
         if self._streaming:
             self.load_features()
             self.startAutoRefresh()
+        elif self._stale_while_revalidate and self._client_key:
+            # Start background refresh task for stale-while-revalidate
+            self.load_features()  # Initial load
+            feature_repo.start_background_refresh(
+                self._api_host, self._client_key, self._decryption_key, 
+                self._cache_ttl, self._stale_ttl
+            )
 
     def _on_feature_update(self, features_data: Dict) -> None:
         """Callback to handle automatic feature updates from FeatureRepository"""
@@ -740,6 +804,13 @@ class GrowthBook(object):
             logger.warning(f"Error stopping auto refresh during destroy: {e}")
         
         try:
+            # Stop background refresh operations
+            if self._stale_while_revalidate and self._client_key:
+                feature_repo.stop_background_refresh()
+        except Exception as e:
+            logger.warning(f"Error stopping background refresh during destroy: {e}")
+        
+        try:
             # Clean up feature update callback
             if self._client_key:
                 feature_repo.remove_feature_update_callback(self._on_feature_update)
@@ -790,8 +861,8 @@ class GrowthBook(object):
     def _ensure_fresh_features(self) -> None:
         """Lazy refresh: Check cache expiry and refresh if needed, but only if client_key is provided"""
         
-        if self._streaming or not self._client_key:
-            return  # Skip cache checks - SSE handles freshness for streaming users
+        if self._streaming or self._stale_while_revalidate or not self._client_key:
+            return  # Skip cache checks - SSE or background refresh handles freshness
 
         try:
             self.load_features()

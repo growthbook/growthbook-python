@@ -1010,3 +1010,163 @@ def test_multiple_instances_get_updated_on_cache_expiry(mocker):
         gb1.destroy()
         gb2.destroy()
         feature_repo.clear_cache()
+
+
+def test_stale_while_revalidate_basic_functionality(mocker):
+    """Test basic stale-while-revalidate functionality"""
+    # Mock responses - first call returns v1, subsequent calls return v2
+    mock_responses = [
+        {"features": {"test_feature": {"defaultValue": "v1"}}, "savedGroups": {}},
+        {"features": {"test_feature": {"defaultValue": "v2"}}, "savedGroups": {}}
+    ]
+    
+    call_count = 0
+    def mock_fetch_features(api_host, client_key, decryption_key=""):
+        nonlocal call_count
+        response = mock_responses[min(call_count, len(mock_responses) - 1)]
+        call_count += 1
+        return response
+    
+    # Clear cache and mock the fetch method
+    feature_repo.clear_cache()
+    m = mocker.patch.object(feature_repo, '_fetch_features', side_effect=mock_fetch_features)
+    
+    # Create GrowthBook instance with stale-while-revalidate enabled and short refresh interval
+    gb = GrowthBook(
+        api_host="https://cdn.growthbook.io",
+        client_key="test-key",
+        cache_ttl=10,  # 10 second TTL
+        stale_while_revalidate=True,
+        stale_ttl=1  # 1 second refresh interval for testing
+    )
+    
+    try:
+        # Initial evaluation - should use initial loaded data
+        assert gb.get_feature_value('test_feature', 'default') == "v1"
+        assert call_count == 1  # Initial load
+        
+        # Wait for background refresh to happen
+        import time as time_module
+        time_module.sleep(1.5)  # Wait longer than refresh interval
+        
+        # Should have triggered background refresh
+        assert call_count >= 2
+        
+        # Next evaluation should get updated data from background refresh
+        assert gb.get_feature_value('test_feature', 'default') == "v2"
+        
+    finally:
+        gb.destroy()
+        feature_repo.clear_cache()
+
+
+def test_stale_while_revalidate_starts_background_task(mocker):
+    """Test that stale-while-revalidate starts background refresh task"""
+    mock_response = {"features": {"test_feature": {"defaultValue": "fresh"}}, "savedGroups": {}}
+    
+    call_count = 0
+    def mock_fetch_features(api_host, client_key, decryption_key=""):
+        nonlocal call_count
+        call_count += 1
+        return mock_response
+    
+    # Clear cache and mock the fetch method
+    feature_repo.clear_cache()
+    m = mocker.patch.object(feature_repo, '_fetch_features', side_effect=mock_fetch_features)
+    
+    # Create GrowthBook instance with stale-while-revalidate enabled
+    gb = GrowthBook(
+        api_host="https://cdn.growthbook.io",
+        client_key="test-key",
+        stale_while_revalidate=True,
+        stale_ttl=5
+    )
+    
+    try:
+        # Should have started background refresh task
+        assert feature_repo._refresh_thread is not None
+        assert feature_repo._refresh_thread.is_alive()
+        
+        # Initial evaluation should work
+        assert gb.get_feature_value('test_feature', 'default') == "fresh"
+        assert call_count == 1  # Initial load
+        
+    finally:
+        gb.destroy()
+        feature_repo.clear_cache()
+
+def test_stale_while_revalidate_disabled_fallback(mocker):
+    """Test that when stale_while_revalidate is disabled, it falls back to normal behavior"""
+    mock_response = {"features": {"test_feature": {"defaultValue": "normal"}}, "savedGroups": {}}
+    
+    call_count = 0
+    def mock_fetch_features(api_host, client_key, decryption_key=""):
+        nonlocal call_count
+        call_count += 1
+        return mock_response
+    
+    # Clear cache and mock the fetch method
+    feature_repo.clear_cache()
+    m = mocker.patch.object(feature_repo, '_fetch_features', side_effect=mock_fetch_features)
+    
+    # Create GrowthBook instance with stale-while-revalidate disabled (default)
+    gb = GrowthBook(
+        api_host="https://cdn.growthbook.io",
+        client_key="test-key",
+        cache_ttl=1,  # Short TTL
+        stale_while_revalidate=False  # Explicitly disabled
+    )
+    
+    try:
+        # Should NOT have started background refresh task
+        assert feature_repo._refresh_thread is None
+        
+        # Initial evaluation
+        assert gb.get_feature_value('test_feature', 'default') == "normal"
+        assert call_count == 1
+        
+        # Manually expire the cache
+        cache_key = "https://cdn.growthbook.io::test-key"
+        if hasattr(feature_repo.cache, 'cache') and cache_key in feature_repo.cache.cache:
+            feature_repo.cache.cache[cache_key].expires = time() - 10
+        
+        # Next evaluation should fetch synchronously (normal behavior)
+        assert gb.get_feature_value('test_feature', 'default') == "normal"
+        assert call_count == 2  # Should have fetched again
+        
+    finally:
+        gb.destroy()
+        feature_repo.clear_cache()
+
+
+def test_stale_while_revalidate_cleanup(mocker):
+    """Test that background refresh is properly cleaned up"""
+    mock_response = {"features": {"test_feature": {"defaultValue": "test"}}, "savedGroups": {}}
+    
+    # Mock the fetch method
+    feature_repo.clear_cache()
+    m = mocker.patch.object(feature_repo, '_fetch_features', return_value=mock_response)
+    
+    # Create GrowthBook instance with stale-while-revalidate enabled
+    gb = GrowthBook(
+        api_host="https://cdn.growthbook.io",
+        client_key="test-key",
+        stale_while_revalidate=True
+    )
+    
+    try:
+        # Should have started background refresh task
+        assert feature_repo._refresh_thread is not None
+        assert feature_repo._refresh_thread.is_alive()
+        
+        # Destroy should clean up the background task
+        gb.destroy()
+        
+        # Background task should be stopped
+        assert feature_repo._refresh_thread is None or not feature_repo._refresh_thread.is_alive()
+        
+    finally:
+        # Ensure cleanup even if test fails
+        if feature_repo._refresh_thread:
+            feature_repo.stop_background_refresh()
+        feature_repo.clear_cache()
