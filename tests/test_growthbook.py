@@ -215,6 +215,85 @@ def test_tracking():
     gb.destroy()
 
 
+def test_feature_usage_callback():
+    """Test that feature usage callback is called correctly"""
+    calls = []
+    
+    def feature_usage_cb(key, result):
+        calls.append([key, result])
+    
+    gb = GrowthBook(
+        attributes={"id": "1"},
+        on_feature_usage=feature_usage_cb,
+        features={
+            "feature-1": Feature(defaultValue=True),
+            "feature-2": Feature(defaultValue=False),
+            "feature-3": Feature(
+                defaultValue="blue",
+                rules=[
+                    FeatureRule(force="red", condition={"id": "1"})
+                ]
+            ),
+        }
+    )
+    
+    # Test eval_feature
+    result1 = gb.eval_feature("feature-1")
+    assert len(calls) == 1
+    assert calls[0][0] == "feature-1"
+    assert calls[0][1].value is True
+    assert calls[0][1].source == "defaultValue"
+    
+    # Test is_on
+    gb.is_on("feature-2")
+    assert len(calls) == 2
+    assert calls[1][0] == "feature-2"
+    assert calls[1][1].value is False
+    
+    # Test get_feature_value
+    value = gb.get_feature_value("feature-3", "blue")
+    assert len(calls) == 3
+    assert calls[2][0] == "feature-3"
+    assert calls[2][1].value == "red"
+    assert value == "red"
+    
+    # Test is_off
+    gb.is_off("feature-1")
+    assert len(calls) == 4
+    assert calls[3][0] == "feature-1"
+    
+    # Calling same feature multiple times should trigger callback each time
+    gb.eval_feature("feature-1")
+    gb.eval_feature("feature-1")
+    assert len(calls) == 6
+    
+    gb.destroy()
+
+
+def test_feature_usage_callback_error_handling():
+    """Test that feature usage callback errors are handled gracefully"""
+    
+    def failing_callback(key, result):
+        raise Exception("Callback error")
+    
+    gb = GrowthBook(
+        attributes={"id": "1"},
+        on_feature_usage=failing_callback,
+        features={
+            "feature-1": Feature(defaultValue=True),
+        }
+    )
+    
+    # Should not raise an error even if callback fails
+    result = gb.eval_feature("feature-1")
+    assert result.value is True
+    
+    # Should work with is_on as well
+    assert gb.is_on("feature-1") is True
+    
+    gb.destroy()
+
+
 def test_handles_weird_experiment_values():
     gb = GrowthBook(attributes={"id": "1"})
 
