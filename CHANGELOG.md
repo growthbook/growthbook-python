@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.5](https://github.com/growthbook/growthbook-python/compare/v1.4.4...v1.4.5) (2025-10-08)
+
+
+### Bug Fixes
+
+* Add FeatureUsageCallback ([83359a0](https://github.com/growthbook/growthbook-python/commit/83359a02cd00d645ba7c12d8ffea2a3ce6077411))
+
 ## [1.4.4](https://github.com/growthbook/growthbook-python/compare/v1.4.3...v1.4.4) (2025-09-30)
 
 
