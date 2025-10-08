@@ -565,6 +565,7 @@ class GrowthBook(object):
         features: dict = {},
         qa_mode: bool = False,
         on_experiment_viewed=None,
+        on_feature_usage=None,
         api_host: str = "",
         client_key: str = "",
         decryption_key: str = "",
@@ -603,6 +604,7 @@ class GrowthBook(object):
 
         self._qaMode = qa_mode or qaMode
         self._trackingCallback = on_experiment_viewed or trackingCallback
+        self._featureUsageCallback = on_feature_usage
 
         self._streaming = streaming
         self._streaming_timeout = streaming_connection_timeout
@@ -823,6 +825,7 @@ class GrowthBook(object):
             self._tracked.clear()
             self._assigned.clear()
             self._trackingCallback = None
+            self._featureUsageCallback = None
             self._forcedVariations.clear()
             self._overrides.clear()
             self._groups.clear()
@@ -886,11 +889,18 @@ class GrowthBook(object):
         )
 
     def eval_feature(self, key: str) -> FeatureResult:
-        return core_eval_feature(key=key, 
-                                 evalContext=self._get_eval_context(), 
-                                 callback_subscription=self._fireSubscriptions,
-                                 tracking_cb=self._track
-                                 )
+        result = core_eval_feature(key=key, 
+                                   evalContext=self._get_eval_context(), 
+                                   callback_subscription=self._fireSubscriptions,
+                                   tracking_cb=self._track
+                                   )
+        # Call feature usage callback if provided
+        if self._featureUsageCallback:
+            try:
+                self._featureUsageCallback(key, result)
+            except Exception:
+                pass
+        return result
 
     # @deprecated, use get_all_results
     def getAllResults(self):
