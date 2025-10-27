@@ -620,6 +620,7 @@ class GrowthBook(object):
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Any] = set()
+        self._is_updating_features = False
 
         # support plugins
         self._plugins: List = plugins or []
@@ -752,19 +753,24 @@ class GrowthBook(object):
         return self.set_features(features)
 
     def set_features(self, features: dict) -> None:
-        self._features = {}
-        for key, feature in features.items():
-            if isinstance(feature, Feature):
-                self._features[key] = feature
-            else:
-                self._features[key] = Feature(
-                    rules=feature.get("rules", []),
-                    defaultValue=feature.get("defaultValue", None),
-                )
-        # Update the global context with the new features and saved groups
-        self._global_ctx.features = self._features
-        self._global_ctx.saved_groups = self._saved_groups
-        self.refresh_sticky_buckets()
+        # Prevent infinite recursion during feature updates
+        self._is_updating_features = True
+        try:
+            self._features = {}
+            for key, feature in features.items():
+                if isinstance(feature, Feature):
+                    self._features[key] = feature
+                else:
+                    self._features[key] = Feature(
+                        rules=feature.get("rules", []),
+                        defaultValue=feature.get("defaultValue", None),
+                    )
+            # Update the global context with the new features and saved groups
+            self._global_ctx.features = self._features
+            self._global_ctx.saved_groups = self._saved_groups
+            self.refresh_sticky_buckets()
+        finally:
+            self._is_updating_features = False
 
     # @deprecated, use get_features
     def getFeatures(self) -> Dict[str, Feature]:
@@ -863,6 +869,10 @@ class GrowthBook(object):
     
     def _ensure_fresh_features(self) -> None:
         """Lazy refresh: Check cache expiry and refresh if needed, but only if client_key is provided"""
+        
+        # Prevent infinite recursion when updating features (e.g., during sticky bucket refresh)
+        if self._is_updating_features:
+            return
         
         if self._streaming or self._stale_while_revalidate or not self._client_key:
             return  # Skip cache checks - SSE or background refresh handles freshness
