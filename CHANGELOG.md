@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.6](https://github.com/growthbook/growthbook-python/compare/v1.4.5...v1.4.6) (2025-10-27)
+
+
+### Bug Fixes
+
+* bug fixes and tracking enhancements ([6d3638b](https://github.com/growthbook/growthbook-python/commit/6d3638bf5e6c57c8882e4de35bc5e7ab5eafa5a5))
+
 ## [1.4.5](https://github.com/growthbook/growthbook-python/compare/v1.4.4...v1.4.5) (2025-10-08)
 
 
