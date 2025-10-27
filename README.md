@@ -464,7 +464,6 @@ class MyStickyBucketService(AbstractStickyBucketService):
         })
 
 # Pass in an instance of this service to your GrowthBook constructor
-
 gb = GrowthBook(
   sticky_bucket_service = MyStickyBucketService()
 )
