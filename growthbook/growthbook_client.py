@@ -503,7 +503,7 @@ class GrowthBookClient:
             # Call feature usage callback if provided
             if self.options.on_feature_usage:
                 try:
-                    self.options.on_feature_usage(key, result)
+                    self.options.on_feature_usage(key, result, user_context)
                 except Exception:
                     logger.exception("Error in feature usage callback")
             return result
@@ -516,7 +516,7 @@ class GrowthBookClient:
             # Call feature usage callback if provided
             if self.options.on_feature_usage:
                 try:
-                    self.options.on_feature_usage(key, result)
+                    self.options.on_feature_usage(key, result, user_context)
                 except Exception:
                     logger.exception("Error in feature usage callback")
             return result.on
@@ -529,7 +529,7 @@ class GrowthBookClient:
             # Call feature usage callback if provided
             if self.options.on_feature_usage:
                 try:
-                    self.options.on_feature_usage(key, result)
+                    self.options.on_feature_usage(key, result, user_context)
                 except Exception:
                     logger.exception("Error in feature usage callback")
             return result.off
@@ -541,7 +541,7 @@ class GrowthBookClient:
             # Call feature usage callback if provided
             if self.options.on_feature_usage:
                 try:
-                    self.options.on_feature_usage(key, result)
+                    self.options.on_feature_usage(key, result, user_context)
                 except Exception:
                     logger.exception("Error in feature usage callback")
             return result.value if result.value is not None else fallback

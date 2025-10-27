@@ -897,7 +897,7 @@ class GrowthBook(object):
         # Call feature usage callback if provided
         if self._featureUsageCallback:
             try:
-                self._featureUsageCallback(key, result)
+                self._featureUsageCallback(key, result, self._user_ctx)
             except Exception:
                 pass
         return result
