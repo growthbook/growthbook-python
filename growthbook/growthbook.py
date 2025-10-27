@@ -503,6 +503,10 @@ class FeatureRepository(object):
     
     def start_background_refresh(self, api_host: str, client_key: str, decryption_key: str, ttl: int = 600, refresh_interval: int = 300) -> None:
         """Start periodic background refresh task"""
+
+        if not client_key:
+            raise ValueError("Must specify `client_key` to refresh features")
+
         with self._refresh_lock:
             if self._refresh_thread is not None:
                 return  # Already running
@@ -663,7 +667,7 @@ class GrowthBook(object):
         if self._streaming:
             self.load_features()
             self.startAutoRefresh()
-        elif self._stale_while_revalidate and self._client_key:
+        elif self._stale_while_revalidate:
             # Start background refresh task for stale-while-revalidate
             self.load_features()  # Initial load
             feature_repo.start_background_refresh(
