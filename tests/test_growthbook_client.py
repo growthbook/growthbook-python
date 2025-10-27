@@ -776,8 +776,8 @@ async def test_feature_usage_callback():
     """Test that feature usage callback is called correctly"""
     calls = []
     
-    def feature_usage_cb(key, result):
-        calls.append([key, result])
+    def feature_usage_cb(key, result, user_context):
+        calls.append([key, result, user_context])
     
     client = GrowthBookClient(Options(
         api_host="https://localhost.growthbook.io",
@@ -820,12 +820,14 @@ async def test_feature_usage_callback():
             assert calls[0][0] == "feature-1"
             assert calls[0][1].value is True
             assert calls[0][1].source == "defaultValue"
+            assert calls[0][2].attributes == {"id": "1"}
             
             # Test is_on
             await client.is_on("feature-2", user_context)
             assert len(calls) == 2
             assert calls[1][0] == "feature-2"
             assert calls[1][1].value is False
+            assert calls[1][2].attributes == {"id": "1"}
             
             # Test get_feature_value
             value = await client.get_feature_value("feature-3", "blue", user_context)
@@ -833,11 +835,13 @@ async def test_feature_usage_callback():
             assert calls[2][0] == "feature-3"
             assert calls[2][1].value == "red"
             assert value == "red"
+            assert calls[2][2].attributes == {"id": "1"}
             
             # Test is_off
             await client.is_off("feature-1", user_context)
             assert len(calls) == 4
             assert calls[3][0] == "feature-1"
+            assert calls[3][2].attributes == {"id": "1"}
             
             # Calling same feature multiple times should trigger callback each time
             await client.eval_feature("feature-1", user_context)
@@ -852,7 +856,7 @@ async def test_feature_usage_callback():
 async def test_feature_usage_callback_error_handling():
     """Test that feature usage callback errors are handled gracefully"""
     
-    def failing_callback(key, result):
+    def failing_callback(key, result, user_context):
         raise Exception("Callback error")
     
     client = GrowthBookClient(Options(
