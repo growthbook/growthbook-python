@@ -322,6 +322,68 @@ def test_handles_weird_experiment_values():
     gb.destroy()
 
 
+def test_skip_all_experiments_flag():
+    """Test that skip_all_experiments flag prevents users from being put into experiments"""
+    
+    # Test with skip_all_experiments=True
+    gb_skip = GrowthBook(
+        attributes={"id": "1"},
+        skip_all_experiments=True,
+        features={
+            "feature-with-experiment": Feature(
+                defaultValue="control",
+                rules=[
+                    FeatureRule(
+                        key="exp-123",
+                        variations=["control", "variation"],
+                        weights=[0.5, 0.5]
+                    )
+                ]
+            )
+        }
+    )
+    
+    # User should NOT be in experiment due to skip_all_experiments flag
+    result = gb_skip.eval_feature("feature-with-experiment")
+    assert result.value == "control"  # Should get default value
+    assert result.source == "defaultValue"
+    assert result.experiment is None  # No experiment should be assigned
+    assert result.experimentResult is None
+    
+    # Test running experiment directly
+    exp = Experiment(key="direct-exp", variations=["a", "b"])
+    exp_result = gb_skip.run(exp)
+    assert exp_result.inExperiment is False
+    assert exp_result.value == "a"  # Should get first variation (control)
+    
+    gb_skip.destroy()
+    
+    # Test with skip_all_experiments=False (default behavior)
+    gb_normal = GrowthBook(
+        attributes={"id": "1"},
+        skip_all_experiments=False,  # explicit False
+        features={
+            "feature-with-experiment": Feature(
+                defaultValue="control",
+                rules=[
+                    FeatureRule(
+                        key="exp-123",
+                        variations=["control", "variation"],
+                        weights=[0.5, 0.5]
+                    )
+                ]
+            )
+        }
+    )
+    
+    # User SHOULD be in experiment normally
+    result_normal = gb_normal.eval_feature("feature-with-experiment")
+    # With id="1", this user should be assigned a variation
+    assert result_normal.value in ["control", "variation"]
+    assert result_normal.source == "experiment"
+    
+    gb_normal.destroy()
+
 def test_force_variation():
     gb = GrowthBook(attributes={"id": "6"})
     exp = Experiment(key="forced-test", variations=[0, 1])
