@@ -584,6 +584,7 @@ class GrowthBook(object):
         stale_while_revalidate: bool = False,
         stale_ttl: int = 300,  # 5 minutes default
         plugins: List = None,
+        skip_all_experiments: bool = False,
         # Deprecated args
         trackingCallback=None,
         qaMode: bool = False,
@@ -610,6 +611,7 @@ class GrowthBook(object):
         self._qaMode = qa_mode or qaMode
         self._trackingCallback = on_experiment_viewed or trackingCallback
         self._featureUsageCallback = on_feature_usage
+        self._skip_all_experiments = skip_all_experiments
 
         self._streaming = streaming
         self._streaming_timeout = streaming_connection_timeout
@@ -653,7 +655,8 @@ class GrowthBook(object):
             groups=self._groups,
             forced_variations=self._forcedVariations,
             overrides=self._overrides,
-            sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs
+            sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs,
+            skip_all_experiments=self._skip_all_experiments
         )
 
         if features:

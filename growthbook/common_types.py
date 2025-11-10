@@ -410,6 +410,7 @@ class UserContext:
     forced_variations: Dict[str, Any] = field(default_factory=dict)
     overrides: Dict[str, Any] = field(default_factory=dict)
     sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
+    skip_all_experiments: bool = False
 
 @dataclass
 class Options:

@@ -821,9 +821,14 @@ def run_experiment(experiment: Experiment,
             experiment=experiment, variationId=experiment.force, featureId=featureId, evalContext=evalContext
         )
 
-    # 12. Exclude if in QA mode
+    # 12. Exclude if in QA mode (global)
     if evalContext.global_ctx.options.qa_mode:
         logger.debug("Skip experiment %s because of QA Mode", experiment.key)
+        return _getExperimentResult(experiment=experiment, featureId=featureId, evalContext=evalContext)
+
+    # 12.1. Exclude if user has skip_all_experiments flag set
+    if evalContext.user.skip_all_experiments:
+        logger.debug("Skip experiment %s because user has skip_all_experiments flag set", experiment.key)
         return _getExperimentResult(experiment=experiment, featureId=featureId, evalContext=evalContext)
 
     # 12.5. If experiment is stopped, return immediately
