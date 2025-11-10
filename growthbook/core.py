@@ -9,7 +9,7 @@ from .common_types import EvaluationContext, FeatureResult, Experiment, Filter, 
 
 logger = logging.getLogger("growthbook.core")
 
-def evalCondition(attributes: dict, condition: dict, savedGroups: dict = None) -> bool:
+def evalCondition(attributes: Dict[str, Any], condition: Dict[str, Any], savedGroups: Optional[Dict[str, Any]] = None) -> bool:
     for key, value in condition.items():
         if key == "$or":
             if not evalOr(attributes, value, savedGroups):
@@ -28,7 +28,7 @@ def evalCondition(attributes: dict, condition: dict, savedGroups: dict = None) -
 
     return True
 
-def evalOr(attributes, conditions, savedGroups) -> bool:
+def evalOr(attributes: Dict[str, Any], conditions: List[Any], savedGroups: Optional[Dict[str, Any]]) -> bool:
     if len(conditions) == 0:
         return True
 
@@ -38,13 +38,13 @@ def evalOr(attributes, conditions, savedGroups) -> bool:
     return False
 
 
-def evalAnd(attributes, conditions, savedGroups) -> bool:
+def evalAnd(attributes: Dict[str, Any], conditions: List[Any], savedGroups: Optional[Dict[str, Any]]) -> bool:
     for condition in conditions:
         if not evalCondition(attributes, condition, savedGroups):
             return False
     return True
 
-def isOperatorObject(obj) -> bool:
+def isOperatorObject(obj: Any) -> bool:
     for key in obj.keys():
         if key[0] != "$":
             return False
@@ -263,18 +263,18 @@ def _getOrigHashValue(
 
     return (actual_attr, val)
 
-def _getHashValue(eval_context: EvaluationContext, attr: str = None, fallbackAttr: str = None) -> Tuple[str, str]:
+def _getHashValue(eval_context: EvaluationContext, attr: Optional[str] = None, fallbackAttr: Optional[str] = None) -> Tuple[str, str]:
     (attr, val) = _getOrigHashValue(attr=attr, fallbackAttr=fallbackAttr, eval_context=eval_context)
     return (attr, str(val))
 
 def _isIncludedInRollout(
     seed: str,
     eval_context: EvaluationContext,
-    hashAttribute: str = None,
-    fallbackAttribute: str = None,
-    range: Tuple[float, float] = None,
-    coverage: float = None,
-    hashVersion: int = None
+    hashAttribute: Optional[str] = None,
+    fallbackAttribute: Optional[str] = None,
+    range: Optional[Tuple[float, float]] = None,
+    coverage: Optional[float] = None,
+    hashVersion: Optional[int] = None
 ) -> bool:
     if coverage is None and range is None:
         return True
@@ -388,7 +388,7 @@ def getEqualWeights(numVariations: int) -> List[float]:
 
 
 def getBucketRanges(
-    numVariations: int, coverage: float = 1, weights: List[float] = None
+    numVariations: int, coverage: float = 1, weights: Optional[List[float]] = None
 ) -> List[Tuple[float, float]]:
     if coverage < 0:
         coverage = 0
@@ -412,9 +412,9 @@ def getBucketRanges(
 
 def eval_feature(
     key: str,
-    evalContext: EvaluationContext = None,
-    callback_subscription: Callable[[Experiment, Result], None] = None,
-    tracking_cb: Callable[[Experiment, Result, UserContext], None] = None
+    evalContext: Optional[EvaluationContext] = None,
+    callback_subscription: Optional[Callable[[Experiment, Result], None]] = None,
+    tracking_cb: Optional[Callable[[Experiment, Result, UserContext], None]] = None
 ) -> FeatureResult:
     """Core feature evaluation logic as a standalone function"""
 
@@ -560,8 +560,8 @@ def _get_sticky_bucket_experiment_key(experiment_key: str, bucket_version: int =
     return experiment_key + "__" + str(bucket_version)
     
 def _get_sticky_bucket_assignments(evalContext: EvaluationContext,
-                                    attr: str = None,
-                                    fallback: str = None) -> Dict[str, str]:
+                                    attr: Optional[str] = None,
+                                    fallback: Optional[str] = None) -> Dict[str, str]:
     merged: Dict[str, str] = {}
 
     # Search for docs stored for attribute(id)
@@ -597,12 +597,12 @@ def _is_blocked(
 def _get_sticky_bucket_variation(
     experiment_key: str,
     evalContext: EvaluationContext,
-    bucket_version: int = None,
-    min_bucket_version: int = None,
-    meta: List[VariationMeta] = None,
-    hash_attribute: str = None,
-    fallback_attribute: str = None,
-) -> dict:
+    bucket_version: Optional[int] = None,
+    min_bucket_version: Optional[int] = None,
+    meta: Optional[List[VariationMeta]] = None,
+    hash_attribute: Optional[str] = None,
+    fallback_attribute: Optional[str] = None,
+) -> Dict[str, Any]:
     bucket_version = bucket_version or 0
     min_bucket_version = min_bucket_version or 0
     meta = meta or []
@@ -633,8 +633,8 @@ def _get_sticky_bucket_variation(
 
 def run_experiment(experiment: Experiment, 
                    featureId: Optional[str] = None, 
-                   evalContext: EvaluationContext = None, 
-                   tracking_cb: Callable[[Experiment, Result, UserContext], None] = None
+                   evalContext: Optional[EvaluationContext] = None, 
+                   tracking_cb: Optional[Callable[[Experiment, Result, UserContext], None]] = None
                 ) -> Result:
     if evalContext is None:
         raise ValueError("evalContext is required - run_experiment")
@@ -896,8 +896,8 @@ def _getExperimentResult(
     evalContext: EvaluationContext,
     variationId: int = -1,
     hashUsed: bool = False,
-    featureId: str = None,
-    bucket: float = None,
+    featureId: Optional[str] = None,
+    bucket: Optional[float] = None,
     stickyBucketUsed: bool = False
 ) -> Result:
     inExperiment = True

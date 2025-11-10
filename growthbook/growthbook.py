@@ -575,15 +575,15 @@ class GrowthBook(object):
         client_key: str = "",
         decryption_key: str = "",
         cache_ttl: int = 600,
-        forced_variations: dict = {},
-        sticky_bucket_service: AbstractStickyBucketService = None,
-        sticky_bucket_identifier_attributes: List[str] = None,
-        savedGroups: dict = {},
+        forced_variations: Optional[Dict[str, Any]] = None,
+        sticky_bucket_service: Optional[AbstractStickyBucketService] = None,
+        sticky_bucket_identifier_attributes: Optional[List[str]] = None,
+        savedGroups: Optional[Dict[str, Any]] = None,
         streaming: bool = False,
         streaming_connection_timeout: int = 30,
         stale_while_revalidate: bool = False,
         stale_ttl: int = 300,  # 5 minutes default
-        plugins: List = None,
+        plugins: Optional[List[Any]] = None,
         skip_all_experiments: bool = False,
         # Deprecated args
         trackingCallback=None,
@@ -597,7 +597,7 @@ class GrowthBook(object):
         self._attributes = attributes
         self._url = url
         self._features: Dict[str, Feature] = {}
-        self._saved_groups = savedGroups
+        self._saved_groups = savedGroups if savedGroups is not None else {}
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
@@ -622,7 +622,7 @@ class GrowthBook(object):
         self._user = user
         self._groups = groups
         self._overrides = overrides
-        self._forcedVariations = forced_variations or forcedVariations
+        self._forcedVariations = (forced_variations if forced_variations is not None else forcedVariations) if forced_variations is not None or forcedVariations else {}
 
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
@@ -630,8 +630,8 @@ class GrowthBook(object):
         self._is_updating_features = False
 
         # support plugins
-        self._plugins: List = plugins or []
-        self._initialized_plugins: List = []
+        self._plugins: List[Any] = plugins if plugins is not None else []
+        self._initialized_plugins: List[Any] = []
 
         self._global_ctx = GlobalContext(
             options=Options(
