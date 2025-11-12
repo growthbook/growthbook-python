@@ -205,14 +205,14 @@ class SSEClient:
                     break
                 except (ClientConnectorError, ClientPayloadError) as e:
                     logger.error(f"Streaming error: {e}")
-                    if not self.is_running:
-                        break
                     await self._wait_for_reconnect()
+                    if not self.is_running:
+                        break  # type: ignore[unreachable]
                 except TimeoutError:
                     logger.warning(f"Streaming connection timed out after {self.timeout} seconds.")
-                    if not self.is_running:
-                        break
                     await self._wait_for_reconnect()
+                    if not self.is_running:
+                        break  # type: ignore[unreachable]
                 except asyncio.CancelledError:
                     logger.debug("SSE session cancelled")
                     break
@@ -413,7 +413,7 @@ class FeatureRepository(object):
                 )
                 return None
             decoded = json.loads(r.data.decode("utf-8"))
-            return decoded
+            return decoded  # type: ignore[no-any-return]
         except Exception:
             logger.warning("Failed to decode feature JSON from GrowthBook API")
             return None
@@ -427,7 +427,7 @@ class FeatureRepository(object):
                         logger.warning("Failed to fetch features, received status code %d", response.status)
                         return None
                     decoded = await response.json()
-                    return decoded
+                    return decoded  # type: ignore[no-any-return]
         except aiohttp.ClientError as e:
             logger.warning(f"HTTP request failed: {e}")
             return None
@@ -476,7 +476,7 @@ class FeatureRepository(object):
 
         data = self.decrypt_response(decoded, decryption_key)
 
-        return data
+        return data  # type: ignore[no-any-return]
         
     async def _fetch_features_async(
         self, api_host: str, client_key: str, decryption_key: str = ""
@@ -487,7 +487,7 @@ class FeatureRepository(object):
 
         data = self.decrypt_response(decoded, decryption_key)
 
-        return data
+        return data  # type: ignore[no-any-return]
 
 
     def startAutoRefresh(self, api_host, client_key, cb, streaming_timeout=30):
@@ -927,24 +927,22 @@ class GrowthBook(object):
         return self._assigned.copy()
 
     def _fireSubscriptions(self, experiment: Experiment, result: Result):
-        if experiment is None:
-            return
-        
-        prev = self._assigned.get(experiment.key, None)
-        if (
-            not prev
-            or prev["result"].inExperiment != result.inExperiment
-            or prev["result"].variationId != result.variationId
-        ):
-            self._assigned[experiment.key] = {
-                "experiment": experiment,
-                "result": result,
-            }
-            for cb in self._subscriptions:
-                try:
-                    cb(experiment, result)
-                except Exception:
-                    pass
+        if experiment is not None:
+            prev = self._assigned.get(experiment.key, None)
+            if (
+                not prev
+                or prev["result"].inExperiment != result.inExperiment
+                or prev["result"].variationId != result.variationId
+            ):
+                self._assigned[experiment.key] = {
+                    "experiment": experiment,
+                    "result": result,
+                }
+                for cb in self._subscriptions:
+                    try:
+                        cb(experiment, result)
+                    except Exception:
+                        pass
 
     def run(self, experiment: Experiment) -> Result:
         # result = self._run(experiment)

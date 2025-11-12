@@ -82,7 +82,7 @@ def evalConditionValue(conditionValue, attributeValue, savedGroups) -> bool:
             if not evalOperatorCondition(key, attributeValue, value, savedGroups):
                 return False
         return True
-    return conditionValue == attributeValue
+    return bool(conditionValue == attributeValue)
 
 def elemMatch(condition, attributeValue, savedGroups) -> bool:
     if not type(attributeValue) is list:
@@ -208,7 +208,7 @@ def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups)
             return attributeValue is None
         return attributeValue is not None
     elif operator == "$type":
-        return getType(attributeValue) == conditionValue
+        return bool(getType(attributeValue) == conditionValue)
     elif operator == "$not":
         return not evalConditionValue(conditionValue, attributeValue, savedGroups)
     return False
