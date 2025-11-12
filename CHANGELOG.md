@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.7](https://github.com/growthbook/growthbook-python/compare/v1.4.6...v1.4.7) (2025-11-12)
+
+
+### Bug Fixes
+
+* Type checks & Other enhancements - Merge pull request [#77](https://github.com/growthbook/growthbook-python/issues/77) from growthbook/feat/enhancements ([ea1567a](https://github.com/growthbook/growthbook-python/commit/ea1567a97284d61587493dd1a15f3105d06a67bb))
+
 ## [1.4.6](https://github.com/growthbook/growthbook-python/compare/v1.4.5...v1.4.6) (2025-10-27)
 
 
