@@ -21,6 +21,24 @@ Powerful Feature flagging and A/B testing for Python apps.
 
 `pip install growthbook` (recommended) or copy `growthbook.py` into your project
 
+## Type Checking Support
+
+The GrowthBook Python SDK is fully typed and includes inline type hints for all public APIs. This enables:
+
+- **Better IDE support** with autocomplete and inline documentation
+- **Type safety** - catch bugs at development time with mypy or other type checkers
+- **Better code documentation** - types serve as inline documentation
+- **Safer refactoring** - type checkers will catch breaking changes
+
+To use type checking with mypy:
+
+```bash
+pip install mypy
+mypy your_code.py
+```
+
+The SDK includes a `py.typed` marker file and is compliant with [PEP 561](https://www.python.org/dev/peps/pep-0561/).
+
 ## Quick Usage
 
 ```python

@@ -6,7 +6,7 @@ from typing import Dict, Any, Optional, List, Callable, TYPE_CHECKING
 from .base import GrowthBookPlugin
 
 if TYPE_CHECKING:
-    import requests  # type: ignore
+    import requests
 else:
     try:
         import requests  # type: ignore

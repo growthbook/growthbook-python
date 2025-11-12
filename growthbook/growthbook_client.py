@@ -81,7 +81,7 @@ class WeakRefWrapper:
 class FeatureCache:
     """Thread-safe feature cache"""
     def __init__(self):
-        self._cache = {
+        self._cache: Dict[str, Dict[str, Any]] = {
             'features': {},
             'savedGroups': {}
         }
@@ -114,7 +114,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._backoff = BackoffStrategy()
         self._feature_cache = FeatureCache()
         self._callbacks: List[Callable[[Dict[str, Any]], Awaitable[None]]] = []
-        self._last_successful_refresh = None
+        self._last_successful_refresh: Optional[datetime] = None
         self._refresh_in_progress = asyncio.Lock()
 
     @asynccontextmanager

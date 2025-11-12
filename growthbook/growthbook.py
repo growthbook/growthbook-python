@@ -205,14 +205,14 @@ class SSEClient:
                     break
                 except (ClientConnectorError, ClientPayloadError) as e:
                     logger.error(f"Streaming error: {e}")
-                    if not self.is_running:
-                        break
                     await self._wait_for_reconnect()
+                    if not self.is_running:
+                        break  # type: ignore[unreachable]
                 except TimeoutError:
                     logger.warning(f"Streaming connection timed out after {self.timeout} seconds.")
-                    if not self.is_running:
-                        break
                     await self._wait_for_reconnect()
+                    if not self.is_running:
+                        break  # type: ignore[unreachable]
                 except asyncio.CancelledError:
                     logger.debug("SSE session cancelled")
                     break
@@ -413,7 +413,7 @@ class FeatureRepository(object):
                 )
                 return None
             decoded = json.loads(r.data.decode("utf-8"))
-            return decoded
+            return decoded  # type: ignore[no-any-return]
         except Exception:
             logger.warning("Failed to decode feature JSON from GrowthBook API")
             return None
@@ -427,7 +427,7 @@ class FeatureRepository(object):
                         logger.warning("Failed to fetch features, received status code %d", response.status)
                         return None
                     decoded = await response.json()
-                    return decoded
+                    return decoded  # type: ignore[no-any-return]
         except aiohttp.ClientError as e:
             logger.warning(f"HTTP request failed: {e}")
             return None
@@ -476,7 +476,7 @@ class FeatureRepository(object):
 
         data = self.decrypt_response(decoded, decryption_key)
 
-        return data
+        return data  # type: ignore[no-any-return]
         
     async def _fetch_features_async(
         self, api_host: str, client_key: str, decryption_key: str = ""
@@ -487,7 +487,7 @@ class FeatureRepository(object):
 
         data = self.decrypt_response(decoded, decryption_key)
 
-        return data
+        return data  # type: ignore[no-any-return]
 
 
     def startAutoRefresh(self, api_host, client_key, cb, streaming_timeout=30):
@@ -575,15 +575,16 @@ class GrowthBook(object):
         client_key: str = "",
         decryption_key: str = "",
         cache_ttl: int = 600,
-        forced_variations: dict = {},
-        sticky_bucket_service: AbstractStickyBucketService = None,
-        sticky_bucket_identifier_attributes: List[str] = None,
-        savedGroups: dict = {},
+        forced_variations: Optional[Dict[str, Any]] = None,
+        sticky_bucket_service: Optional[AbstractStickyBucketService] = None,
+        sticky_bucket_identifier_attributes: Optional[List[str]] = None,
+        savedGroups: Optional[Dict[str, Any]] = None,
         streaming: bool = False,
         streaming_connection_timeout: int = 30,
         stale_while_revalidate: bool = False,
         stale_ttl: int = 300,  # 5 minutes default
-        plugins: List = None,
+        plugins: Optional[List[Any]] = None,
+        skip_all_experiments: bool = False,
         # Deprecated args
         trackingCallback=None,
         qaMode: bool = False,
@@ -596,7 +597,7 @@ class GrowthBook(object):
         self._attributes = attributes
         self._url = url
         self._features: Dict[str, Feature] = {}
-        self._saved_groups = savedGroups
+        self._saved_groups = savedGroups if savedGroups is not None else {}
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
@@ -610,6 +611,7 @@ class GrowthBook(object):
         self._qaMode = qa_mode or qaMode
         self._trackingCallback = on_experiment_viewed or trackingCallback
         self._featureUsageCallback = on_feature_usage
+        self._skip_all_experiments = skip_all_experiments
 
         self._streaming = streaming
         self._streaming_timeout = streaming_connection_timeout
@@ -620,7 +622,7 @@ class GrowthBook(object):
         self._user = user
         self._groups = groups
         self._overrides = overrides
-        self._forcedVariations = forced_variations or forcedVariations
+        self._forcedVariations = (forced_variations if forced_variations is not None else forcedVariations) if forced_variations is not None or forcedVariations else {}
 
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
@@ -628,8 +630,8 @@ class GrowthBook(object):
         self._is_updating_features = False
 
         # support plugins
-        self._plugins: List = plugins or []
-        self._initialized_plugins: List = []
+        self._plugins: List[Any] = plugins if plugins is not None else []
+        self._initialized_plugins: List[Any] = []
 
         self._global_ctx = GlobalContext(
             options=Options(
@@ -653,7 +655,8 @@ class GrowthBook(object):
             groups=self._groups,
             forced_variations=self._forcedVariations,
             overrides=self._overrides,
-            sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs
+            sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs,
+            skip_all_experiments=self._skip_all_experiments
         )
 
         if features:
@@ -924,24 +927,22 @@ class GrowthBook(object):
         return self._assigned.copy()
 
     def _fireSubscriptions(self, experiment: Experiment, result: Result):
-        if experiment is None:
-            return
-        
-        prev = self._assigned.get(experiment.key, None)
-        if (
-            not prev
-            or prev["result"].inExperiment != result.inExperiment
-            or prev["result"].variationId != result.variationId
-        ):
-            self._assigned[experiment.key] = {
-                "experiment": experiment,
-                "result": result,
-            }
-            for cb in self._subscriptions:
-                try:
-                    cb(experiment, result)
-                except Exception:
-                    pass
+        if experiment is not None:
+            prev = self._assigned.get(experiment.key, None)
+            if (
+                not prev
+                or prev["result"].inExperiment != result.inExperiment
+                or prev["result"].variationId != result.variationId
+            ):
+                self._assigned[experiment.key] = {
+                    "experiment": experiment,
+                    "result": result,
+                }
+                for cb in self._subscriptions:
+                    try:
+                        cb(experiment, result)
+                    except Exception:
+                        pass
 
     def run(self, experiment: Experiment) -> Result:
         # result = self._run(experiment)
