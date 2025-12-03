@@ -3,7 +3,7 @@
 ## [1.4.8](https://github.com/growthbook/growthbook-python/compare/v1.4.7...v1.4.8) (2025-12-03)
 
 
-### Bug Fixes
+### Features
 
 * Handle ETags natively for both sync & async clients - Merge pull request [#81](https://github.com/growthbook/growthbook-python/issues/81) from growthbook/feat/etag-cache ([95b06c3](https://github.com/growthbook/growthbook-python/commit/95b06c312428d7af1b81b2cbb29ddf6421f05ef7))
 
