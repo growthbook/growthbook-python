@@ -799,6 +799,7 @@ class MockHttpResp:
     def __init__(self, status: int, data: str) -> None:
         self.status = status
         self.data = data.encode("utf-8")
+        self.headers = {}  # Add headers attribute for ETag support
 
 
 def test_feature_repository(mocker):
@@ -807,7 +808,10 @@ def test_feature_repository(mocker):
     m.return_value = MockHttpResp(200, json.dumps(expected))
     features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
 
-    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    # Updated assertion to account for headers parameter
+    assert m.call_count == 1
+    call_args = m.call_args[0]
+    assert call_args[0] == "https://cdn.growthbook.io/api/features/sdk-abc123"
     assert features == expected
 
     # Uses in-memory cache for the 2nd call
@@ -831,7 +835,10 @@ def test_feature_repository_error(mocker):
     m.return_value = MockHttpResp(400, "400 Error")
     features = feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
 
-    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    # Updated assertion to account for headers parameter
+    assert m.call_count == 1
+    call_args = m.call_args[0]
+    assert call_args[0] == "https://cdn.growthbook.io/api/features/sdk-abc123"
     assert features is None
 
     # Does not cache errors
@@ -863,7 +870,10 @@ def test_feature_repository_encrypted(mocker):
         "https://cdn.growthbook.io", "sdk-abc123", "Zvwv/+uhpFDznZ6SX28Yjg=="
     )
 
-    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    # Updated assertion to account for headers parameter
+    assert m.call_count == 1
+    call_args = m.call_args[0]
+    assert call_args[0] == "https://cdn.growthbook.io/api/features/sdk-abc123"
     assert features == {"features": {"feature": {"defaultValue": True}}}
 
     feature_repo.clear_cache()
@@ -884,7 +894,10 @@ def test_load_features(mocker):
     assert m.call_count == 0
 
     gb.load_features()
-    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    # Updated assertion to account for headers parameter
+    assert m.call_count == 1
+    call_args = m.call_args[0]
+    assert call_args[0] == "https://cdn.growthbook.io/api/features/sdk-abc123"
 
     assert gb.get_features()["feature"].to_dict() == {"defaultValue": 5, "rules": []}
 
@@ -944,7 +957,10 @@ def test_loose_unmarshalling(mocker):
     assert m.call_count == 0
 
     gb.load_features()
-    m.assert_called_once_with("https://cdn.growthbook.io/api/features/sdk-abc123")
+    # Updated assertion to account for headers parameter
+    assert m.call_count == 1
+    call_args = m.call_args[0]
+    assert call_args[0] == "https://cdn.growthbook.io/api/features/sdk-abc123"
 
     assert gb.get_features()["feature"].to_dict() == {
         "defaultValue": 5,
