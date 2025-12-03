@@ -323,6 +323,10 @@ class SSEClient:
             except Exception as e:
                 logger.warning(f"Error during SSE task cleanup: {e}")
 
+from collections import OrderedDict
+
+# ... (imports)
+
 class FeatureRepository(object):
     def __init__(self) -> None:
         self.cache: AbstractFeatureCache = InMemoryFeatureCache()
@@ -334,6 +338,12 @@ class FeatureRepository(object):
         self._refresh_thread: Optional[threading.Thread] = None
         self._refresh_stop_event = threading.Event()
         self._refresh_lock = threading.Lock()
+        
+        # ETag cache for bandwidth optimization
+        # Using OrderedDict for LRU cache (max 100 entries)
+        self._etag_cache: OrderedDict[str, Tuple[str, Dict[str, Any]]] = OrderedDict()
+        self._max_etag_entries = 100
+        self._etag_lock = threading.Lock()
 
     def set_cache(self, cache: AbstractFeatureCache) -> None:
         self.cache = cache
@@ -400,33 +410,123 @@ class FeatureRepository(object):
         return cached
 
     # Perform the GET request (separate method for easy mocking)
-    def _get(self, url: str):
+    def _get(self, url: str, headers: Optional[Dict[str, str]] = None):
         self.http = self.http or PoolManager()
-        return self.http.request("GET", url)
-    
+        return self.http.request("GET", url, headers=headers or {})
+
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
+        url = self._get_features_url(api_host, client_key)
+        headers: Dict[str, str] = {}
+        
+        # Check if we have a cached ETag for this URL
+        cached_etag = None
+        cached_data = None
+        with self._etag_lock:
+            if url in self._etag_cache:
+                # Move to end (mark as recently used)
+                self._etag_cache.move_to_end(url)
+                cached_etag, cached_data = self._etag_cache[url]
+                headers['If-None-Match'] = cached_etag
+                logger.debug(f"Using cached ETag for request: {cached_etag[:20]}...")
+            else:
+                logger.debug(f"No ETag cache found for URL: {url}")
+        
         try:
-            r = self._get(self._get_features_url(api_host, client_key))
+            r = self._get(url, headers)
+            
+            # Handle 304 Not Modified - content hasn't changed
+            if r.status == 304:
+                logger.debug(f"ETag match! Server returned 304 Not Modified - using cached data (saved bandwidth)")
+                if cached_data is not None:
+                    logger.debug(f"Returning cached response ({len(str(cached_data))} bytes)")
+                    return cached_data
+                else:
+                    logger.warning("Received 304 but no cached data available")
+                    return None
+            
             if r.status >= 400:
                 logger.warning(
                     "Failed to fetch features, received status code %d", r.status
                 )
                 return None
+            
             decoded = json.loads(r.data.decode("utf-8"))
+            
+            # Store the new ETag if present
+            response_etag = r.headers.get('ETag')
+            if response_etag:
+                with self._etag_lock:
+                    self._etag_cache[url] = (response_etag, decoded)
+                    # Enforce max size
+                    if len(self._etag_cache) > self._max_etag_entries:
+                        self._etag_cache.popitem(last=False)
+                        
+                    if cached_etag:
+                        logger.debug(f"ETag updated: {cached_etag[:20]}... -> {response_etag[:20]}...")
+                    else:
+                        logger.debug(f"New ETag cached: {response_etag[:20]}... ({len(str(decoded))} bytes)")
+                    logger.debug(f"ETag cache now contains {len(self._etag_cache)} entries")
+            else:
+                logger.debug("No ETag header in response")
+            
             return decoded  # type: ignore[no-any-return]
-        except Exception:
-            logger.warning("Failed to decode feature JSON from GrowthBook API")
+        except Exception as e:
+            logger.warning(f"Failed to decode feature JSON from GrowthBook API: {e}")
             return None
         
     async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
+        url = self._get_features_url(api_host, client_key)
+        headers: Dict[str, str] = {}
+        
+        # Check if we have a cached ETag for this URL
+        cached_etag = None
+        cached_data = None
+        with self._etag_lock:
+            if url in self._etag_cache:
+                # Move to end (mark as recently used)
+                self._etag_cache.move_to_end(url)
+                cached_etag, cached_data = self._etag_cache[url]
+                headers['If-None-Match'] = cached_etag
+                logger.debug(f"[Async] Using cached ETag for request: {cached_etag[:20]}...")
+            else:
+                logger.debug(f"[Async] No ETag cache found for URL: {url}")
+        
         try:
-            url = self._get_features_url(api_host, client_key)
             async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
+                async with session.get(url, headers=headers) as response:
+                    # Handle 304 Not Modified - content hasn't changed
+                    if response.status == 304:
+                        logger.debug(f"[Async] ETag match! Server returned 304 Not Modified - using cached data (saved bandwidth)")
+                        if cached_data is not None:
+                            logger.debug(f"[Async] Returning cached response ({len(str(cached_data))} bytes)")
+                            return cached_data
+                        else:
+                            logger.warning("[Async] Received 304 but no cached data available")
+                            return None
+                    
                     if response.status >= 400:
                         logger.warning("Failed to fetch features, received status code %d", response.status)
                         return None
+                    
                     decoded = await response.json()
+                    
+                    # Store the new ETag if present
+                    response_etag = response.headers.get('ETag')
+                    if response_etag:
+                        with self._etag_lock:
+                            self._etag_cache[url] = (response_etag, decoded)
+                            # Enforce max size
+                            if len(self._etag_cache) > self._max_etag_entries:
+                                self._etag_cache.popitem(last=False)
+                                
+                            if cached_etag:
+                                logger.debug(f"[Async] ETag updated: {cached_etag[:20]}... -> {response_etag[:20]}...")
+                            else:
+                                logger.debug(f"[Async] New ETag cached: {response_etag[:20]}... ({len(str(decoded))} bytes)")
+                            logger.debug(f"[Async] ETag cache now contains {len(self._etag_cache)} entries")
+                    else:
+                        logger.debug("[Async] No ETag header in response")
+                    
                     return decoded  # type: ignore[no-any-return]
         except aiohttp.ClientError as e:
             logger.warning(f"HTTP request failed: {e}")
