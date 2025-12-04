@@ -13,7 +13,7 @@ import warnings
 
 from abc import ABC, abstractmethod
 from typing import Optional, Any, Set, Tuple, List, Dict, Callable
-
+from collections import OrderedDict
 from .cache_interfaces import AbstractFeatureCache, AbstractAsyncFeatureCache
 from .common_types import (EvaluationContext,
                            Experiment,
@@ -46,6 +46,7 @@ from urllib3 import PoolManager
 from .core import _getHashValue, eval_feature as core_eval_feature, run_experiment
 
 logger = logging.getLogger("growthbook")
+
 
 def decrypt(encrypted_str: str, key_str: str) -> str:
     iv_str, ct_str = encrypted_str.split(".", 2)
@@ -95,6 +96,7 @@ class InMemoryFeatureCache(AbstractFeatureCache):
     def clear(self) -> None:
         self.cache.clear()
 
+
 class InMemoryAsyncFeatureCache(AbstractAsyncFeatureCache):
     """
     Async in-memory cache implementation.
@@ -123,6 +125,7 @@ class InMemoryAsyncFeatureCache(AbstractAsyncFeatureCache):
     async def clear(self) -> None:
         async with self._lock:
             self._cache.clear()
+
 
 class InMemoryStickyBucketService(AbstractStickyBucketService):
     def __init__(self) -> None:
@@ -210,7 +213,7 @@ class SSEClient:
             while self.is_running:
                 try:
                     async with aiohttp.ClientSession(headers=self.headers,
-                        timeout=aiohttp.ClientTimeout(connect=self.timeout)) as session:
+                                                     timeout=aiohttp.ClientTimeout(connect=self.timeout)) as session:
                         self._sse_session = session
 
                         async with session.get(url) as response:
@@ -318,7 +321,7 @@ class SSEClient:
             try:
                 # Get all tasks for this specific loop
                 tasks = [task for task in asyncio.all_tasks(self._loop)
-                        if not task.done() and task is not asyncio.current_task(self._loop)]
+                         if not task.done() and task is not asyncio.current_task(self._loop)]
 
                 if tasks:
                     logger.debug(f"Cancelling {len(tasks)} SSE tasks")
@@ -340,9 +343,6 @@ class SSEClient:
             except Exception as e:
                 logger.warning(f"Error during SSE task cleanup: {e}")
 
-from collections import OrderedDict
-
-# ... (imports)
 
 class FeatureRepository(object):
     def __init__(self) -> None:
@@ -533,7 +533,8 @@ class FeatureRepository(object):
                 async with session.get(url, headers=headers) as response:
                     # Handle 304 Not Modified - content hasn't changed
                     if response.status == 304:
-                        logger.debug(f"[Async] ETag match! Server returned 304 Not Modified - using cached data (saved bandwidth)")
+                        logger.debug(
+                            f"[Async] ETag match! Server returned 304 Not Modified - using cached data (saved bandwidth)")
                         if cached_data is not None:
                             logger.debug(f"[Async] Returning cached response ({len(str(cached_data))} bytes)")
                             return cached_data
@@ -559,7 +560,8 @@ class FeatureRepository(object):
                             if cached_etag:
                                 logger.debug(f"[Async] ETag updated: {cached_etag[:20]}... -> {response_etag[:20]}...")
                             else:
-                                logger.debug(f"[Async] New ETag cached: {response_etag[:20]}... ({len(str(decoded))} bytes)")
+                                logger.debug(
+                                    f"[Async] New ETag cached: {response_etag[:20]}... ({len(str(decoded))} bytes)")
                             logger.debug(f"[Async] ETag cache now contains {len(self._etag_cache)} entries")
                     else:
                         logger.debug("[Async] No ETag header in response")
@@ -626,11 +628,11 @@ class FeatureRepository(object):
 
         return data  # type: ignore[no-any-return]
 
-
     def startAutoRefresh(self, api_host, client_key, cb, streaming_timeout=30):
         if not client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
-        self.sse_client = self.sse_client or SSEClient(api_host=api_host, client_key=client_key, on_event=cb, timeout=streaming_timeout)
+        self.sse_client = self.sse_client or SSEClient(api_host=api_host, client_key=client_key, on_event=cb,
+                                                       timeout=streaming_timeout)
         self.sse_client.connect()
 
     def stopAutoRefresh(self, timeout=10):
@@ -639,7 +641,8 @@ class FeatureRepository(object):
             self.sse_client.disconnect(timeout=timeout)
             self.sse_client = None
 
-    def start_background_refresh(self, api_host: str, client_key: str, decryption_key: str, ttl: int = 600, refresh_interval: int = 300) -> None:
+    def start_background_refresh(self, api_host: str, client_key: str, decryption_key: str, ttl: int = 600,
+                                 refresh_interval: int = 300) -> None:
         """Start periodic background refresh task"""
 
         if not client_key:
@@ -658,7 +661,8 @@ class FeatureRepository(object):
             self._refresh_thread.start()
             logger.debug("Started background refresh task")
 
-    def _background_refresh_worker(self, api_host: str, client_key: str, decryption_key: str, ttl: int, refresh_interval: int) -> None:
+    def _background_refresh_worker(self, api_host: str, client_key: str, decryption_key: str, ttl: int,
+                                   refresh_interval: int) -> None:
         """Worker method for periodic background refresh"""
         while not self._refresh_stop_event.is_set():
             try:
@@ -697,6 +701,7 @@ class FeatureRepository(object):
 
 # Singleton instance
 feature_repo = FeatureRepository()
+
 
 class GrowthBook(object):
     def __init__(
@@ -759,7 +764,8 @@ class GrowthBook(object):
         self._user = user
         self._groups = groups
         self._overrides = overrides
-        self._forcedVariations = (forced_variations if forced_variations is not None else forcedVariations) if forced_variations is not None or forcedVariations else {}
+        self._forcedVariations = (
+            forced_variations if forced_variations is not None else forcedVariations) if forced_variations is not None or forcedVariations else {}
 
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
@@ -869,7 +875,6 @@ class GrowthBook(object):
             self.load_features()
         elif event_type == 'features':
             self._features_event_handler(data)
-
 
     def startAutoRefresh(self):
         if not self._client_key:
@@ -1037,9 +1042,9 @@ class GrowthBook(object):
         # set the url for every evaluation. (unlikely to change)
         self._global_ctx.options.url = self._url
         return EvaluationContext(
-            global_ctx = self._global_ctx,
-            user = self._user_ctx,
-            stack = StackContext(evaluated_features=set())
+            global_ctx=self._global_ctx,
+            user=self._user_ctx,
+            stack=StackContext(evaluated_features=set())
         )
 
     def eval_feature(self, key: str) -> FeatureResult:
