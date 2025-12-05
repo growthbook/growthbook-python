@@ -1215,7 +1215,6 @@ def test_get_features_url_remote_eval():
     assert url == "https://cdn.growthbook.io/api/eval/abc123"
 
 
-
 def test_stale_while_revalidate_basic_functionality(mocker):
     """Test basic stale-while-revalidate functionality"""
     # Mock responses - first call returns v1, subsequent calls return v2

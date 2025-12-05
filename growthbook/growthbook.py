@@ -523,7 +523,8 @@ class FeatureRepository(object):
                 async with session.get(url, headers=headers) as response:
                     # Handle 304 Not Modified - content hasn't changed
                     if response.status == 304:
-                        logger.debug(f"[Async] ETag match! Server returned 304 Not Modified - using cached data (saved bandwidth)")
+                        logger.debug(
+                            f"[Async] ETag match! Server returned 304 Not Modified - using cached data (saved bandwidth)")
                         if cached_data is not None:
                             logger.debug(f"[Async] Returning cached response ({len(str(cached_data))} bytes)")
                             return cached_data
@@ -549,7 +550,8 @@ class FeatureRepository(object):
                             if cached_etag:
                                 logger.debug(f"[Async] ETag updated: {cached_etag[:20]}... -> {response_etag[:20]}...")
                             else:
-                                logger.debug(f"[Async] New ETag cached: {response_etag[:20]}... ({len(str(decoded))} bytes)")
+                                logger.debug(
+                                    f"[Async] New ETag cached: {response_etag[:20]}... ({len(str(decoded))} bytes)")
                             logger.debug(f"[Async] ETag cache now contains {len(self._etag_cache)} entries")
                     else:
                         logger.debug("[Async] No ETag header in response")
