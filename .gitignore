@@ -102,6 +102,10 @@ ENV/
 
 # IDE settings
 .vscode/
+.DS_Store
 
 # Generated version file
 growthbook/_version.py
+
+tests/client_test.py
+tests/test_live.py

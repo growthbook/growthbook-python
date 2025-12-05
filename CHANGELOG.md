@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.4.8](https://github.com/growthbook/growthbook-python/compare/v1.4.7...v1.4.8) (2025-12-03)
+
+
+### Features
+
+* Handle ETags natively for both sync & async clients - Merge pull request [#81](https://github.com/growthbook/growthbook-python/issues/81) from growthbook/feat/etag-cache ([95b06c3](https://github.com/growthbook/growthbook-python/commit/95b06c312428d7af1b81b2cbb29ddf6421f05ef7))
+
+## [1.4.7](https://github.com/growthbook/growthbook-python/compare/v1.4.6...v1.4.7) (2025-11-12)
+
+
+### Bug Fixes
+
+* Type checks & Other enhancements - Merge pull request [#77](https://github.com/growthbook/growthbook-python/issues/77) from growthbook/feat/enhancements ([ea1567a](https://github.com/growthbook/growthbook-python/commit/ea1567a97284d61587493dd1a15f3105d06a67bb))
+
+## [1.4.6](https://github.com/growthbook/growthbook-python/compare/v1.4.5...v1.4.6) (2025-10-27)
+
+
+### Bug Fixes
+
+* bug fixes and tracking enhancements ([6d3638b](https://github.com/growthbook/growthbook-python/commit/6d3638bf5e6c57c8882e4de35bc5e7ab5eafa5a5))
+* Bug fixes and tracking enhancements ([a9b34a6](https://github.com/growthbook/growthbook-python/commit/a9b34a655d818758d6d622fea83945abd4e079f7))
+
+## [1.4.5](https://github.com/growthbook/growthbook-python/compare/v1.4.4...v1.4.5) (2025-10-08)
+
+
+### Bug Fixes
+
+* Add FeatureUsageCallback ([83359a0](https://github.com/growthbook/growthbook-python/commit/83359a02cd00d645ba7c12d8ffea2a3ce6077411))
+
+## [1.4.4](https://github.com/growthbook/growthbook-python/compare/v1.4.3...v1.4.4) (2025-09-30)
+
+
+### Bug Fixes
+
+* Background Refresh task for Features ([bda8050](https://github.com/growthbook/growthbook-python/commit/bda8050c7c1b72cf4589fd64e9bca884dcbb629c))
+
 ## [1.4.3](https://github.com/growthbook/growthbook-python/compare/v1.4.2...v1.4.3) (2025-09-19)
 
 

@@ -30,30 +30,30 @@ class Experiment(object):
     def __init__(
         self,
         key: str,
-        variations: list,
-        weights: List[float] = None,
+        variations: List[Any],
+        weights: Optional[List[float]] = None,
         active: bool = True,
         status: str = "running",
-        coverage: int = None,
-        condition: dict = None,
-        namespace: Tuple[str, float, float] = None,
+        coverage: Optional[float] = None,
+        condition: Optional[Dict[str, Any]] = None,
+        namespace: Optional[Tuple[str, float, float]] = None,
         url: str = "",
-        include=None,
-        groups: list = None,
-        force: int = None,
+        include: Optional[Any] = None,
+        groups: Optional[List[Any]] = None,
+        force: Optional[int] = None,
         hashAttribute: str = "id",
-        fallbackAttribute: str = None,
-        hashVersion: int = None,
-        ranges: List[Tuple[float, float]] = None,
-        meta: List[VariationMeta] = None,
-        filters: List[Filter] = None,
-        seed: str = None,
-        name: str = None,
-        phase: str = None,
+        fallbackAttribute: Optional[str] = None,
+        hashVersion: Optional[int] = None,
+        ranges: Optional[List[Tuple[float, float]]] = None,
+        meta: Optional[List[VariationMeta]] = None,
+        filters: Optional[List[Filter]] = None,
+        seed: Optional[str] = None,
+        name: Optional[str] = None,
+        phase: Optional[str] = None,
         disableStickyBucketing: bool = False,
-        bucketVersion: int = None,
-        minBucketVersion: int = None,
-        parentConditions: List[dict] = None,
+        bucketVersion: Optional[int] = None,
+        minBucketVersion: Optional[int] = None,
+        parentConditions: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         self.key = key
         self.variations = variations
@@ -86,8 +86,8 @@ class Experiment(object):
         self.include = include
         self.groups = groups
 
-    def to_dict(self):
-        obj = {
+    def to_dict(self) -> Dict[str, Any]:
+        obj: Dict[str, Any] = {
             "key": self.key,
             "variations": self.variations,
             "weights": self.weights,
@@ -119,7 +119,7 @@ class Experiment(object):
 
         return obj
 
-    def update(self, data: dict) -> None:
+    def update(self, data: Dict[str, Any]) -> None:
         weights = data.get("weights", None)
         status = data.get("status", None)
         coverage = data.get("coverage", None)
@@ -152,7 +152,7 @@ class Result(object):
         hashValue: Optional[str],
         featureId: Optional[str],
         meta: Optional[VariationMeta] = None,
-        bucket: float = None,
+        bucket: Optional[float] = None,
         stickyBucketUsed: bool = False,
     ) -> None:
         self.variationId = variationId
@@ -177,8 +177,8 @@ class Result(object):
             if "passthrough" in meta and meta["passthrough"] is not None:
                 self.passthrough = bool(meta["passthrough"])
 
-    def to_dict(self) -> dict:
-        obj = {
+    def to_dict(self) -> Dict[str, Any]:
+        obj: Dict[str, Any] = {
             "featureId": self.featureId,
             "variationId": self.variationId,
             "inExperiment": self.inExperiment,
@@ -198,6 +198,7 @@ class Result(object):
             obj["passthrough"] = True
 
         return obj
+
     @staticmethod
     def from_dict(data: dict) -> "Result":
         return Result(
@@ -220,10 +221,10 @@ class Result(object):
 class FeatureResult(object):
     def __init__(
         self,
-        value,
+        value: Any,
         source: Optional[str] = None,
-        experiment: Optional["Experiment"] = None,
-        experimentResult: Optional["Result"] = None,
+        experiment: Optional[Experiment] = None,
+        experimentResult: Optional[Result] = None,
         ruleId: Optional[str] = None,
     ) -> None:
         self.value = value
@@ -234,8 +235,8 @@ class FeatureResult(object):
         self.on = bool(value)
         self.off = not bool(value)
 
-    def to_dict(self) -> dict:
-        data = {
+    def to_dict(self) -> Dict[str, Any]:
+        data: Dict[str, Any] = {
             "value": self.value,
             "source": self.source or "",
             "on": self.on,
@@ -261,7 +262,9 @@ class FeatureResult(object):
         )
 
 class Feature(object):
-    def __init__(self, defaultValue=None, rules: list = []) -> None:
+    def __init__(self, defaultValue: Any = None, rules: Optional[List[Any]] = None) -> None:
+        if rules is None:
+            rules = []
         self.defaultValue = defaultValue
         self.rules: List[FeatureRule] = []
         for rule in rules:
@@ -294,7 +297,7 @@ class Feature(object):
                     tracks=rule.get("tracks", None),
                 ))
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         return {
             "defaultValue": self.defaultValue,
             "rules": [rule.to_dict() for rule in self.rules],
@@ -314,28 +317,28 @@ class TrackData:
 class FeatureRule(object):
     def __init__(
         self,
-        id: str = None,
+        id: Optional[str] = None,
         key: str = "",
-        variations: list = None,
-        weights: List[float] = None,
-        coverage: int = None,
-        condition: dict = None,
-        namespace: Tuple[str, float, float] = None,
-        force=None,
+        variations: Optional[List[Any]] = None,
+        weights: Optional[List[float]] = None,
+        coverage: Optional[float] = None,
+        condition: Optional[Dict[str, Any]] = None,
+        namespace: Optional[Tuple[str, float, float]] = None,
+        force: Optional[Any] = None,
         hashAttribute: str = "id",
-        fallbackAttribute: str = None,
-        hashVersion: int = None,
-        range: Tuple[float, float] = None,
-        ranges: List[Tuple[float, float]] = None,
-        meta: List[VariationMeta] = None,
-        filters: List[Filter] = None,
-        seed: str = None,
-        name: str = None,
-        phase: str = None,
+        fallbackAttribute: Optional[str] = None,
+        hashVersion: Optional[int] = None,
+        range: Optional[Tuple[float, float]] = None,
+        ranges: Optional[List[Tuple[float, float]]] = None,
+        meta: Optional[List[VariationMeta]] = None,
+        filters: Optional[List[Filter]] = None,
+        seed: Optional[str] = None,
+        name: Optional[str] = None,
+        phase: Optional[str] = None,
         disableStickyBucketing: bool = False,
-        bucketVersion: int = None,
-        minBucketVersion: int = None,
-        parentConditions: List[dict] = None,
+        bucketVersion: Optional[int] = None,
+        minBucketVersion: Optional[int] = None,
+        parentConditions: Optional[List[Dict[str, Any]]] = None,
         tracks: List[TrackData] = None
     ) -> None:
 
@@ -379,7 +382,7 @@ class FeatureRule(object):
                         )
                     )
 
-    def to_dict(self) -> dict:
+    def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {}
         if self.id:
             data["id"] = self.id
@@ -469,6 +472,7 @@ class UserContext:
     forced_variations: Dict[str, Any] = field(default_factory=dict)
     overrides: Dict[str, Any] = field(default_factory=dict)
     sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
+    skip_all_experiments: bool = False
 
 @dataclass
 class Options:
@@ -485,6 +489,7 @@ class Options:
     sticky_bucket_service: Optional[AbstractStickyBucketService] = None
     sticky_bucket_identifier_attributes: Optional[List[str]] = None
     on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], None]] = None
+    on_feature_usage: Optional[Callable[[str, 'FeatureResult', UserContext], None]] = None
     tracking_plugins: Optional[List[Any]] = None
     remote_eval: bool = False
     global_attributes: Dict[str, Any] = field(default_factory=dict)

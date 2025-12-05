@@ -164,9 +164,10 @@ class RequestContextPlugin(GrowthBookPlugin):
         
         # 3. Try thread-local storage
         import threading
+        from typing import cast
         thread_local = getattr(threading.current_thread(), 'gb_request_context', None)
         if thread_local:
-            return thread_local
+            return cast(Dict[str, Any], thread_local)
         
         return None
     

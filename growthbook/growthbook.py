@@ -9,7 +9,9 @@ import sys
 import json
 import threading
 import logging
+import warnings
 
+from collections import OrderedDict
 from abc import ABC, abstractmethod
 from typing import Optional, Any, Set, Tuple, List, Dict, Callable
 
@@ -100,7 +102,8 @@ class InMemoryFeatureCache(AbstractFeatureCache):
     def set(self, key: str, value: Dict, ttl: int) -> None:
         if key in self.cache:
             self.cache[key].update(value)
-        self.cache[key] = CacheEntry(value, ttl)
+        else:
+            self.cache[key] = CacheEntry(value, ttl)
 
     def clear(self) -> None:
         self.cache.clear()
@@ -203,14 +206,14 @@ class SSEClient:
                     break
                 except (ClientConnectorError, ClientPayloadError) as e:
                     logger.error(f"Streaming error: {e}")
-                    if not self.is_running:
-                        break
                     await self._wait_for_reconnect()
+                    if not self.is_running:
+                        break  # type: ignore[unreachable]
                 except TimeoutError:
                     logger.warning(f"Streaming connection timed out after {self.timeout} seconds.")
-                    if not self.is_running:
-                        break
                     await self._wait_for_reconnect()
+                    if not self.is_running:
+                        break  # type: ignore[unreachable]
                 except asyncio.CancelledError:
                     logger.debug("SSE session cancelled")
                     break
@@ -328,6 +331,17 @@ class FeatureRepository(object):
         self.sse_client: Optional[SSEClient] = None
         self._feature_update_callbacks: List[Callable[[Dict], None]] = []
 
+        # Background refresh support
+        self._refresh_thread: Optional[threading.Thread] = None
+        self._refresh_stop_event = threading.Event()
+        self._refresh_lock = threading.Lock()
+
+        # ETag cache for bandwidth optimization
+        # Using OrderedDict for LRU cache (max 100 entries)
+        self._etag_cache: OrderedDict[str, Tuple[str, Dict[str, Any]]] = OrderedDict()
+        self._max_etag_entries = 100
+        self._etag_lock = threading.Lock()
+
     def set_cache(self, cache: AbstractFeatureCache) -> None:
         self.cache = cache
 
@@ -393,9 +407,9 @@ class FeatureRepository(object):
         return cached
 
     # Perform the GET request (separate method for easy mocking)
-    def _get(self, url: str):
+    def _get(self, url: str, headers: Optional[Dict[str, str]] = None):
         self.http = self.http or PoolManager()
-        return self.http.request("GET", url)
+        return self.http.request("GET", url, headers=headers or {})
 
     def _post(self, url: str, payload: Dict, headers: Optional[Dict] = None):
         self.http = self.http or PoolManager()
@@ -428,29 +442,119 @@ class FeatureRepository(object):
             return None
 
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
+        url = self._get_features_url(api_host, client_key)
+        headers: Dict[str, str] = {}
+
+        # Check if we have a cached ETag for this URL
+        cached_etag = None
+        cached_data = None
+        with self._etag_lock:
+            if url in self._etag_cache:
+                # Move to end (mark as recently used)
+                self._etag_cache.move_to_end(url)
+                cached_etag, cached_data = self._etag_cache[url]
+                headers['If-None-Match'] = cached_etag
+                logger.debug(f"Using cached ETag for request: {cached_etag[:20]}...")
+            else:
+                logger.debug(f"No ETag cache found for URL: {url}")
+
         try:
-            r = self._get(self._get_features_url(api_host, client_key))
+            r = self._get(url, headers)
+
+            # Handle 304 Not Modified - content hasn't changed
+            if r.status == 304:
+                logger.debug(f"ETag match! Server returned 304 Not Modified - using cached data (saved bandwidth)")
+                if cached_data is not None:
+                    logger.debug(f"Returning cached response ({len(str(cached_data))} bytes)")
+                    return cached_data
+                else:
+                    logger.warning("Received 304 but no cached data available")
+                    return None
+
             if r.status >= 400:
                 logger.warning(
                     "Failed to fetch features, received status code %d", r.status
                 )
                 return None
+
             decoded = json.loads(r.data.decode("utf-8"))
-            return decoded
-        except Exception:
-            logger.warning("Failed to decode feature JSON from GrowthBook API")
+
+            # Store the new ETag if present
+            response_etag = r.headers.get('ETag')
+            if response_etag:
+                with self._etag_lock:
+                    self._etag_cache[url] = (response_etag, decoded)
+                    # Enforce max size
+                    if len(self._etag_cache) > self._max_etag_entries:
+                        self._etag_cache.popitem(last=False)
+
+                    if cached_etag:
+                        logger.debug(f"ETag updated: {cached_etag[:20]}... -> {response_etag[:20]}...")
+                    else:
+                        logger.debug(f"New ETag cached: {response_etag[:20]}... ({len(str(decoded))} bytes)")
+                    logger.debug(f"ETag cache now contains {len(self._etag_cache)} entries")
+            else:
+                logger.debug("No ETag header in response")
+
+            return decoded  # type: ignore[no-any-return]
+        except Exception as e:
+            logger.warning(f"Failed to decode feature JSON from GrowthBook API: {e}")
             return None
 
     async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
+        url = self._get_features_url(api_host, client_key)
+        headers: Dict[str, str] = {}
+
+        # Check if we have a cached ETag for this URL
+        cached_etag = None
+        cached_data = None
+        with self._etag_lock:
+            if url in self._etag_cache:
+                # Move to end (mark as recently used)
+                self._etag_cache.move_to_end(url)
+                cached_etag, cached_data = self._etag_cache[url]
+                headers['If-None-Match'] = cached_etag
+                logger.debug(f"[Async] Using cached ETag for request: {cached_etag[:20]}...")
+            else:
+                logger.debug(f"[Async] No ETag cache found for URL: {url}")
+
         try:
-            url = self._get_features_url(api_host, client_key)
             async with aiohttp.ClientSession() as session:
-                async with session.get(url) as response:
+                async with session.get(url, headers=headers) as response:
+                    # Handle 304 Not Modified - content hasn't changed
+                    if response.status == 304:
+                        logger.debug(f"[Async] ETag match! Server returned 304 Not Modified - using cached data (saved bandwidth)")
+                        if cached_data is not None:
+                            logger.debug(f"[Async] Returning cached response ({len(str(cached_data))} bytes)")
+                            return cached_data
+                        else:
+                            logger.warning("[Async] Received 304 but no cached data available")
+                            return None
+
                     if response.status >= 400:
                         logger.warning("Failed to fetch features, received status code %d", response.status)
                         return None
+
                     decoded = await response.json()
-                    return decoded
+
+                    # Store the new ETag if present
+                    response_etag = response.headers.get('ETag')
+                    if response_etag:
+                        with self._etag_lock:
+                            self._etag_cache[url] = (response_etag, decoded)
+                            # Enforce max size
+                            if len(self._etag_cache) > self._max_etag_entries:
+                                self._etag_cache.popitem(last=False)
+
+                            if cached_etag:
+                                logger.debug(f"[Async] ETag updated: {cached_etag[:20]}... -> {response_etag[:20]}...")
+                            else:
+                                logger.debug(f"[Async] New ETag cached: {response_etag[:20]}... ({len(str(decoded))} bytes)")
+                            logger.debug(f"[Async] ETag cache now contains {len(self._etag_cache)} entries")
+                    else:
+                        logger.debug("[Async] No ETag header in response")
+
+                    return decoded  # type: ignore[no-any-return]
         except aiohttp.ClientError as e:
             logger.warning(f"HTTP request failed: {e}")
             return None
@@ -528,7 +632,7 @@ class FeatureRepository(object):
 
         data = self.decrypt_response(decoded, decryption_key)
 
-        return data
+        return data  # type: ignore[no-any-return]
 
     async def _fetch_features_async(
         self, api_host: str, client_key: str, decryption_key: str = "", remote_eval: bool = False,
@@ -547,7 +651,7 @@ class FeatureRepository(object):
 
         data = self.decrypt_response(decoded, decryption_key)
 
-        return data
+        return data  # type: ignore[no-any-return]
 
 
     def startAutoRefresh(self, api_host, client_key, cb, streaming_timeout=30):
@@ -561,6 +665,56 @@ class FeatureRepository(object):
         if self.sse_client:
             self.sse_client.disconnect(timeout=timeout)
             self.sse_client = None
+
+    def start_background_refresh(self, api_host: str, client_key: str, decryption_key: str, ttl: int = 600, refresh_interval: int = 300) -> None:
+        """Start periodic background refresh task"""
+
+        if not client_key:
+            raise ValueError("Must specify `client_key` to refresh features")
+
+        with self._refresh_lock:
+            if self._refresh_thread is not None:
+                return  # Already running
+
+            self._refresh_stop_event.clear()
+            self._refresh_thread = threading.Thread(
+                target=self._background_refresh_worker,
+                args=(api_host, client_key, decryption_key, ttl, refresh_interval),
+                daemon=True
+            )
+            self._refresh_thread.start()
+            logger.debug("Started background refresh task")
+
+    def _background_refresh_worker(self, api_host: str, client_key: str, decryption_key: str, ttl: int, refresh_interval: int) -> None:
+        """Worker method for periodic background refresh"""
+        while not self._refresh_stop_event.is_set():
+            try:
+                # Wait for the refresh interval or stop event
+                if self._refresh_stop_event.wait(refresh_interval):
+                    break  # Stop event was set
+
+                logger.debug("Background refresh for Features - started")
+                res = self._fetch_features(api_host, client_key, decryption_key)
+                if res is not None:
+                    cache_key = api_host + "::" + client_key
+                    self.cache.set(cache_key, res, ttl)
+                    logger.debug("Background refresh completed")
+                    # Notify callbacks about fresh features
+                    self._notify_feature_update_callbacks(res)
+                else:
+                    logger.warning("Background refresh failed")
+            except Exception as e:
+                logger.warning(f"Background refresh error: {e}")
+
+    def stop_background_refresh(self) -> None:
+        """Stop background refresh task"""
+        self._refresh_stop_event.set()
+
+        with self._refresh_lock:
+            if self._refresh_thread is not None:
+                self._refresh_thread.join(timeout=1.0)  # Wait up to 1 second
+                self._refresh_thread = None
+                logger.debug("Stopped background refresh task")
 
     @staticmethod
     def _get_features_url(api_host: str, client_key: str, remote_eval: bool = False) -> str:
@@ -581,17 +735,21 @@ class GrowthBook(object):
         features: dict = {},
         qa_mode: bool = False,
         on_experiment_viewed=None,
+        on_feature_usage=None,
         api_host: str = "",
         client_key: str = "",
         decryption_key: str = "",
         cache_ttl: int = 600,
-        forced_variations: dict = {},
-        sticky_bucket_service: AbstractStickyBucketService = None,
-        sticky_bucket_identifier_attributes: List[str] = None,
-        savedGroups: dict = {},
+        forced_variations: Optional[Dict[str, Any]] = None,
+        sticky_bucket_service: Optional[AbstractStickyBucketService] = None,
+        sticky_bucket_identifier_attributes: Optional[List[str]] = None,
+        savedGroups: Optional[Dict[str, Any]] = None,
         streaming: bool = False,
         streaming_connection_timeout: int = 30,
-        plugins: List = None,
+        stale_while_revalidate: bool = False,
+        stale_ttl: int = 300,  # 5 minutes default
+        plugins: Optional[List[Any]] = None,
+        skip_all_experiments: bool = False,
         # Deprecated args
         trackingCallback=None,
         qaMode: bool = False,
@@ -606,7 +764,7 @@ class GrowthBook(object):
         self._attributes = attributes
         self._url = url
         self._features: Dict[str, Feature] = {}
-        self._saved_groups = savedGroups
+        self._saved_groups = savedGroups if savedGroups is not None else {}
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
@@ -619,23 +777,28 @@ class GrowthBook(object):
 
         self._qaMode = qa_mode or qaMode
         self._trackingCallback = on_experiment_viewed or trackingCallback
+        self._featureUsageCallback = on_feature_usage
+        self._skip_all_experiments = skip_all_experiments
 
         self._streaming = streaming
         self._streaming_timeout = streaming_connection_timeout
+        self._stale_while_revalidate = stale_while_revalidate
+        self._stale_ttl = stale_ttl
 
         # Deprecated args
         self._user = user
         self._groups = groups
         self._overrides = overrides
-        self._forcedVariations = forced_variations or forcedVariations
+        self._forcedVariations = (forced_variations if forced_variations is not None else forcedVariations) if forced_variations is not None or forcedVariations else {}
 
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Any] = set()
+        self._is_updating_features = False
 
         # support plugins
-        self._plugins: List = plugins or []
-        self._initialized_plugins: List = []
+        self._plugins: List[Any] = plugins if plugins is not None else []
+        self._initialized_plugins: List[Any] = []
 
         self._remoteEval = remoteEval
         self._payload = payload
@@ -662,7 +825,8 @@ class GrowthBook(object):
             groups=self._groups,
             forced_variations=self._forcedVariations,
             overrides=self._overrides,
-            sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs
+            sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs,
+            skip_all_experiments=self._skip_all_experiments
         )
 
         if features:
@@ -677,6 +841,13 @@ class GrowthBook(object):
         if self._streaming:
             self.load_features()
             self.startAutoRefresh()
+        elif self._stale_while_revalidate:
+            # Start background refresh task for stale-while-revalidate
+            self.load_features()  # Initial load
+            feature_repo.start_background_refresh(
+                self._api_host, self._client_key, self._decryption_key,
+                self._cache_ttl, self._stale_ttl
+            )
 
     def _on_feature_update(self, features_data: Dict) -> None:
         """Callback to handle automatic feature updates from FeatureRepository"""
@@ -686,7 +857,6 @@ class GrowthBook(object):
             self._saved_groups = features_data["savedGroups"]
 
     def load_features(self) -> None:
-
         response = feature_repo.load_features(
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl, self._remoteEval, self._payload
         )
@@ -755,34 +925,39 @@ class GrowthBook(object):
         except Exception as e:
             logger.warning(f"Error stopping auto refresh: {e}")
 
-    # @deprecated, use set_features
     def setFeatures(self, features: dict) -> None:
+        warnings.warn("setFeatures is deprecated, use set_features instead", DeprecationWarning)
         return self.set_features(features)
 
     def set_features(self, features: dict) -> None:
-        self._features = {}
-        for key, feature in features.items():
-            if isinstance(feature, Feature):
-                self._features[key] = feature
-            else:
-                self._features[key] = Feature(
-                    rules=feature.get("rules", []),
-                    defaultValue=feature.get("defaultValue", None),
-                )
-        # Update the global context with the new features and saved groups
-        self._global_ctx.features = self._features
-        self._global_ctx.saved_groups = self._saved_groups
-        self.refresh_sticky_buckets()
+        # Prevent infinite recursion during feature updates
+        self._is_updating_features = True
+        try:
+            self._features = {}
+            for key, feature in features.items():
+                if isinstance(feature, Feature):
+                    self._features[key] = feature
+                else:
+                    self._features[key] = Feature(
+                        rules=feature.get("rules", []),
+                        defaultValue=feature.get("defaultValue", None),
+                    )
+            # Update the global context with the new features and saved groups
+            self._global_ctx.features = self._features
+            self._global_ctx.saved_groups = self._saved_groups
+            self.refresh_sticky_buckets()
+        finally:
+            self._is_updating_features = False
 
-    # @deprecated, use get_features
     def getFeatures(self) -> Dict[str, Feature]:
+        warnings.warn("getFeatures is deprecated, use get_features instead", DeprecationWarning)
         return self.get_features()
 
     def get_features(self) -> Dict[str, Feature]:
         return self._features
 
-    # @deprecated, use set_attributes
     def setAttributes(self, attributes: dict) -> None:
+        warnings.warn("setAttributes is deprecated, use set_attributes instead", DeprecationWarning)
         return self.set_attributes(attributes)
 
     def set_attributes(self, attributes: dict) -> None:
@@ -794,6 +969,7 @@ class GrowthBook(object):
 
     # @deprecated, use get_attributes
     def getAttributes(self) -> dict:
+        warnings.warn("getAttributes is deprecated, use get_attributes instead", DeprecationWarning)
         return self.get_attributes()
 
     def get_attributes(self) -> dict:
@@ -816,6 +992,14 @@ class GrowthBook(object):
         except Exception as e:
             logger.warning(f"Error stopping auto refresh during destroy: {e}")
 
+
+        try:
+            # Stop background refresh operations
+            if self._stale_while_revalidate and self._client_key:
+                feature_repo.stop_background_refresh()
+        except Exception as e:
+            logger.warning(f"Error stopping background refresh during destroy: {e}")
+
         try:
             # Clean up feature update callback
             if self._client_key:
@@ -829,6 +1013,7 @@ class GrowthBook(object):
             self._tracked.clear()
             self._assigned.clear()
             self._trackingCallback = None
+            self._featureUsageCallback = None
             self._forcedVariations.clear()
             self._overrides.clear()
             self._groups.clear()
@@ -838,37 +1023,41 @@ class GrowthBook(object):
         except Exception as e:
             logger.warning(f"Error clearing internal state: {e}")
 
-    # @deprecated, use is_on
     def isOn(self, key: str) -> bool:
+        warnings.warn("isOn is deprecated, use is_on instead", DeprecationWarning)
         return self.is_on(key)
 
     def is_on(self, key: str) -> bool:
-        return self.evalFeature(key).on
+        return self.eval_feature(key).on
 
-    # @deprecated, use is_off
     def isOff(self, key: str) -> bool:
+        warnings.warn("isOff is deprecated, use is_off instead", DeprecationWarning)
         return self.is_off(key)
 
     def is_off(self, key: str) -> bool:
-        return self.evalFeature(key).off
+        return self.eval_feature(key).off
 
-    # @deprecated, use get_feature_value
     def getFeatureValue(self, key: str, fallback):
+        warnings.warn("getFeatureValue is deprecated, use get_feature_value instead", DeprecationWarning)
         return self.get_feature_value(key, fallback)
 
     def get_feature_value(self, key: str, fallback):
         res = self.eval_feature(key)
         return res.value if res.value is not None else fallback
 
-    # @deprecated, use eval_feature
     def evalFeature(self, key: str) -> FeatureResult:
+        warnings.warn("evalFeature is deprecated, use eval_feature instead", DeprecationWarning)
         return self.eval_feature(key)
 
     def _ensure_fresh_features(self) -> None:
         """Lazy refresh: Check cache expiry and refresh if needed, but only if client_key is provided"""
 
-        if self._streaming or not self._client_key:
-            return  # Skip cache checks - SSE handles freshness for streaming users
+        # Prevent infinite recursion when updating features (e.g., during sticky bucket refresh)
+        if self._is_updating_features:
+            return
+
+        if self._streaming or self._stale_while_revalidate or not self._client_key:
+            return  # Skip cache checks - SSE or background refresh handles freshness
 
         try:
             self.load_features()
@@ -892,38 +1081,43 @@ class GrowthBook(object):
         )
 
     def eval_feature(self, key: str) -> FeatureResult:
-        return core_eval_feature(key=key,
-                                 evalContext=self._get_eval_context(),
-                                 callback_subscription=self._fireSubscriptions,
-                                 tracking_cb=self._track
-                                 )
+        result = core_eval_feature(key=key,
+                                   evalContext=self._get_eval_context(),
+                                   callback_subscription=self._fireSubscriptions,
+                                   tracking_cb=self._track
+                                   )
+        # Call feature usage callback if provided
+        if self._featureUsageCallback:
+            try:
+                self._featureUsageCallback(key, result, self._user_ctx)
+            except Exception:
+                pass
+        return result
 
-    # @deprecated, use get_all_results
     def getAllResults(self):
+        warnings.warn("getAllResults is deprecated, use get_all_results instead", DeprecationWarning)
         return self.get_all_results()
 
     def get_all_results(self):
         return self._assigned.copy()
 
     def _fireSubscriptions(self, experiment: Experiment, result: Result):
-        if experiment is None:
-            return
-
-        prev = self._assigned.get(experiment.key, None)
-        if (
-            not prev
-            or prev["result"].inExperiment != result.inExperiment
-            or prev["result"].variationId != result.variationId
-        ):
-            self._assigned[experiment.key] = {
-                "experiment": experiment,
-                "result": result,
-            }
-            for cb in self._subscriptions:
-                try:
-                    cb(experiment, result)
-                except Exception:
-                    pass
+        if experiment is not None:
+            prev = self._assigned.get(experiment.key, None)
+            if (
+                not prev
+                or prev["result"].inExperiment != result.inExperiment
+                or prev["result"].variationId != result.variationId
+            ):
+                self._assigned[experiment.key] = {
+                    "experiment": experiment,
+                    "result": result,
+                }
+                for cb in self._subscriptions:
+                    try:
+                        cb(experiment, result)
+                    except Exception:
+                        pass
 
     def run(self, experiment: Experiment) -> Result:
         # result = self._run(experiment)
@@ -952,9 +1146,8 @@ class GrowthBook(object):
             try:
                 self._trackingCallback(experiment=experiment, result=result, user_context=user_context)
                 self._tracked[key] = True
-            except Exception:
-                pass
-        return None
+            except Exception as e:
+                logger.exception(e)
 
     def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
         attributes = set()

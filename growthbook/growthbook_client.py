@@ -81,7 +81,7 @@ class WeakRefWrapper:
 class FeatureCache:
     """Thread-safe feature cache"""
     def __init__(self):
-        self._cache = {
+        self._cache: Dict[str, Dict[str, Any]] = {
             'features': {},
             'savedGroups': {}
         }
@@ -114,7 +114,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._backoff = BackoffStrategy()
         self._feature_cache = FeatureCache()
         self._callbacks: List[Callable[[Dict[str, Any]], Awaitable[None]]] = []
-        self._last_successful_refresh = None
+        self._last_successful_refresh: Optional[datetime] = None
         self._refresh_in_progress = asyncio.Lock()
 
     @asynccontextmanager
@@ -390,7 +390,6 @@ class GrowthBookClient:
     async def set_features(self, features: dict) -> None:
         await self._feature_update_callback({"features": features})
 
-
     async def _refresh_sticky_buckets(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
         """Refresh sticky bucket assignments only if attributes have changed"""
         if not self.options.sticky_bucket_service:
@@ -525,6 +524,12 @@ class GrowthBookClient:
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
             result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
+            # Call feature usage callback if provided
+            if self.options.on_feature_usage:
+                try:
+                    self.options.on_feature_usage(key, result, user_context)
+                except Exception:
+                    logger.exception("Error in feature usage callback")
             return result
 
     async def is_on(self, key: str, user_context: UserContext) -> bool:
@@ -533,16 +538,38 @@ class GrowthBookClient:
             context = await self.create_evaluation_context(user_context)
             return core_eval_feature(key=key, evalContext=context, tracking_cb=self._track).on
 
+            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
+            # Call feature usage callback if provided
+            if self.options.on_feature_usage:
+                try:
+                    self.options.on_feature_usage(key, result, user_context)
+                except Exception:
+                    logger.exception("Error in feature usage callback")
+            return result.on
+
     async def is_off(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is set to off with proper async context management"""
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
-            return core_eval_feature(key=key, evalContext=context, tracking_cb=self._track).off
+            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
+            # Call feature usage callback if provided
+            if self.options.on_feature_usage:
+                try:
+                    self.options.on_feature_usage(key, result, user_context)
+                except Exception:
+                    logger.exception("Error in feature usage callback")
+            return result.off
 
     async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext) -> Any:
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
             result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
+            # Call feature usage callback if provided
+            if self.options.on_feature_usage:
+                try:
+                    self.options.on_feature_usage(key, result, user_context)
+                except Exception:
+                    logger.exception("Error in feature usage callback")
             return result.value if result.value is not None else fallback
 
     async def run(self, experiment: Experiment, user_context: UserContext) -> Result:
