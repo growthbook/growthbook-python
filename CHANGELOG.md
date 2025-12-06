@@ -1,5 +1,12 @@
 # Changelog
 
+## [1.4.9](https://github.com/growthbook/growthbook-python/compare/v1.4.8...v1.4.9) (2025-12-06)
+
+
+### Bug Fixes
+
+* Add gzip encoding header to features call - Merge pull request [#83](https://github.com/growthbook/growthbook-python/issues/83) from growthbook/feat/etag-cache ([82bdee2](https://github.com/growthbook/growthbook-python/commit/82bdee29663b07e2733a841536634ca680e9b276))
+
 ## [1.4.8](https://github.com/growthbook/growthbook-python/compare/v1.4.7...v1.4.8) (2025-12-03)
 
 
