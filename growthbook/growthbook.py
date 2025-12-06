@@ -139,7 +139,7 @@ class SSEClient:
         self.headers = {
             "Accept": "application/json; q=0.5, text/event-stream",
             "Cache-Control": "no-cache",
-            "Accept-Encoding": "gzip",
+            "Accept-Encoding": "gzip, deflate, br",
         }
 
         if headers:
