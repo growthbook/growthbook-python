@@ -47,7 +47,6 @@ from .core import _getHashValue, eval_feature as core_eval_feature, run_experime
 
 logger = logging.getLogger("growthbook")
 
-
 def decrypt(encrypted_str: str, key_str: str) -> str:
     iv_str, ct_str = encrypted_str.split(".", 2)
 
@@ -159,6 +158,7 @@ class SSEClient:
         self.headers = {
             "Accept": "application/json; q=0.5, text/event-stream",
             "Cache-Control": "no-cache",
+            "Accept-Encoding": "gzip, deflate, br",
         }
 
         if headers:
@@ -454,6 +454,7 @@ class FeatureRepository(object):
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
         headers: Dict[str, str] = {}
+        headers['Accept-Encoding'] = "gzip, deflate, br"
 
         # Check if we have a cached ETag for this URL
         cached_etag = None
@@ -514,6 +515,7 @@ class FeatureRepository(object):
     async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
         headers: Dict[str, str] = {}
+        headers['Accept-Encoding'] = "gzip, deflate, br"
 
         # Check if we have a cached ETag for this URL
         cached_etag = None
@@ -701,7 +703,6 @@ class FeatureRepository(object):
 
 # Singleton instance
 feature_repo = FeatureRepository()
-
 
 class GrowthBook(object):
     def __init__(
