@@ -54,7 +54,7 @@ def decrypt(encrypted_str: str, key_str: str) -> str:
     iv = b64decode(iv_str)
     ct = b64decode(ct_str)
 
-    cipher = Cipher(algorithms.AES(key), modes.CBC(iv))
+    cipher = Cipher(algorithms.AES128(key), modes.CBC(iv))
     decryptor = cipher.decryptor()
 
     decrypted = decryptor.update(ct) + decryptor.finalize()
@@ -140,6 +140,7 @@ class SSEClient:
         self.headers = {
             "Accept": "application/json; q=0.5, text/event-stream",
             "Cache-Control": "no-cache",
+            "Accept-Encoding": "gzip, deflate, br",
         }
 
         if headers:
@@ -444,6 +445,7 @@ class FeatureRepository(object):
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
         headers: Dict[str, str] = {}
+        headers['Accept-Encoding'] = "gzip, deflate, br"
 
         # Check if we have a cached ETag for this URL
         cached_etag = None
@@ -504,6 +506,7 @@ class FeatureRepository(object):
     async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
         headers: Dict[str, str] = {}
+        headers['Accept-Encoding'] = "gzip, deflate, br"
 
         # Check if we have a cached ETag for this URL
         cached_etag = None
@@ -993,7 +996,6 @@ class GrowthBook(object):
             self.stopAutoRefresh(timeout=timeout)
         except Exception as e:
             logger.warning(f"Error stopping auto refresh during destroy: {e}")
-
 
         try:
             # Stop background refresh operations
