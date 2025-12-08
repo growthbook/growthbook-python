@@ -422,7 +422,7 @@ class FeatureRepository(object):
 
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
-        headers: Dict[str, str] = {}
+        headers: Dict[str, str] = {'User-Agent': f'GrowthBook-Python-SDK/{__version__}'}
 
         # Check if we have a cached ETag for this URL
         cached_etag = None
@@ -482,7 +482,7 @@ class FeatureRepository(object):
 
     async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
-        headers: Dict[str, str] = {}
+        headers: Dict[str, str] = {'User-Agent': f'GrowthBook-Python-SDK/{__version__}'}
 
         # Check if we have a cached ETag for this URL
         cached_etag = None
