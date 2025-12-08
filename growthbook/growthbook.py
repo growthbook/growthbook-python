@@ -419,7 +419,6 @@ class LayeredFeatureCache(AbstractFeatureCache):
     def __init__(self, primary_cache: AbstractFeatureCache, secondary_cache: AbstractPersistentFeatureCache):
         self._primary_cache = primary_cache
         self._secondary_cache = secondary_cache
-        self._secondary_cache.load()
         self._sync_caches_on_init()
 
     def _sync_caches_on_init(self):
