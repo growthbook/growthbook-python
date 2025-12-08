@@ -7,6 +7,11 @@ from .growthbook_client import (
     BackoffStrategy
 )
 
+from .cache_interfaces import (
+    AbstractFeatureCache,
+    AbstractAsyncFeatureCache
+)
+
 # Plugin support
 from .plugins import (
     GrowthBookTrackingPlugin,
