@@ -536,7 +536,6 @@ class GrowthBookClient:
         """Check if a feature is enabled with proper async context management"""
         async with self._context_lock:
             context = await self.create_evaluation_context(user_context)
-            return core_eval_feature(key=key, evalContext=context, tracking_cb=self._track).on
 
             result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             # Call feature usage callback if provided

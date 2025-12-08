@@ -1224,7 +1224,7 @@ def test_stale_while_revalidate_basic_functionality(mocker):
     ]
 
     call_count = 0
-    def mock_fetch_features(api_host, client_key, decryption_key=""):
+    def mock_fetch_features(api_host, client_key, decryption_key="", remoteEval = False, payload = None):
         nonlocal call_count
         response = mock_responses[min(call_count, len(mock_responses) - 1)]
         call_count += 1
@@ -1268,7 +1268,7 @@ def test_stale_while_revalidate_starts_background_task(mocker):
     mock_response = {"features": {"test_feature": {"defaultValue": "fresh"}}, "savedGroups": {}}
 
     call_count = 0
-    def mock_fetch_features(api_host, client_key, decryption_key=""):
+    def mock_fetch_features(api_host, client_key, decryption_key="", remoteEval = False, payload = None):
         nonlocal call_count
         call_count += 1
         return mock_response
@@ -1303,7 +1303,7 @@ def test_stale_while_revalidate_disabled_fallback(mocker):
     mock_response = {"features": {"test_feature": {"defaultValue": "normal"}}, "savedGroups": {}}
 
     call_count = 0
-    def mock_fetch_features(api_host, client_key, decryption_key=""):
+    def mock_fetch_features(api_host, client_key, decryption_key="", remoteEval = False, payload = None):
         nonlocal call_count
         call_count += 1
         return mock_response
