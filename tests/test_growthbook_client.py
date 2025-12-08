@@ -769,3 +769,204 @@ async def test_handles_tracking_errors():
 
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_feature_usage_callback():
+    """Test that feature usage callback is called correctly"""
+    calls = []
+    
+    def feature_usage_cb(key, result, user_context):
+        calls.append([key, result, user_context])
+    
+    client = GrowthBookClient(Options(
+        api_host="https://localhost.growthbook.io",
+        client_key="test-key",
+        enabled=True,
+        on_feature_usage=feature_usage_cb
+    ))
+    
+    user_context = UserContext(attributes={"id": "1"})
+    
+    try:
+        # Set up mocks for feature repository
+        mock_features = {
+            "features": {
+                "feature-1": {"defaultValue": True},
+                "feature-2": {"defaultValue": False},
+                "feature-3": {
+                    "defaultValue": "blue",
+                    "rules": [
+                        {"force": "red", "condition": {"id": "1"}}
+                    ]
+                },
+            },
+            "savedGroups": {}
+        }
+        
+        with patch('growthbook.FeatureRepository.load_features_async', 
+                  new_callable=AsyncMock, return_value=mock_features), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+                  new_callable=AsyncMock), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+                  new_callable=AsyncMock):
+            
+            # Initialize client
+            await client.initialize()
+            
+            # Test eval_feature
+            result1 = await client.eval_feature("feature-1", user_context)
+            assert len(calls) == 1
+            assert calls[0][0] == "feature-1"
+            assert calls[0][1].value is True
+            assert calls[0][1].source == "defaultValue"
+            assert calls[0][2].attributes == {"id": "1"}
+            
+            # Test is_on
+            await client.is_on("feature-2", user_context)
+            assert len(calls) == 2
+            assert calls[1][0] == "feature-2"
+            assert calls[1][1].value is False
+            assert calls[1][2].attributes == {"id": "1"}
+            
+            # Test get_feature_value
+            value = await client.get_feature_value("feature-3", "blue", user_context)
+            assert len(calls) == 3
+            assert calls[2][0] == "feature-3"
+            assert calls[2][1].value == "red"
+            assert value == "red"
+            assert calls[2][2].attributes == {"id": "1"}
+            
+            # Test is_off
+            await client.is_off("feature-1", user_context)
+            assert len(calls) == 4
+            assert calls[3][0] == "feature-1"
+            assert calls[3][2].attributes == {"id": "1"}
+            
+            # Calling same feature multiple times should trigger callback each time
+            await client.eval_feature("feature-1", user_context)
+            await client.eval_feature("feature-1", user_context)
+            assert len(calls) == 6
+            
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_feature_usage_callback_error_handling():
+    """Test that feature usage callback errors are handled gracefully"""
+    
+    def failing_callback(key, result, user_context):
+        raise Exception("Callback error")
+    
+    client = GrowthBookClient(Options(
+        api_host="https://localhost.growthbook.io",
+        client_key="test-key",
+        enabled=True,
+        on_feature_usage=failing_callback
+    ))
+    
+    user_context = UserContext(attributes={"id": "1"})
+    
+    try:
+        # Set up mocks for feature repository
+        mock_features = {
+            "features": {
+                "feature-1": {"defaultValue": True},
+            },
+            "savedGroups": {}
+        }
+        
+        with patch('growthbook.FeatureRepository.load_features_async', 
+                  new_callable=AsyncMock, return_value=mock_features), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+                  new_callable=AsyncMock), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+                  new_callable=AsyncMock):
+            
+            # Initialize client
+            await client.initialize()
+            
+            # Should not raise an error even if callback fails
+            result = await client.eval_feature("feature-1", user_context)
+            assert result.value is True
+            
+            # Should work with is_on as well
+            is_on = await client.is_on("feature-1", user_context)
+            assert is_on is True
+            
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_skip_all_experiments_flag():
+    """Test that skip_all_experiments flag prevents users from being put into experiments"""
+    
+    client = GrowthBookClient(Options(
+        api_host="https://localhost.growthbook.io",
+        client_key="test-key",
+        enabled=True
+    ))
+    
+    # User context WITH skip_all_experiments=True
+    user_context_skip = UserContext(
+        attributes={"id": "1"},
+        skip_all_experiments=True
+    )
+    
+    # User context WITHOUT skip_all_experiments (normal behavior)
+    user_context_normal = UserContext(
+        attributes={"id": "1"},
+        skip_all_experiments=False
+    )
+    
+    try:
+        # Set up mocks for feature repository
+        mock_features = {
+            "features": {
+                "feature-with-experiment": {
+                    "defaultValue": "control",
+                    "rules": [
+                        {
+                            "key": "exp-123",
+                            "variations": ["control", "variation"],
+                            "weights": [0.5, 0.5]
+                        }
+                    ]
+                }
+            },
+            "savedGroups": {}
+        }
+        
+        with patch('growthbook.FeatureRepository.load_features_async', 
+                  new_callable=AsyncMock, return_value=mock_features), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+                  new_callable=AsyncMock), \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+                  new_callable=AsyncMock):
+            
+            # Initialize client
+            await client.initialize()
+            
+            # Test with skip_all_experiments=True
+            result_skip = await client.eval_feature("feature-with-experiment", user_context_skip)
+            assert result_skip.value == "control"  # Should get default value
+            assert result_skip.source == "defaultValue"
+            assert result_skip.experiment is None
+            assert result_skip.experimentResult is None
+            
+            # Test direct experiment run with skip_all_experiments=True
+            exp = Experiment(key="direct-exp", variations=["a", "b"])
+            exp_result_skip = await client.run(exp, user_context_skip)
+            assert exp_result_skip.inExperiment is False
+            assert exp_result_skip.value == "a"  # Should get first variation
+            
+            # Test with skip_all_experiments=False (normal)
+            result_normal = await client.eval_feature("feature-with-experiment", user_context_normal)
+            # User should be assigned to a variation
+            assert result_normal.value in ["control", "variation"]
+            assert result_normal.source == "experiment"
+            
+    finally:
+        await client.close()

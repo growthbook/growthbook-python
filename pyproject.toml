@@ -5,6 +5,33 @@ asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = "."
 
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false  # Set to false initially, will enable gradually
+disallow_incomplete_defs = false
+check_untyped_defs = true
+disallow_untyped_decorators = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+strict_equality = true
+show_error_codes = true
+pretty = true
+
+# Per-module options
+[[tool.mypy.overrides]]
+module = "growthbook.*"
+disallow_untyped_defs = false  # Will enable after fixing all type hints
+
+[[tool.mypy.overrides]]
+module = "tests.*"
+disallow_untyped_defs = false
+check_untyped_defs = false
+
 [project]
 dynamic = ["version"]
 name = "growthbook"
@@ -37,6 +64,7 @@ classifiers = [
     "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
+    "Typing :: Typed",
 ]
 
 [build-system]
