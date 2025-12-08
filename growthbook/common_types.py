@@ -372,15 +372,6 @@ class FeatureRule(object):
             for t in tracks:
                 if isinstance(t, TrackData):
                     self.tracks.append(t)
-                else:
-                    self.tracks.append(
-                        TrackData(
-                            experiment=Experiment(**t["experiment"]) if isinstance(t.get("experiment"),
-                                                                                   dict) else t.get("experiment"),
-                            result=Result.from_dict(t["result"]) if isinstance(t.get("result"), dict) else t.get(
-                                "result")
-                        )
-                    )
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {}
