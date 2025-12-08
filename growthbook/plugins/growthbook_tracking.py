@@ -2,14 +2,16 @@ import json
 import logging
 import threading
 import time
-from typing import Dict, Any, Optional, List, Callable
+from typing import Dict, Any, Optional, List, Callable, TYPE_CHECKING
 from .base import GrowthBookPlugin
 
-requests: Any = None
-try:
+if TYPE_CHECKING:
     import requests
-except ImportError:
-    pass
+else:
+    try:
+        import requests  # type: ignore
+    except ImportError:
+        requests = None
 
 logger = logging.getLogger("growthbook.plugins.growthbook_tracking")
 
@@ -88,22 +90,43 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
         super().cleanup()
     
     def _setup_experiment_tracking(self, gb_instance) -> None:
-        """Setup experiment tracking."""
-        original_callback = getattr(gb_instance, '_trackingCallback', None)
+        """Setup experiment tracking for both legacy and async clients."""
         
-        def tracking_wrapper(experiment, result):
+        def tracking_wrapper(experiment, result, user_context=None):
             # Track to ingestor
             self._track_experiment_viewed(experiment, result)
             
             # Call additional callback
             if self.additional_callback:
-                self._safe_execute(self.additional_callback, experiment, result)
-            
-            # Call original callback
-            if original_callback:
-                self._safe_execute(original_callback, experiment, result)
+                self._safe_execute(self.additional_callback, experiment, result, user_context)
         
-        gb_instance._trackingCallback = tracking_wrapper
+        # Check if it's the legacy GrowthBook client (has _trackingCallback)
+        if hasattr(gb_instance, '_trackingCallback'):
+            # Legacy GrowthBook client
+            original_callback = getattr(gb_instance, '_trackingCallback', None)
+            
+            def legacy_wrapper(experiment, result, user_context=None):
+                tracking_wrapper(experiment, result, user_context)
+                # Call original callback
+                if original_callback:
+                    self._safe_execute(original_callback, experiment, result, user_context)
+            
+            gb_instance._trackingCallback = legacy_wrapper
+            
+        elif hasattr(gb_instance, 'options') and hasattr(gb_instance.options, 'on_experiment_viewed'):
+            # New GrowthBookClient (async)
+            original_callback = gb_instance.options.on_experiment_viewed
+            
+            def async_wrapper(experiment, result, user_context):
+                tracking_wrapper(experiment, result, user_context)
+                # Call original callback
+                if original_callback:
+                    self._safe_execute(original_callback, experiment, result, user_context)
+            
+            gb_instance.options.on_experiment_viewed = async_wrapper
+        
+        else:
+            self.logger.warning("_trackingCallback or on_experiment_viewed properties not found - tracking may not work properly")
     
     def _setup_feature_tracking(self, gb_instance):
         """Setup feature evaluation tracking."""

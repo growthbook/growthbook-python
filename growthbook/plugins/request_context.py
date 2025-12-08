@@ -77,6 +77,7 @@ class RequestContextPlugin(GrowthBookPlugin):
         self.client_side_attributes = client_side_attributes
         self.extract_utm = extract_utm
         self.extract_user_agent = extract_user_agent
+        self._extracted_attributes: Dict[str, Any] = {}
         
     def initialize(self, gb_instance) -> None:
         """Initialize plugin - extract attributes from request context."""
@@ -87,17 +88,32 @@ class RequestContextPlugin(GrowthBookPlugin):
             request_attributes = self._extract_all_attributes()
             
             if request_attributes:
-                # Merge with existing attributes (existing take precedence)
-                current_attributes = gb_instance.get_attributes()
-                merged_attributes = {**request_attributes, **current_attributes}
-                gb_instance.set_attributes(merged_attributes)
-                
-                self.logger.info(f"Extracted {len(request_attributes)} request attributes")
+                # Check client type and merge attributes accordingly
+                if hasattr(gb_instance, 'get_attributes') and hasattr(gb_instance, 'set_attributes'):
+                    # Legacy GrowthBook client
+                    current_attributes = gb_instance.get_attributes()
+                    merged_attributes = {**request_attributes, **current_attributes}
+                    gb_instance.set_attributes(merged_attributes)
+                    self.logger.info(f"Extracted {len(request_attributes)} request attributes for legacy client")
+                    
+                elif hasattr(gb_instance, 'options'):
+                    # New GrowthBookClient - store attributes for future use
+                    # Note: GrowthBookClient doesn't have get/set_attributes, but we can store
+                    # the extracted attributes for potential future use or logging
+                    self._extracted_attributes = request_attributes
+                    self.logger.info(f"Extracted {len(request_attributes)} request attributes for async client (stored for reference)")
+                    
+                else:
+                    self.logger.warning("Unknown client type - cannot set attributes")
             else:
                 self.logger.debug("No request context available")
                 
         except Exception as e:
             self.logger.error(f"Failed to extract request attributes: {e}")
+    
+    def get_extracted_attributes(self) -> Dict[str, Any]:
+        """Get the attributes extracted from request context."""
+        return self._extracted_attributes.copy()
     
     def _extract_all_attributes(self) -> Dict[str, Any]:
         """Extract all available attributes from request context."""
@@ -148,9 +164,10 @@ class RequestContextPlugin(GrowthBookPlugin):
         
         # 3. Try thread-local storage
         import threading
+        from typing import cast
         thread_local = getattr(threading.current_thread(), 'gb_request_context', None)
         if thread_local:
-            return thread_local
+            return cast(Dict[str, Any], thread_local)
         
         return None
     

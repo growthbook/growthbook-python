@@ -1,4 +1,5 @@
 import pytest
+import pytest_asyncio
 import asyncio
 import os
 import sys
@@ -22,7 +23,7 @@ def reset_singleton():
                 instance._stop_event.set()
         SingletonMeta._instances.clear()
 
-@pytest.fixture(autouse=True)
+@pytest_asyncio.fixture(autouse=True)
 async def cleanup_tasks():
     """Cleanup any pending tasks after each test."""
     yield

@@ -1,5 +1,76 @@
 # Changelog
 
+## [1.4.9](https://github.com/growthbook/growthbook-python/compare/v1.4.8...v1.4.9) (2025-12-06)
+
+
+### Enhancements
+
+* Add gzip encoding header to features call - Merge pull request [#83](https://github.com/growthbook/growthbook-python/issues/83) from growthbook/feat/etag-cache ([82bdee2](https://github.com/growthbook/growthbook-python/commit/82bdee29663b07e2733a841536634ca680e9b276))
+
+## [1.4.8](https://github.com/growthbook/growthbook-python/compare/v1.4.7...v1.4.8) (2025-12-03)
+
+
+### Features
+
+* Handle ETags natively for both sync & async clients - Merge pull request [#81](https://github.com/growthbook/growthbook-python/issues/81) from growthbook/feat/etag-cache ([95b06c3](https://github.com/growthbook/growthbook-python/commit/95b06c312428d7af1b81b2cbb29ddf6421f05ef7))
+
+## [1.4.7](https://github.com/growthbook/growthbook-python/compare/v1.4.6...v1.4.7) (2025-11-12)
+
+
+### Bug Fixes
+
+* Type checks & Other enhancements - Merge pull request [#77](https://github.com/growthbook/growthbook-python/issues/77) from growthbook/feat/enhancements ([ea1567a](https://github.com/growthbook/growthbook-python/commit/ea1567a97284d61587493dd1a15f3105d06a67bb))
+
+## [1.4.6](https://github.com/growthbook/growthbook-python/compare/v1.4.5...v1.4.6) (2025-10-27)
+
+
+### Bug Fixes
+
+* bug fixes and tracking enhancements ([6d3638b](https://github.com/growthbook/growthbook-python/commit/6d3638bf5e6c57c8882e4de35bc5e7ab5eafa5a5))
+* Bug fixes and tracking enhancements ([a9b34a6](https://github.com/growthbook/growthbook-python/commit/a9b34a655d818758d6d622fea83945abd4e079f7))
+
+## [1.4.5](https://github.com/growthbook/growthbook-python/compare/v1.4.4...v1.4.5) (2025-10-08)
+
+
+### Bug Fixes
+
+* Add FeatureUsageCallback ([83359a0](https://github.com/growthbook/growthbook-python/commit/83359a02cd00d645ba7c12d8ffea2a3ce6077411))
+
+## [1.4.4](https://github.com/growthbook/growthbook-python/compare/v1.4.3...v1.4.4) (2025-09-30)
+
+
+### Bug Fixes
+
+* Background Refresh task for Features ([bda8050](https://github.com/growthbook/growthbook-python/commit/bda8050c7c1b72cf4589fd64e9bca884dcbb629c))
+
+## [1.4.3](https://github.com/growthbook/growthbook-python/compare/v1.4.2...v1.4.3) (2025-09-19)
+
+
+### Bug Fixes
+
+* Fixes for graceful shutdown ([ab158ad](https://github.com/growthbook/growthbook-python/commit/ab158ad7a748bd7380c9ad0fda46cc91acc3b473))
+
+## [1.4.2](https://github.com/growthbook/growthbook-python/compare/v1.4.1...v1.4.2) (2025-09-12)
+
+
+### Bug Fixes
+
+* Keep the Socket open with a configurable connection timeout ([f4783fc](https://github.com/growthbook/growthbook-python/commit/f4783fc451fdf7544b764239e71d89895ba8096c))
+
+## [1.4.1](https://github.com/growthbook/growthbook-python/compare/v1.4.0...v1.4.1) (2025-09-12)
+
+
+### Bug Fixes
+
+* add timeout to SSE client ([ff6c2a7](https://github.com/growthbook/growthbook-python/commit/ff6c2a77269d691da984ef2e6b88405cf465caec))
+
+## [1.4.0](https://github.com/growthbook/growthbook-python/compare/v1.3.1...v1.4.0) (2025-09-09)
+
+
+### Features
+
+* Tracking Plugins Compatibility with Async & Sync Clients ([a54c06d](https://github.com/growthbook/growthbook-python/commit/a54c06d22726a3702bacbf895165ef5bff02061b))
+
 ## [1.3.1](https://github.com/growthbook/growthbook-python/compare/v1.3.0...v1.3.1) (2025-06-13)
 
 
