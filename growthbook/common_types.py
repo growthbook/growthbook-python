@@ -306,7 +306,7 @@ class Feature(object):
 @dataclass
 class TrackData:
     experiment: Experiment
-    result: FeatureResult
+    result: Result
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -377,7 +377,7 @@ class FeatureRule(object):
                         TrackData(
                             experiment=Experiment(**t["experiment"]) if isinstance(t.get("experiment"),
                                                                                    dict) else t.get("experiment"),
-                            result=FeatureResult.from_dict(t["result"]) if isinstance(t.get("result"), dict) else t.get(
+                            result=Result.from_dict(t["result"]) if isinstance(t.get("result"), dict) else t.get(
                                 "result")
                         )
                     )

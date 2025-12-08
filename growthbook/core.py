@@ -483,7 +483,7 @@ def eval_feature(
             if tracks and tracking_cb:
                 for track in tracks:
                     tracked_experiment = track.experiment
-                    tracked_experiment_result = track.result.experimentResult
+                    tracked_experiment_result = track.result
                     tracking_cb(tracked_experiment, tracked_experiment_result, evalContext.user)
 
             logger.debug("Force value from rule, feature %s", key)

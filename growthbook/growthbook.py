@@ -436,7 +436,7 @@ class FeatureRepository(object):
                 return None
 
             decoded = json.loads(r.data.decode("utf-8"))
-            return decoded
+            return decoded # type: ignore[no-any-return]
 
         except Exception as e:
             logger.warning("Failed to decode feature JSON from API: %s", e)
@@ -579,7 +579,7 @@ class FeatureRepository(object):
 
                     # aiohttp's .json() method decodes the JSON response
                     decoded = await response.json()
-                    return decoded
+                    return decoded # type: ignore[no-any-return]
 
         except aiohttp.ClientError as e:
             logger.warning(f"HTTP request failed: {e}")
