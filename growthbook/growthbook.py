@@ -771,7 +771,8 @@ class FeatureRepository(object):
                 res = self._fetch_features(api_host, client_key, decryption_key)
                 if res is not None:
                     cache_key = api_host + "::" + client_key
-                    self.cache.set(cache_key, res, ttl)
+                    self.feature_cache.set(cache_key, res, ttl)
+                    self.feature_cache.update_secondary_cache_from_primary()
                     logger.debug("Background refresh completed")
                     # Notify callbacks about fresh features
                     self._notify_feature_update_callbacks(res)

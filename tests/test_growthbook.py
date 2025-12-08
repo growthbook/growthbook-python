@@ -1337,8 +1337,11 @@ def test_stale_while_revalidate_disabled_fallback(mocker):
 
         # Manually expire the cache
         cache_key = "https://cdn.growthbook.io::test-key"
-        if hasattr(feature_repo.cache, 'cache') and cache_key in feature_repo.cache.cache:
-            feature_repo.cache.cache[cache_key].expires = time() - 10
+        if hasattr(feature_repo.feature_cache, '_primary_cache') and \
+            hasattr(feature_repo.feature_cache._primary_cache, '_cache') and \
+            cache_key in feature_repo.feature_cache._primary_cache._cache:
+            feature_repo.feature_cache._primary_cache._cache[cache_key].expires = (time() - 10)
+            feature_repo.feature_cache._secondary_cache._cache[cache_key].expires = (time() - 10)
 
         # Next evaluation should fetch synchronously (normal behavior)
         assert gb.get_feature_value('test_feature', 'default') == "normal"
