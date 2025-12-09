@@ -14,14 +14,14 @@ import warnings
 from abc import ABC, abstractmethod
 from typing import Optional, Any, Set, Tuple, List, Dict, Callable
 
-from .common_types import ( EvaluationContext, 
-    Experiment, 
-    FeatureResult, 
+from .common_types import ( EvaluationContext,
+    Experiment,
+    FeatureResult,
     Feature,
-    GlobalContext, 
-    Options, 
-    Result, StackContext, 
-    UserContext, 
+    GlobalContext,
+    Options,
+    Result, StackContext,
+    UserContext,
     AbstractStickyBucketService,
     FeatureRule
 )
@@ -158,7 +158,7 @@ class SSEClient:
         """Gracefully disconnect with timeout"""
         logger.debug("Initiating SSE client disconnect")
         self.is_running = False
-        
+
         if self._loop and self._loop.is_running():
             future = asyncio.run_coroutine_threadsafe(self._stop_session(timeout), self._loop)
             try:
@@ -189,11 +189,11 @@ class SSEClient:
 
     async def _init_session(self):
         url = self._get_sse_url(self.api_host, self.client_key)
-        
+
         try:
             while self.is_running:
                 try:
-                    async with aiohttp.ClientSession(headers=self.headers, 
+                    async with aiohttp.ClientSession(headers=self.headers,
                         timeout=aiohttp.ClientTimeout(connect=self.timeout)) as session:
                         self._sse_session = session
 
@@ -234,7 +234,7 @@ class SSEClient:
                 if not self.is_running:
                     logger.debug("SSE processing stopped - is_running is False")
                     break
-                    
+
                 decoded_line = line.decode('utf-8').strip()
                 if decoded_line.startswith("event:"):
                     event_data['type'] = decoded_line[len("event:"):].strip()
@@ -247,7 +247,7 @@ class SSEClient:
                         except Exception as e:
                             logger.warning(f"Error in event handler: {e}")
                     event_data = {}
-            
+
             # Process any remaining event data
             if 'type' in event_data and 'data' in event_data:
                 try:
@@ -276,7 +276,7 @@ class SSEClient:
 
     def _run_sse_channel(self):
         self._loop = asyncio.new_event_loop()
-        
+
         try:
             self._loop.run_until_complete(self._init_session())
         except asyncio.CancelledError:
@@ -288,7 +288,7 @@ class SSEClient:
     async def _stop_session(self, timeout=10):
         """Stop the SSE session and cancel all tasks with timeout"""
         logger.debug("Stopping SSE session")
-        
+
         # Close the session first
         if self._sse_session and not self._sse_session.closed:
             try:
@@ -301,15 +301,15 @@ class SSEClient:
         if self._loop and self._loop.is_running():
             try:
                 # Get all tasks for this specific loop
-                tasks = [task for task in asyncio.all_tasks(self._loop) 
+                tasks = [task for task in asyncio.all_tasks(self._loop)
                         if not task.done() and task is not asyncio.current_task(self._loop)]
-                
+
                 if tasks:
                     logger.debug(f"Cancelling {len(tasks)} SSE tasks")
                     # Cancel all tasks
                     for task in tasks:
                         task.cancel()
-                    
+
                     # Wait for tasks to complete with timeout
                     try:
                         await asyncio.wait_for(
@@ -334,12 +334,12 @@ class FeatureRepository(object):
         self.http: Optional[PoolManager] = None
         self.sse_client: Optional[SSEClient] = None
         self._feature_update_callbacks: List[Callable[[Dict], None]] = []
-        
+
         # Background refresh support
         self._refresh_thread: Optional[threading.Thread] = None
         self._refresh_stop_event = threading.Event()
         self._refresh_lock = threading.Lock()
-        
+
         # ETag cache for bandwidth optimization
         # Using OrderedDict for LRU cache (max 100 entries)
         self._etag_cache: OrderedDict[str, Tuple[str, Dict[str, Any]]] = OrderedDict()
@@ -379,7 +379,7 @@ class FeatureRepository(object):
     ) -> Optional[Dict]:
         if not client_key:
             raise ValueError("Must specify `client_key` to refresh features")
-        
+
         key = api_host + "::" + client_key
 
         cached = self.cache.get(key)
@@ -392,8 +392,7 @@ class FeatureRepository(object):
                 self._notify_feature_update_callbacks(res)
                 return res
         return cached
-    
-    
+
     async def load_features_async(
         self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 600
     ) -> Optional[Dict]:
@@ -419,7 +418,7 @@ class FeatureRepository(object):
         url = self._get_features_url(api_host, client_key)
         headers: Dict[str, str] = {}
         headers['Accept-Encoding'] = "gzip, deflate, br"
-        
+
         # Check if we have a cached ETag for this URL
         cached_etag = None
         cached_data = None
@@ -432,10 +431,10 @@ class FeatureRepository(object):
                 logger.debug(f"Using cached ETag for request: {cached_etag[:20]}...")
             else:
                 logger.debug(f"No ETag cache found for URL: {url}")
-        
+
         try:
             r = self._get(url, headers)
-            
+
             # Handle 304 Not Modified - content hasn't changed
             if r.status == 304:
                 logger.debug(f"ETag match! Server returned 304 Not Modified - using cached data (saved bandwidth)")
@@ -445,15 +444,15 @@ class FeatureRepository(object):
                 else:
                     logger.warning("Received 304 but no cached data available")
                     return None
-            
+
             if r.status >= 400:
                 logger.warning(
                     "Failed to fetch features, received status code %d", r.status
                 )
                 return None
-            
+
             decoded = json.loads(r.data.decode("utf-8"))
-            
+
             # Store the new ETag if present
             response_etag = r.headers.get('ETag')
             if response_etag:
@@ -462,7 +461,7 @@ class FeatureRepository(object):
                     # Enforce max size
                     if len(self._etag_cache) > self._max_etag_entries:
                         self._etag_cache.popitem(last=False)
-                        
+
                     if cached_etag:
                         logger.debug(f"ETag updated: {cached_etag[:20]}... -> {response_etag[:20]}...")
                     else:
@@ -470,17 +469,17 @@ class FeatureRepository(object):
                     logger.debug(f"ETag cache now contains {len(self._etag_cache)} entries")
             else:
                 logger.debug("No ETag header in response")
-            
+
             return decoded  # type: ignore[no-any-return]
         except Exception as e:
             logger.warning(f"Failed to decode feature JSON from GrowthBook API: {e}")
             return None
-        
+
     async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
         headers: Dict[str, str] = {}
         headers['Accept-Encoding'] = "gzip, deflate, br"
-        
+
         # Check if we have a cached ETag for this URL
         cached_etag = None
         cached_data = None
@@ -493,7 +492,7 @@ class FeatureRepository(object):
                 logger.debug(f"[Async] Using cached ETag for request: {cached_etag[:20]}...")
             else:
                 logger.debug(f"[Async] No ETag cache found for URL: {url}")
-        
+
         try:
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers=headers) as response:
@@ -506,13 +505,13 @@ class FeatureRepository(object):
                         else:
                             logger.warning("[Async] Received 304 but no cached data available")
                             return None
-                    
+
                     if response.status >= 400:
                         logger.warning("Failed to fetch features, received status code %d", response.status)
                         return None
-                    
+
                     decoded = await response.json()
-                    
+
                     # Store the new ETag if present
                     response_etag = response.headers.get('ETag')
                     if response_etag:
@@ -521,7 +520,7 @@ class FeatureRepository(object):
                             # Enforce max size
                             if len(self._etag_cache) > self._max_etag_entries:
                                 self._etag_cache.popitem(last=False)
-                                
+
                             if cached_etag:
                                 logger.debug(f"[Async] ETag updated: {cached_etag[:20]}... -> {response_etag[:20]}...")
                             else:
@@ -529,7 +528,7 @@ class FeatureRepository(object):
                             logger.debug(f"[Async] ETag cache now contains {len(self._etag_cache)} entries")
                     else:
                         logger.debug("[Async] No ETag header in response")
-                    
+
                     return decoded  # type: ignore[no-any-return]
         except aiohttp.ClientError as e:
             logger.warning(f"HTTP request failed: {e}")
@@ -537,7 +536,7 @@ class FeatureRepository(object):
         except Exception as e:
             logger.warning("Failed to decode feature JSON from GrowthBook API: %s", e)
             return None
-        
+
     def decrypt_response(self, data, decryption_key: str):
         if "encryptedFeatures" in data:
             if not decryption_key:
@@ -553,7 +552,7 @@ class FeatureRepository(object):
                 return None
         elif "features" not in data:
             logger.warning("GrowthBook API response missing features")
-        
+
         if "encryptedSavedGroups" in data:
             if not decryption_key:
                 raise ValueError("Must specify decryption_key")
@@ -566,7 +565,7 @@ class FeatureRepository(object):
                 logger.warning(
                     "Failed to decrypt saved groups from GrowthBook API response"
                 )
-            
+
         return data
 
     # Fetch features from the GrowthBook API
@@ -580,7 +579,7 @@ class FeatureRepository(object):
         data = self.decrypt_response(decoded, decryption_key)
 
         return data  # type: ignore[no-any-return]
-        
+
     async def _fetch_features_async(
         self, api_host: str, client_key: str, decryption_key: str = ""
     ) -> Optional[Dict]:
@@ -604,7 +603,7 @@ class FeatureRepository(object):
         if self.sse_client:
             self.sse_client.disconnect(timeout=timeout)
             self.sse_client = None
-    
+
     def start_background_refresh(self, api_host: str, client_key: str, decryption_key: str, ttl: int = 600, refresh_interval: int = 300) -> None:
         """Start periodic background refresh task"""
 
@@ -614,7 +613,7 @@ class FeatureRepository(object):
         with self._refresh_lock:
             if self._refresh_thread is not None:
                 return  # Already running
-            
+
             self._refresh_stop_event.clear()
             self._refresh_thread = threading.Thread(
                 target=self._background_refresh_worker,
@@ -623,7 +622,7 @@ class FeatureRepository(object):
             )
             self._refresh_thread.start()
             logger.debug("Started background refresh task")
-    
+
     def _background_refresh_worker(self, api_host: str, client_key: str, decryption_key: str, ttl: int, refresh_interval: int) -> None:
         """Worker method for periodic background refresh"""
         while not self._refresh_stop_event.is_set():
@@ -631,7 +630,7 @@ class FeatureRepository(object):
                 # Wait for the refresh interval or stop event
                 if self._refresh_stop_event.wait(refresh_interval):
                     break  # Stop event was set
-                
+
                 logger.debug("Background refresh for Features - started")
                 res = self._fetch_features(api_host, client_key, decryption_key)
                 if res is not None:
@@ -644,11 +643,11 @@ class FeatureRepository(object):
                     logger.warning("Background refresh failed")
             except Exception as e:
                 logger.warning(f"Background refresh error: {e}")
-    
+
     def stop_background_refresh(self) -> None:
         """Stop background refresh task"""
         self._refresh_stop_event.set()
-        
+
         with self._refresh_lock:
             if self._refresh_thread is not None:
                 self._refresh_thread.join(timeout=1.0)  # Wait up to 1 second
@@ -750,7 +749,7 @@ class GrowthBook(object):
             ),
             features={},
             saved_groups=self._saved_groups
-        )       
+        )
         # Create a user context for the current user
         self._user_ctx: UserContext = UserContext(
             url=self._url,
@@ -763,7 +762,7 @@ class GrowthBook(object):
         )
 
         if features:
-            self.setFeatures(features)
+            self.set_features(features)
 
         # Register for automatic feature updates when cache expires
         if self._client_key:
@@ -778,7 +777,7 @@ class GrowthBook(object):
             # Start background refresh task for stale-while-revalidate
             self.load_features()  # Initial load
             feature_repo.start_background_refresh(
-                self._api_host, self._client_key, self._decryption_key, 
+                self._api_host, self._client_key, self._decryption_key,
                 self._cache_ttl, self._stale_ttl
             )
 
@@ -794,7 +793,7 @@ class GrowthBook(object):
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
         )
         if response is not None and "features" in response.keys():
-            self.setFeatures(response["features"])
+            self.set_features(response["features"])
 
         if response is not None and "savedGroups" in response:
             self._saved_groups = response["savedGroups"]
@@ -809,7 +808,7 @@ class GrowthBook(object):
 
         if features is not None:
             if "features" in features:
-                self.setFeatures(features["features"])
+                self.set_features(features["features"])
             if "savedGroups" in features:
                 self._saved_groups = features["savedGroups"]
             feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
@@ -818,12 +817,12 @@ class GrowthBook(object):
         decoded = json.loads(features)
         if not decoded:
             return None
-        
+
         data = feature_repo.decrypt_response(decoded, self._decryption_key)
 
         if data is not None:
             if "features" in data:
-                self.setFeatures(data["features"])
+                self.set_features(data["features"])
             if "savedGroups" in data:
                 self._saved_groups = data["savedGroups"]
             feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
@@ -840,9 +839,9 @@ class GrowthBook(object):
     def startAutoRefresh(self):
         if not self._client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
-       
+
         feature_repo.startAutoRefresh(
-            api_host=self._api_host, 
+            api_host=self._api_host,
             client_key=self._client_key,
             cb=self._dispatch_sse_event,
             streaming_timeout=self._streaming_timeout
@@ -907,34 +906,34 @@ class GrowthBook(object):
     def destroy(self, timeout=10) -> None:
         """Gracefully destroy the GrowthBook instance"""
         logger.debug("Starting GrowthBook destroy process")
-        
+
         try:
             # Clean up plugins
             logger.debug("Cleaning up plugins")
             self._cleanup_plugins()
         except Exception as e:
             logger.warning(f"Error cleaning up plugins: {e}")
-        
+
         try:
             logger.debug("Stopping auto refresh during destroy")
             self.stopAutoRefresh(timeout=timeout)
         except Exception as e:
             logger.warning(f"Error stopping auto refresh during destroy: {e}")
-        
+
         try:
             # Stop background refresh operations
             if self._stale_while_revalidate and self._client_key:
                 feature_repo.stop_background_refresh()
         except Exception as e:
             logger.warning(f"Error stopping background refresh during destroy: {e}")
-        
+
         try:
             # Clean up feature update callback
             if self._client_key:
                 feature_repo.remove_feature_update_callback(self._on_feature_update)
         except Exception as e:
             logger.warning(f"Error removing feature update callback: {e}")
-        
+
         # Clear all internal state
         try:
             self._subscriptions.clear()
@@ -976,14 +975,14 @@ class GrowthBook(object):
     def evalFeature(self, key: str) -> FeatureResult:
         warnings.warn("evalFeature is deprecated, use eval_feature instead", DeprecationWarning)
         return self.eval_feature(key)
-    
+
     def _ensure_fresh_features(self) -> None:
         """Lazy refresh: Check cache expiry and refresh if needed, but only if client_key is provided"""
-        
+
         # Prevent infinite recursion when updating features (e.g., during sticky bucket refresh)
         if self._is_updating_features:
             return
-        
+
         if self._streaming or self._stale_while_revalidate or not self._client_key:
             return  # Skip cache checks - SSE or background refresh handles freshness
 
@@ -995,7 +994,7 @@ class GrowthBook(object):
     def _get_eval_context(self) -> EvaluationContext:
         # Lazy refresh: ensure features are fresh before evaluation
         self._ensure_fresh_features()
-        
+
         # use the latest attributes for every evaluation.
         self._user_ctx.attributes = self._attributes
         self._user_ctx.url = self._url
@@ -1009,8 +1008,8 @@ class GrowthBook(object):
         )
 
     def eval_feature(self, key: str) -> FeatureResult:
-        result = core_eval_feature(key=key, 
-                                   evalContext=self._get_eval_context(), 
+        result = core_eval_feature(key=key,
+                                   evalContext=self._get_eval_context(),
                                    callback_subscription=self._fireSubscriptions,
                                    tracking_cb=self._track
                                    )
@@ -1049,7 +1048,7 @@ class GrowthBook(object):
 
     def run(self, experiment: Experiment) -> Result:
         # result = self._run(experiment)
-        result = run_experiment(experiment=experiment, 
+        result = run_experiment(experiment=experiment,
                                 evalContext=self._get_eval_context(),
                                 tracking_cb=self._track
                                 )
