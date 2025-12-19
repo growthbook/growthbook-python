@@ -437,6 +437,7 @@ class FeatureRepository(object):
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
         headers = self._get_headers(client_key)
+        logger.debug(f"Fetching features from {url} with headers {headers}")
         
         # Check if we have a cached ETag for this URL
         cached_etag = None
@@ -497,6 +498,7 @@ class FeatureRepository(object):
     async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
         headers = self._get_headers()
+        logger.debug(f"[Async] Fetching features from {url} with headers {headers}")
         
         # Check if we have a cached ETag for this URL
         cached_etag = None
