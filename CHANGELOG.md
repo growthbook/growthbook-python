@@ -3,7 +3,7 @@
 ## [1.4.10](https://github.com/growthbook/growthbook-python/compare/v1.4.9...v1.4.10) (2025-12-19)
 
 
-### Bug Fixes
+### Minor Enhancements
 
 * Add user agent suffix optional prop - Merge pull request [#87](https://github.com/growthbook/growthbook-python/issues/87) from growthbook/fix/fetch-metadata ([e786dd8](https://github.com/growthbook/growthbook-python/commit/e786dd815f9a5608cbfb0681eba55b4cf0e94298))
 
