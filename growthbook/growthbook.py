@@ -409,16 +409,35 @@ class FeatureRepository(object):
                 self._notify_feature_update_callbacks(res)
                 return res
         return cached
+    
+    @property
+    def user_agent_suffix(self) -> Optional[str]:
+        return getattr(self, "_user_agent_suffix", None)
+        
+    @user_agent_suffix.setter
+    def user_agent_suffix(self, value: Optional[str]) -> None:
+        self._user_agent_suffix = value
 
     # Perform the GET request (separate method for easy mocking)
     def _get(self, url: str, headers: Optional[Dict[str, str]] = None):
         self.http = self.http or PoolManager()
         return self.http.request("GET", url, headers=headers or {})
+    
+    def _get_headers(self, client_key: str, existing_headers: Dict[str, str] = None) -> Dict[str, str]:
+        headers = existing_headers or {}
+        headers['Accept-Encoding'] = "gzip, deflate"
+        
+        # Add User-Agent with optional suffix
+        ua = "Gb-Python"
+        ua += f"-{self.user_agent_suffix}" if self.user_agent_suffix else f"-{client_key[-4:]}"
+        headers['User-Agent'] = ua
+            
+        return headers
 
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
-        headers: Dict[str, str] = {}
-        headers['Accept-Encoding'] = "gzip, deflate, br"
+        headers = self._get_headers(client_key)
+        logger.debug(f"Fetching features from {url} with headers {headers}")
         
         # Check if we have a cached ETag for this URL
         cached_etag = None
@@ -473,13 +492,13 @@ class FeatureRepository(object):
             
             return decoded  # type: ignore[no-any-return]
         except Exception as e:
-            logger.warning(f"Failed to decode feature JSON from GrowthBook API: {e}")
+            logger.error(f"Failed to decode feature JSON from GrowthBook API: {e}")
             return None
         
     async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
-        headers: Dict[str, str] = {}
-        headers['Accept-Encoding'] = "gzip, deflate, br"
+        headers = self._get_headers(client_key=client_key)
+        logger.debug(f"[Async] Fetching features from {url} with headers {headers}")
         
         # Check if we have a cached ETag for this URL
         cached_etag = None
@@ -535,7 +554,7 @@ class FeatureRepository(object):
             logger.warning(f"HTTP request failed: {e}")
             return None
         except Exception as e:
-            logger.warning("Failed to decode feature JSON from GrowthBook API: %s", e)
+            logger.error(f"Failed to decode feature JSON from GrowthBook API: {e}")
             return None
         
     def decrypt_response(self, data, decryption_key: str):
@@ -1133,6 +1152,16 @@ class GrowthBook(object):
                     logger.warning(f"Plugin {plugin} is neither callable nor has initialize method")
             except Exception as e:
                 logger.error(f"Failed to initialize plugin {plugin}: {e}")
+
+    @property
+    def user_agent_suffix(self) -> Optional[str]:
+        """Get the suffix appended to the User-Agent header"""
+        return feature_repo.user_agent_suffix
+        
+    @user_agent_suffix.setter
+    def user_agent_suffix(self, value: Optional[str]) -> None:
+        """Set a suffix to be appended to the User-Agent header"""
+        feature_repo.user_agent_suffix = value
 
     def _cleanup_plugins(self) -> None:
         """Cleanup all initialized plugins."""
