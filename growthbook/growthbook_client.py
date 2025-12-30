@@ -9,7 +9,7 @@ import asyncio
 import threading
 import traceback
 from datetime import datetime
-from growthbook import FeatureRepository
+from growthbook import FeatureRepository, feature_repo
 from contextlib import asynccontextmanager
 
 from .core import eval_feature as core_eval_feature, run_experiment
@@ -581,13 +581,22 @@ class GrowthBookClient:
             self._tracked.clear()
         with self._subscriptions_lock:
             self._subscriptions.clear()
-
         # Clear context
         async with self._context_lock:
             self._global_context = None
 
         # Cleanup plugins
         self._cleanup_plugins()
+
+    @property
+    def user_agent_suffix(self) -> Optional[str]:
+        """Get the suffix appended to the User-Agent header"""
+        return feature_repo.user_agent_suffix
+        
+    @user_agent_suffix.setter
+    def user_agent_suffix(self, value: Optional[str]) -> None:
+        """Set a suffix to be appended to the User-Agent header"""
+        feature_repo.user_agent_suffix = value
 
     def _initialize_plugins(self) -> None:
         """Initialize all tracking plugins with this GrowthBookClient instance."""

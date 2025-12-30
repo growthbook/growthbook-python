@@ -23,5 +23,5 @@ from .plugins import (
 )
 
 # x-release-please-start-version
-__version__ = "1.4.9"
+__version__ = "1.4.10"
 # x-release-please-end
