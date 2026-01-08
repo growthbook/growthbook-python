@@ -117,7 +117,7 @@ def test_decrypt(decrypt_data):
 def test_feature(feature_data):
     _, ctx, key, expected = feature_data
     gb = GrowthBook(**ctx)
-    res = gb.evalFeature(key)
+    res = gb.eval_feature(key)
 
     if "experiment" in expected:
         expected["experiment"] = Experiment(**expected["experiment"]).to_dict()
@@ -726,7 +726,7 @@ def test_stores_assigned_variations_in_the_user():
     gb.run(Experiment(key="my-test", variations=[0, 1]))
     gb.run(Experiment(key="my-test-3", variations=[0, 1]))
 
-    assigned = gb.getAllResults()
+    assigned = gb.get_all_results()
     assignedArr = []
 
     for e in assigned:
@@ -748,17 +748,17 @@ def test_getters_setters():
     featuresInput = {"feature-1": feat.to_dict()}
     attributes = {"id": "123", "url": "/"}
 
-    gb.setFeatures(featuresInput)
-    gb.setAttributes(attributes)
+    gb.set_features(featuresInput)
+    gb.set_attributes(attributes)
 
-    featuresOutput = {k: v.to_dict() for (k, v) in gb.getFeatures().items()}
+    featuresOutput = {k: v.to_dict() for (k, v) in gb.get_features().items()}
 
     assert featuresOutput == featuresInput
-    assert attributes == gb.getAttributes()
+    assert attributes == gb.get_attributes()
 
     newAttrs = {"url": "/hello"}
-    gb.setAttributes(newAttrs)
-    assert newAttrs == gb.getAttributes()
+    gb.set_attributes(newAttrs)
+    assert newAttrs == gb.get_attributes()
 
     gb.destroy()
 
@@ -780,17 +780,17 @@ def test_feature_methods():
         }
     )
 
-    assert gb.isOn("featureOn") is True
-    assert gb.isOff("featureOn") is False
-    assert gb.getFeatureValue("featureOn", 15) == 12
+    assert gb.is_on("featureOn") is True
+    assert gb.is_off("featureOn") is False
+    assert gb.get_feature_value("featureOn", 15) == 12
 
-    assert gb.isOn("featureOff") is False
-    assert gb.isOff("featureOff") is True
-    assert gb.getFeatureValue("featureOff", 10) == 0
+    assert gb.is_on("featureOff") is False
+    assert gb.is_off("featureOff") is True
+    assert gb.get_feature_value("featureOff", 10) == 0
 
-    assert gb.isOn("featureNone") is False
-    assert gb.isOff("featureNone") is True
-    assert gb.getFeatureValue("featureNone", 10) == 10
+    assert gb.is_on("featureNone") is False
+    assert gb.is_off("featureNone") is True
+    assert gb.get_feature_value("featureNone", 10) == 10
 
     gb.destroy()
 
