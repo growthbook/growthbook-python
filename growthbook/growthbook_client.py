@@ -169,40 +169,78 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             if callback in self._callbacks:
                 self._callbacks.remove(callback)
 
+    """
+    _start_sse_refresh flow mimics a bridge pattern to connect a blocking, synchronous background thread 
+    (the SSEClient) with your non-blocking, async main loop.
+
+    Bridge - _maintain_sse_connection - runs on the main async loop, calls `startAutoRefresh` (which in turn spawns a thread)
+    and waits indefinitely. (Awaiting a Future suspends the coroutine, costing zero CPU)
+
+    The SSEClient runs in a separate thread, makes a blocking HTTP request, and invokes `on_event` synchronously.
+
+    The Hand off - when the event arrives (we're still on the background thread), sse_handler uses `asyncio.run_coroutine_threadsafe` 
+    to schedule the async processing `_handle_sse_event` onto the main event loop.
+    """
     async def _start_sse_refresh(self) -> None:
         """Start SSE-based feature refresh"""
         with self._refresh_lock:
             if self._refresh_task is not None:  # Already running
                 return
 
-            async def sse_handler(event_data: Dict[str, Any]) -> None:
+            # SSEClient invokes `on_event` synchronously from a background thread.
+            async def _handle_sse_event(event_data: Dict[str, Any]) -> None:
                 try:
-                    if event_data['type'] == 'features-updated':
+                    event_type = event_data.get("type")
+                    if event_type == "features-updated":
                         response = await self.load_features_async(
                             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
                         )
                         if response is not None:
                             await self._handle_feature_update(response)
-                    elif event_data['type'] == 'features':
-                        await self._handle_feature_update(event_data['data'])
+                    elif event_type == "features":
+                        await self._handle_feature_update(event_data.get("data", {}))
                 except Exception:
-                    traceback.print_exc()
+                    logger.exception("Error handling SSE event")
 
-            # Start the SSE connection task
-            self._refresh_task = asyncio.create_task(
-                self._maintain_sse_connection(sse_handler)
-            )
+            main_loop = asyncio.get_running_loop()
 
-    async def _maintain_sse_connection(self, handler: Callable) -> None:
-        """Maintain SSE connection with automatic reconnection"""
-        while not self._stop_event.is_set():
-            try:
-                await self.startAutoRefresh(self._api_host, self._client_key, handler)
-            except Exception as e:
-                if not self._stop_event.is_set():
-                    delay = self._backoff.next_delay()
-                    logger.error(f"SSE connection lost, reconnecting in {delay:.2f}s: {str(e)}")
-                    await asyncio.sleep(delay)
+            # We must not pass an `async def` callback here (it would never be awaited).
+            def sse_handler(event_data: Dict[str, Any]) -> None:
+                # Schedule async processing onto the main event loop.
+                try:
+                    asyncio.run_coroutine_threadsafe(_handle_sse_event(event_data), main_loop)
+                except Exception:
+                    logger.exception("Failed to schedule SSE event handler")
+
+            async def _maintain_sse_connection() -> None:
+                """
+                Start SSE streaming and keep the task alive until cancelled.
+                """
+                try:
+                    # NOTE: `startAutoRefresh` is synchronous and starts a background thread.
+                    self.startAutoRefresh(self._api_host, self._client_key, sse_handler)
+                    
+                    # Wait indefinitely until the task is cancelled - basically saying "Keep this service 'active' until someone cancels me."
+                    # reconnection logic is handled inside SSEClient's thread
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    # Normal shutdown flow
+                    raise
+                except Exception:
+                    logger.exception("Unexpected error in SSE lifecycle task")
+                finally:
+                    try:
+                        # stopAutoRefresh blocks joining a thread, so it needs to be run in executor
+                        # to avoid blocking the async event loop
+                        await main_loop.run_in_executor(
+                            None, 
+                            lambda: self.stopAutoRefresh(timeout=10)
+                        )
+                    except Exception:
+                        logger.exception("Failed to stop SSE auto-refresh")
+
+            # Start a task that owns the SSE lifecycle and cleanup.
+            self._refresh_task = asyncio.create_task(_maintain_sse_connection())
 
     async def _start_http_refresh(self, interval: int = 60) -> None:
         """Enhanced HTTP polling with backoff"""
@@ -261,6 +299,12 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
     async def stop_refresh(self) -> None:
         """Clean shutdown of refresh tasks"""
         self._stop_event.set()
+        # Ensure any SSE background thread is stopped as well.
+        try:
+            self.stopAutoRefresh(timeout=10)
+        except Exception:
+            # Best-effort cleanup; task cancellation below will proceed.
+            logger.exception("Error stopping SSE auto-refresh")
         if self._refresh_task:
             # Cancel the task
             self._refresh_task.cancel()

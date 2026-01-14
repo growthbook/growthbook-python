@@ -89,10 +89,16 @@ async def test_sse_connection_lifecycle(mock_options, mock_features_response):
                      "refresh_strategy": FeatureRefreshStrategy.SERVER_SENT_EVENTS})
         )
         
-        with patch('growthbook.growthbook_client.EnhancedFeatureRepository._maintain_sse_connection') as mock_sse:
+        # `startAutoRefresh` is synchronous and should be invoked as part of SSE start-up.
+        # `stopAutoRefresh` should be called during shutdown to stop/join the SSE thread.
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.startAutoRefresh') as mock_start, \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.stopAutoRefresh') as mock_stop:
             await client.initialize()
-            assert mock_sse.called
+            # Allow the SSE lifecycle task to start and invoke startAutoRefresh
+            await asyncio.sleep(0)
+            assert mock_start.called
             await client.close()
+            assert mock_stop.called
 
 @pytest.mark.asyncio
 async def test_feature_repository_load():
