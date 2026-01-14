@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.0.0](https://github.com/growthbook/growthbook-python/compare/v1.4.10...v2.0.0) (2026-01-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* Fixes for Async wrapper execution and other enhancements
+
+### Bug Fixes
+
+* Fixes for Async wrapper execution and other enhancements ([e6a0eaf](https://github.com/growthbook/growthbook-python/commit/e6a0eaff7dcc391819ad92eeb94a4fd3aac7bdda))
+
 ## [1.4.10](https://github.com/growthbook/growthbook-python/compare/v1.4.9...v1.4.10) (2025-12-19)
 
 
