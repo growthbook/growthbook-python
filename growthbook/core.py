@@ -178,6 +178,24 @@ def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups)
             return bool(r.search(attributeValue))
         except Exception:
             return False
+    elif operator == "$regexi":
+        try:
+            r = re.compile(conditionValue, re.IGNORECASE)
+            return bool(r.search(attributeValue))
+        except Exception:
+            return False
+    elif operator == "$notRegex":
+        try:
+            r = re.compile(conditionValue)
+            return not bool(r.search(attributeValue))
+        except Exception:
+            return False
+    elif operator == "$notRegexi":
+        try:
+            r = re.compile(conditionValue, re.IGNORECASE)
+            return not bool(r.search(attributeValue))
+        except Exception:
+            return False
     elif operator == "$in":
         if not type(conditionValue) is list:
             return False
