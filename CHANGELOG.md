@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.0](https://github.com/growthbook/growthbook-python/compare/v2.0.0...v2.1.0) (2026-01-22)
+
+
+### Features
+
+* $regexi - Case insensitive regex support  ([b9fce8a](https://github.com/growthbook/growthbook-python/commit/b9fce8ab2e7c91e38a0f2cb7b1d2446d564e650b))
+
 ## [2.0.0](https://github.com/growthbook/growthbook-python/compare/v1.4.10...v2.0.0) (2026-01-14)
 
 
