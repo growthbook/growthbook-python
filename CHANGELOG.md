@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.1](https://github.com/growthbook/growthbook-python/compare/v2.1.0...v2.1.1) (2026-01-27)
+
+
+### Bug Fixes
+
+* Case insensitive membership operators - Merge pull request [#96](https://github.com/growthbook/growthbook-python/issues/96) from growthbook/feat/case-insensitive-regex ([0e26f7d](https://github.com/growthbook/growthbook-python/commit/0e26f7d55e2b4b5908a9e3dd0921c1ea1fa49f97))
+
 ## [2.1.0](https://github.com/growthbook/growthbook-python/compare/v2.0.0...v2.1.0) (2026-01-22)
 
 
