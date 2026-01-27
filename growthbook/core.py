@@ -76,12 +76,17 @@ def getPath(attributes, path):
             return None
     return current
 
-def evalConditionValue(conditionValue, attributeValue, savedGroups) -> bool:
+def evalConditionValue(conditionValue, attributeValue, savedGroups, insensitive: bool = False) -> bool:
     if type(conditionValue) is dict and isOperatorObject(conditionValue):
         for key, value in conditionValue.items():
             if not evalOperatorCondition(key, attributeValue, value, savedGroups):
                 return False
         return True
+    
+    # Simple equality comparison with optional case-insensitivity
+    if insensitive and type(conditionValue) is str and type(attributeValue) is str:
+        return conditionValue.lower() == attributeValue.lower()
+    
     return bool(conditionValue == attributeValue)
 
 def elemMatch(condition, attributeValue, savedGroups) -> bool:
@@ -204,6 +209,14 @@ def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups)
         if not type(conditionValue) is list:
             return False
         return not isIn(conditionValue, attributeValue)
+    elif operator == "$ini":
+        if not type(conditionValue) is list:
+            return False
+        return isIn(conditionValue, attributeValue, insensitive=True)
+    elif operator == "$nini":
+        if not type(conditionValue) is list:
+            return False
+        return not isIn(conditionValue, attributeValue, insensitive=True)
     elif operator == "$elemMatch":
         return elemMatch(conditionValue, attributeValue, savedGroups)
     elif operator == "$size":
@@ -211,16 +224,13 @@ def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups)
             return False
         return evalConditionValue(conditionValue, len(attributeValue), savedGroups)
     elif operator == "$all":
-        if not (type(attributeValue) is list):
+        if not type(conditionValue) is list:
             return False
-        for cond in conditionValue:
-            passing = False
-            for attr in attributeValue:
-                if evalConditionValue(cond, attr, savedGroups):
-                    passing = True
-            if not passing:
-                return False
-        return True
+        return isInAll(conditionValue, attributeValue, savedGroups, insensitive=False)
+    elif operator == "$alli":
+        if not type(conditionValue) is list:
+            return False
+        return isInAll(conditionValue, attributeValue, savedGroups, insensitive=True)
     elif operator == "$exists":
         if not conditionValue:
             return attributeValue is None
@@ -254,10 +264,40 @@ def paddedVersionString(input) -> str:
     return "-".join([v.rjust(5, " ") if re.match(r"^[0-9]+$", v) else v for v in parts])
 
 
-def isIn(conditionValue, attributeValue) -> bool:
+def isIn(conditionValue, attributeValue, insensitive: bool = False) -> bool:
+    if insensitive:
+        # Helper function to case-fold values (lowercase for strings)
+        def case_fold(val):
+            return val.lower() if type(val) is str else val
+        
+        # Do an intersection if attribute is an array (insensitive)
+        if type(attributeValue) is list:
+            return any(
+                case_fold(el) == case_fold(exp)
+                for el in attributeValue
+                for exp in conditionValue
+            )
+        return any(case_fold(attributeValue) == case_fold(exp) for exp in conditionValue)
+    
+    # Case-sensitive behavior (original)
     if type(attributeValue) is list:
         return bool(set(conditionValue) & set(attributeValue))
     return attributeValue in conditionValue
+
+def isInAll(conditionValue, attributeValue, savedGroups, insensitive: bool = False) -> bool:
+    """Check if attributeValue (array) contains all elements in conditionValue"""
+    if not type(attributeValue) is list:
+        return False
+    
+    for cond in conditionValue:
+        passing = False
+        for attr in attributeValue:
+            if evalConditionValue(cond, attr, savedGroups, insensitive):
+                passing = True
+                break
+        if not passing:
+            return False
+    return True
 
 def _getOrigHashValue(
     eval_context: EvaluationContext,

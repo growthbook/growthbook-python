@@ -842,6 +842,90 @@
       false
     ],
     [
+      "$ini - pass",
+      {
+        "tags": {
+          "$ini": ["A", "B"]
+        }
+      },
+      {
+        "tags": "a"
+      },
+      true
+    ],
+    [
+      "$ini - fail",
+      {
+        "tags": {
+          "$ini": ["a", "b"]
+        }
+      },
+      {
+        "tags": "c"
+      },
+      false
+    ],
+    [
+      "$ini - array pass",
+      {
+        "tags": {
+          "$ini": ["A", "B"]
+        }
+      },
+      {
+        "tags": ["d", "a"]
+      },
+      true
+    ],
+    [
+      "$nini - pass",
+      {
+        "tags": {
+          "$nini": ["A", "B"]
+        }
+      },
+      {
+        "tags": "c"
+      },
+      true
+    ],
+    [
+      "$nini - fail",
+      {
+        "tags": {
+          "$nini": ["A", "B"]
+        }
+      },
+      {
+        "tags": "a"
+      },
+      false
+    ],
+    [
+      "$alli - pass",
+      {
+        "tags": {
+          "$alli": ["A", "B"]
+        }
+      },
+      {
+        "tags": ["a", "b", "c"]
+      },
+      true
+    ],
+    [
+      "$alli - fail",
+      {
+        "tags": {
+          "$alli": ["A", "B"]
+        }
+      },
+      {
+        "tags": ["a", "c"]
+      },
+      false
+    ],
+    [
       "$gt/$lt numbers - pass",
       {
         "age": {
