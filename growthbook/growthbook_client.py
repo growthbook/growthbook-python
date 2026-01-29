@@ -90,8 +90,8 @@ class FeatureCache:
     def update(self, features: Dict[str, Any], saved_groups: Dict[str, Any]) -> None:
         """Simple thread-safe update of cache with new API data"""
         with self._lock:
-            self._cache['features'].update(features)
-            self._cache['savedGroups'].update(saved_groups)
+            self._cache['features'] = dict(features)
+            self._cache['savedGroups'] = dict(saved_groups)
 
     def get_current_state(self) -> Dict[str, Any]:
         """Get current cache state"""
