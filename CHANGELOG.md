@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.2](https://github.com/growthbook/growthbook-python/compare/v2.1.1...v2.1.2) (2026-01-29)
+
+
+### Bug Fixes
+
+* Disabled features not being removed from cache ([#93](https://github.com/growthbook/growthbook-python/issues/93)) ([eac9717](https://github.com/growthbook/growthbook-python/commit/eac971782f7776ff4261cc4ef9b7894b5735eb9d))
+
 ## [2.1.1](https://github.com/growthbook/growthbook-python/compare/v2.1.0...v2.1.1) (2026-01-27)
 
 
