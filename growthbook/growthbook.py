@@ -40,7 +40,7 @@ import asyncio
 from aiohttp.client_exceptions import ClientConnectorError, ClientResponseError, ClientPayloadError
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
-from urllib3 import PoolManager
+from urllib3 import PoolManager, Timeout
 
 from .core import _getHashValue, eval_feature as core_eval_feature, run_experiment
 
@@ -332,6 +332,8 @@ class FeatureRepository(object):
     def __init__(self) -> None:
         self.cache: AbstractFeatureCache = InMemoryFeatureCache()
         self.http: Optional[PoolManager] = None
+        self.http_connect_timeout: Optional[int] = None
+        self.http_read_timeout: Optional[int] = None
         self.sse_client: Optional[SSEClient] = None
         self._feature_update_callbacks: List[Callable[[Dict], None]] = []
         
@@ -420,7 +422,10 @@ class FeatureRepository(object):
 
     # Perform the GET request (separate method for easy mocking)
     def _get(self, url: str, headers: Optional[Dict[str, str]] = None):
-        self.http = self.http or PoolManager()
+        timeout = None
+        if self.http_connect_timeout and self.http_read_timeout:
+            timeout = Timeout(connect=self.http_connect_timeout, read=self.http_read_timeout)
+        self.http = self.http or PoolManager(timeout=timeout)
         return self.http.request("GET", url, headers=headers or {})
     
     def _get_headers(self, client_key: str, existing_headers: Dict[str, str] = None) -> Dict[str, str]:
@@ -714,6 +719,8 @@ class GrowthBook(object):
         groups: dict = {},
         overrides: dict = {},
         forcedVariations: dict = {},
+        http_connect_timeout: Optional[int] = None,
+        http_read_timeout: Optional[int] = None,
     ):
         self._enabled = enabled
         self._attributes = attributes
@@ -800,6 +807,10 @@ class GrowthBook(object):
                 self._api_host, self._client_key, self._decryption_key, 
                 self._cache_ttl, self._stale_ttl
             )
+
+        if http_connect_timeout and http_read_timeout:
+            feature_repo.http_connect_timeout = http_connect_timeout
+            feature_repo.http_read_timeout = http_read_timeout
 
     def _on_feature_update(self, features_data: Dict) -> None:
         """Callback to handle automatic feature updates from FeatureRepository"""
