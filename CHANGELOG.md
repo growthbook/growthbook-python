@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.1.3](https://github.com/growthbook/growthbook-python/compare/v2.1.2...v2.1.3) (2026-02-05)
+
+
+### Features
+
+* Supporting Dict Subclasses in Evaluation - Merge pull request [#99](https://github.com/growthbook/growthbook-python/issues/99) from growthbook/feat/isInstanceTypeCheck ([8ed4d4e](https://github.com/growthbook/growthbook-python/commit/8ed4d4e1aaf5b79408d60b16f856d66146600f91))
+* Replaced all type(x) is T checks with isinstance(x, T).
+* Updated getType, getPath, compare, and operator functions to use these new checks.
+
 ## [2.1.2](https://github.com/growthbook/growthbook-python/compare/v2.1.1...v2.1.2) (2026-01-29)
 
 
