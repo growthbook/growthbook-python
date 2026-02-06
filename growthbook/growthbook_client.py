@@ -456,6 +456,8 @@ class GrowthBookClient:
         if not self._features_repository:
             logger.error("No features repository available")
             return False
+        
+        self._features_repository.load_features_from_persistent_cache()
 
         try:
             # Initial feature load
