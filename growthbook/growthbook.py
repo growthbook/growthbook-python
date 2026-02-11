@@ -4,7 +4,7 @@ This is the Python client library for GrowthBook, the open-source
 feature flagging and A/B testing platform.
 More info at https://www.growthbook.io
 """
-
+import atexit
 import sys
 import json
 import threading
@@ -151,8 +151,9 @@ class SSEClient:
             return
 
         self.is_running = True
-        self._sse_thread = threading.Thread(target=self._run_sse_channel)
+        self._sse_thread = threading.Thread(target=self._run_sse_channel, daemon=True)
         self._sse_thread.start()
+        atexit.register(self.disconnect)
 
     def disconnect(self, timeout=10):
         """Gracefully disconnect with timeout"""
