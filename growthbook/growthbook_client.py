@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+import json
 from dataclasses import dataclass, field
 import random
 import logging
@@ -198,7 +198,10 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                         if response is not None:
                             await self._handle_feature_update(response)
                     elif event_type == "features":
-                        await self._handle_feature_update(event_data.get("data", {}))
+                        data = event_data.get("data", "{}")
+                        if isinstance(data, str):
+                            data = json.loads(data)
+                        await self._handle_feature_update(data)
                 except Exception:
                     logger.exception("Error handling SSE event")
 
