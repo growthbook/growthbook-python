@@ -1,6 +1,7 @@
 #!/usr/bin/env python
 
 import sys
+from collections import OrderedDict
 from token import OP
 # Only require typing_extensions if using Python 3.7 or earlier
 if sys.version_info >= (3, 8):
@@ -14,9 +15,9 @@ from enum import Enum
 from abc import ABC, abstractmethod
 
 class VariationMeta(TypedDict):
-    key: str
-    name: str
-    passthrough: bool
+    key: Optional[str]
+    name: Optional[str]
+    passthrough: Optional[bool]
 
 
 class Filter(TypedDict):
@@ -143,12 +144,12 @@ class Experiment(object):
 class Result(object):
     def __init__(
         self,
-        variationId: int,
-        inExperiment: bool,
-        value: Any,
-        hashUsed: bool,
-        hashAttribute: str,
-        hashValue: str,
+        variationId: Optional[int],
+        inExperiment: Optional[bool],
+        value,
+        hashUsed: Optional[bool],
+        hashAttribute: Optional[str],
+        hashValue: Optional[str],
         featureId: Optional[str],
         meta: Optional[VariationMeta] = None,
         bucket: Optional[float] = None,
@@ -164,17 +165,17 @@ class Result(object):
         self.bucket = bucket
         self.stickyBucketUsed = stickyBucketUsed
 
-        self.key = str(variationId)
+        self.key = str(variationId) if variationId is not None else ""
         self.name = ""
         self.passthrough = False
 
         if meta:
-            if "name" in meta:
-                self.name = meta["name"]
-            if "key" in meta:
-                self.key = meta["key"]
-            if "passthrough" in meta:
-                self.passthrough = meta["passthrough"]
+            if "name" in meta and meta["name"] is not None:
+                self.name = str(meta["name"])
+            if "key" in meta and meta["key"] is not None:
+                self.key = str(meta["key"])
+            if "passthrough" in meta and meta["passthrough"] is not None:
+                self.passthrough = bool(meta["passthrough"])
 
     def to_dict(self) -> Dict[str, Any]:
         obj: Dict[str, Any] = {
@@ -198,11 +199,30 @@ class Result(object):
 
         return obj
 
+    @staticmethod
+    def from_dict(data: dict) -> "Result":
+        return Result(
+            variationId=data.get("variationId"),
+            inExperiment=data.get("inExperiment"),
+            value=data.get("value"),
+            hashUsed=data.get("hashUsed"),
+            hashAttribute=data.get("hashAttribute"),
+            hashValue=data.get("hashValue"),
+            featureId=data.get("featureId"),
+            bucket=data.get("bucket"),
+            stickyBucketUsed=data.get("stickyBucketUsed", False),
+            meta={
+                "name": data.get("name"),
+                "key": data.get("key"),
+                "passthrough": data.get("passthrough"),
+            }
+        )
+
 class FeatureResult(object):
     def __init__(
         self,
         value: Any,
-        source: str,
+        source: Optional[str] = None,
         experiment: Optional[Experiment] = None,
         experimentResult: Optional[Result] = None,
         ruleId: Optional[str] = None,
@@ -218,7 +238,7 @@ class FeatureResult(object):
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
             "value": self.value,
-            "source": self.source,
+            "source": self.source or "",
             "on": self.on,
             "off": self.off,
             "ruleId": self.ruleId or "",
@@ -229,6 +249,17 @@ class FeatureResult(object):
             data["experimentResult"] = self.experimentResult.to_dict()
 
         return data
+
+    @staticmethod
+    def from_dict(data: dict) -> "FeatureResult":
+        return FeatureResult(
+            value=data.get("value"),
+            source=data.get("source"),
+            experiment=Experiment(**data["experiment"]) if isinstance(data.get("experiment"), dict) else data.get(
+                "experiment"),
+            experimentResult=Result.from_dict(data["experimentResult"]) if isinstance(data.get("experimentResult"), dict) else data.get("experimentResult"),
+            ruleId=data.get("ruleId"),
+        )
 
 class Feature(object):
     def __init__(self, defaultValue: Any = None, rules: Optional[List[Any]] = None) -> None:
@@ -263,12 +294,24 @@ class Feature(object):
                     bucketVersion=rule.get("bucketVersion", None),
                     minBucketVersion=rule.get("minBucketVersion", None),
                     parentConditions=rule.get("parentConditions", None),
+                    tracks=rule.get("tracks", None),
                 ))
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "defaultValue": self.defaultValue,
             "rules": [rule.to_dict() for rule in self.rules],
+        }
+
+@dataclass
+class TrackData:
+    experiment: Experiment
+    result: Result
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "experiment": self.experiment.to_dict() if hasattr(self.experiment, 'to_dict') else self.experiment,
+            "result": self.result.to_dict() if hasattr(self.result, 'to_dict') else self.result
         }
 
 class FeatureRule(object):
@@ -296,6 +339,7 @@ class FeatureRule(object):
         bucketVersion: Optional[int] = None,
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
+        tracks: List[TrackData] = None
     ) -> None:
 
         if disableStickyBucketing:
@@ -323,6 +367,11 @@ class FeatureRule(object):
         self.bucketVersion = bucketVersion or 0
         self.minBucketVersion = minBucketVersion or 0
         self.parentConditions = parentConditions
+        self.tracks = []
+        if tracks:
+            for t in tracks:
+                if isinstance(t, TrackData):
+                    self.tracks.append(t)
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {}
@@ -370,6 +419,8 @@ class FeatureRule(object):
             data["minBucketVersion"] = self.minBucketVersion
         if self.parentConditions:
             data["parentConditions"] = self.parentConditions
+        if self.tracks:
+            data["tracks"] = [track.to_dict() for track in self.tracks]
 
         return data
 
@@ -396,7 +447,7 @@ class AbstractStickyBucketService(ABC):
         return docs
 
 @dataclass
-class StackContext: 
+class StackContext:
     id: Optional[str] = None
     evaluated_features: Set[str] = field(default_factory=set)
 
@@ -424,14 +475,16 @@ class Options:
     enabled: bool = True
     qa_mode: bool = False
     enable_dev_mode: bool = False
-    # forced_variations: Dict[str, Any] = field(default_factory=dict)
+    forced_variations: Dict[str, Any] = field(default_factory=dict)
     refresh_strategy: Optional[FeatureRefreshStrategy] = FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
     sticky_bucket_service: Optional[AbstractStickyBucketService] = None
     sticky_bucket_identifier_attributes: Optional[List[str]] = None
     on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], None]] = None
     on_feature_usage: Optional[Callable[[str, 'FeatureResult', UserContext], None]] = None
     tracking_plugins: Optional[List[Any]] = None
-
+    remote_eval: bool = False
+    global_attributes: Dict[str, Any] = field(default_factory=dict)
+    forced_features: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
 class GlobalContext:

@@ -6,7 +6,6 @@ from urllib.parse import urlparse, parse_qs
 from typing import Callable, Optional, Any, Set, Tuple, List, Dict
 from .common_types import EvaluationContext, FeatureResult, Experiment, Filter, Result, UserContext, VariationMeta
 
-
 logger = logging.getLogger("growthbook.core")
 
 def evalCondition(attributes: Dict[str, Any], condition: Dict[str, Any], savedGroups: Optional[Dict[str, Any]] = None) -> bool:
@@ -358,7 +357,7 @@ def _isIncludedInRollout(
 
 def _isFilteredOut(filters: List[Filter], eval_context: EvaluationContext) -> bool:
     for filter in filters:
-        (_, hash_value) = _getHashValue(attr=filter.get("attribute", "id"), eval_context=eval_context)  
+        (_, hash_value) = _getHashValue(attr=filter.get("attribute", "id"), eval_context=eval_context)
         if hash_value == "":
             return False
 
@@ -479,7 +478,7 @@ def eval_feature(
 
     if evalContext is None:
         raise ValueError("evalContext is required - eval_feature")
-    
+
     if key not in evalContext.global_ctx.features:
         logger.warning("Unknown feature %s", key)
         return FeatureResult(None, "unknownFeature")
@@ -487,7 +486,7 @@ def eval_feature(
     if key in evalContext.stack.evaluated_features:
         logger.warning("Cyclic prerequisite detected, stack: %s", evalContext.stack.evaluated_features)
         return FeatureResult(None, "cyclicPrerequisite")
- 
+
     evalContext.stack.evaluated_features.add(key)
 
     feature = evalContext.global_ctx.features[key]
@@ -537,6 +536,14 @@ def eval_feature(
                     key,
                 )
                 continue
+
+            tracks =  rule.tracks
+
+            if tracks and tracking_cb:
+                for track in tracks:
+                    tracked_experiment = track.experiment
+                    tracked_experiment_result = track.result
+                    tracking_cb(tracked_experiment, tracked_experiment_result, evalContext.user)
 
             logger.debug("Force value from rule, feature %s", key)
             return FeatureResult(rule.force, "force", ruleId=rule.id)
@@ -599,7 +606,7 @@ def eval_prereqs(parentConditions: List[dict], evalContext: EvaluationContext) -
         parent_id = parentCondition.get("id")
         if parent_id is None:
             continue  # Skip if no valid ID
-            
+
         parentRes = eval_feature(key=parent_id, evalContext=evalContext)
 
         if parentRes.source == "cyclicPrerequisite":
@@ -608,7 +615,7 @@ def eval_prereqs(parentConditions: List[dict], evalContext: EvaluationContext) -
         parent_condition = parentCondition.get("condition")
         if parent_condition is None:
             continue  # Skip if no valid condition
-            
+
         if not evalCondition({'value': parentRes.value}, parent_condition, evalContext.global_ctx.saved_groups):
             if parentCondition.get("gate", False):
                 return "gate"
@@ -617,7 +624,7 @@ def eval_prereqs(parentConditions: List[dict], evalContext: EvaluationContext) -
 
 def _get_sticky_bucket_experiment_key(experiment_key: str, bucket_version: int = 0) -> str:
     return experiment_key + "__" + str(bucket_version)
-    
+
 def _get_sticky_bucket_assignments(evalContext: EvaluationContext,
                                     attr: Optional[str] = None,
                                     fallback: Optional[str] = None) -> Dict[str, str]:
@@ -690,9 +697,9 @@ def _get_sticky_bucket_variation(
 
     return {'variation': variation}
 
-def run_experiment(experiment: Experiment, 
-                   featureId: Optional[str] = None, 
-                   evalContext: Optional[EvaluationContext] = None, 
+def run_experiment(experiment: Experiment,
+                   featureId: Optional[str] = None,
+                   evalContext: Optional[EvaluationContext] = None,
                    tracking_cb: Optional[Callable[[Experiment, Result, UserContext], None]] = None
                 ) -> Result:
     if evalContext is None:
@@ -949,7 +956,7 @@ def _generate_sticky_bucket_assignment_doc(attribute_name: str, attribute_value:
         },
         'changed': changed
     }
-    
+
 def _getExperimentResult(
     experiment: Experiment,
     evalContext: EvaluationContext,
