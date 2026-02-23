@@ -8,8 +8,9 @@ from typing import Set
 import asyncio
 import threading
 import traceback
+import time
 from datetime import datetime
-from growthbook import FeatureRepository, feature_repo
+from growthbook import FeatureRepository, feature_repo, CacheEntry
 from contextlib import asynccontextmanager
 
 from .core import eval_feature as core_eval_feature, run_experiment
@@ -23,7 +24,8 @@ from .common_types import (
     StackContext,
     FeatureResult,
     FeatureRefreshStrategy,
-    Experiment
+    Experiment,
+    AbstractAsyncFeatureCache
 )
 
 logger = logging.getLogger("growthbook.growthbook_client")
@@ -101,8 +103,28 @@ class FeatureCache:
                 "savedGroups": self._cache['savedGroups']
             }
 
+class InMemoryAsyncFeatureCache(AbstractAsyncFeatureCache):
+    def __init__(self) -> None:
+        self.cache: Dict[str, CacheEntry] = {}
+    
+    async def get(self, key: str) -> Optional[Dict]:
+        if key in self.cache:
+            entry = self.cache[key]
+            if entry.expires >= time.time():
+                return entry.value
+        return None
+
+    async def set(self, key: str, value: Dict, ttl: int) -> None:
+        if key in self.cache:
+            self.cache[key].update(value)
+        else:
+            self.cache[key] = CacheEntry(value, ttl)
+
+    async def clear(self) -> None:
+        self.cache.clear()
+
 class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
-    def __init__(self, api_host: str, client_key: str, decryption_key: str = "", cache_ttl: int = 60):
+    def __init__(self, api_host: str, client_key: str, decryption_key: str = "", cache_ttl: int = 60, cache: Optional[AbstractAsyncFeatureCache] = None):
         FeatureRepository.__init__(self)
         self._api_host = api_host
         self._client_key = client_key
@@ -116,6 +138,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._callbacks: List[Callable[[Dict[str, Any]], Awaitable[None]]] = []
         self._last_successful_refresh: Optional[datetime] = None
         self._refresh_in_progress = asyncio.Lock()
+        self.cache = cache if cache else InMemoryAsyncFeatureCache()
 
     @asynccontextmanager
     async def refresh_operation(self):
@@ -333,7 +356,21 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         if api_host == self._api_host and client_key == self._client_key:
             decryption_key = self._decryption_key
             ttl = self._cache_ttl
-        return await super().load_features_async(api_host, client_key, decryption_key, ttl)
+        
+        key = api_host + "::" + client_key
+        
+        # Try async cache first
+        cached = await self.cache.get(key)
+        if cached:
+            return cached
+            
+        # Fetch from network
+        res = await self._fetch_features_async(api_host, client_key, decryption_key)
+        if res is not None:
+            await self.cache.set(key, res, ttl)
+            return res
+            
+        return None
 
 class GrowthBookClient:
     def __init__(
@@ -370,7 +407,8 @@ class GrowthBookClient:
                 self.options.api_host or "https://cdn.growthbook.io", 
                 self.options.client_key or "", 
                 self.options.decryption_key or "", 
-                self.options.cache_ttl
+                self.options.cache_ttl,
+                self.options.cache
             )
             if self.options.client_key
             else None
