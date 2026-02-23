@@ -95,8 +95,13 @@ async def test_sse_connection_lifecycle(mock_options, mock_features_response):
              patch('growthbook.growthbook_client.EnhancedFeatureRepository.stopAutoRefresh') as mock_stop:
             await client.initialize()
             # Allow the SSE lifecycle task to start and invoke startAutoRefresh
-            await asyncio.sleep(0)
+            await asyncio.sleep(0.1)
             assert mock_start.called
+            
+            # Verify the thread created is a daemon thread (if possible without real start)
+            # Since we mock startAutoRefresh, we can't check the real thread here.
+            # But we can check that SSEClient is initialized correctly if we don't mock it all.
+            
             await client.close()
             assert mock_stop.called
 
@@ -337,17 +342,13 @@ async def test_initialization_state_verification(mock_options, mock_features_res
 
 @pytest.mark.asyncio
 async def test_sse_event_handling(mock_options):
-    """Test SSE event handling and reconnection logic"""
+    """Test SSE event handling including JSON parsing"""
     events = [
-        {'type': 'features', 'data': {'features': {'feature1': {'defaultValue': 1}}}},
-        {'type': 'ping', 'data': {}},  # Should be ignored
-        {'type': 'features', 'data': {'features': {'feature1': {'defaultValue': 2}}}}
+        # Real SSE payload is a raw string in 'data'
+        {'type': 'features', 'data': json.dumps({'features': {'feature1': {'defaultValue': 1}}})},
+        {'type': 'ping', 'data': '{}'},  # Should be ignored
+        {'type': 'features', 'data': json.dumps({'features': {'feature1': {'defaultValue': 2}}})}
     ]
-
-    async def mock_sse_handler(event_data):
-        """Mock the SSE event handler to directly update feature cache"""
-        if event_data['type'] == 'features':
-            await client._features_repository._handle_feature_update(event_data['data'])
 
     with patch('growthbook.FeatureRepository.load_features_async', 
                new_callable=AsyncMock, return_value={"features": {}, "savedGroups": {}}) as mock_load:
@@ -364,16 +365,15 @@ async def test_sse_event_handling(mock_options):
         try:
             await client.initialize()
 
-            # Simulate SSE events directly
+            # Simulate SSE events using the actual handler method
+            # This now tests the json.loads parsing logic!
             for event in events:
-                if event['type'] == 'features':
-                    await client._features_repository._handle_feature_update(event['data'])
+                await client._features_repository._handle_sse_event(event)
 
-            # print(f"AFTER TEST: Current cache state: {client._features_repository._feature_cache.get_current_state()}")
             # Verify feature update happened
-            assert client._features_repository._feature_cache.get_current_state()["features"]["feature1"]["defaultValue"] == 2
+            state = client._features_repository._feature_cache.get_current_state()
+            assert state["features"]["feature1"]["defaultValue"] == 2
         finally:
-            # Ensure we clean up the SSE connection
             await client.close()
 
 @pytest.mark.asyncio
