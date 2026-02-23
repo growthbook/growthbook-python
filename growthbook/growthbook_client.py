@@ -181,11 +181,6 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
     The Hand off - when the event arrives (we're still on the background thread), sse_handler uses `asyncio.run_coroutine_threadsafe` 
     to schedule the async processing `_handle_sse_event` onto the main event loop.
     """
-    async def _start_sse_refresh(self) -> None:
-        """Start SSE-based feature refresh"""
-        with self._refresh_lock:
-            if self._refresh_task is not None:  # Already running
-                return
 
     async def _handle_sse_event(self, event_data: Dict[str, Any]) -> None:
         """Process an event received from the SSE connection"""
