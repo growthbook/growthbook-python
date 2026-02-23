@@ -187,31 +187,38 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             if self._refresh_task is not None:  # Already running
                 return
 
-            # SSEClient invokes `on_event` synchronously from a background thread.
-            async def _handle_sse_event(event_data: Dict[str, Any]) -> None:
-                try:
-                    event_type = event_data.get("type")
-                    if event_type == "features-updated":
-                        response = await self.load_features_async(
-                            self._api_host, self._client_key, self._decryption_key, self._cache_ttl
-                        )
-                        if response is not None:
-                            await self._handle_feature_update(response)
-                    elif event_type == "features":
-                        data = event_data.get("data", "{}")
-                        if isinstance(data, str):
-                            data = json.loads(data)
-                        await self._handle_feature_update(data)
-                except Exception:
-                    logger.exception("Error handling SSE event")
+    async def _handle_sse_event(self, event_data: Dict[str, Any]) -> None:
+        """Process an event received from the SSE connection"""
+        try:
+            event_type = event_data.get("type")
+            if event_type == "features-updated":
+                response = await self.load_features_async(
+                    self._api_host, self._client_key, self._decryption_key, self._cache_ttl
+                )
+                if response is not None:
+                    await self._handle_feature_update(response)
+            elif event_type == "features":
+                data = event_data.get("data", "{}")
+                if isinstance(data, str):
+                    data = json.loads(data)
+                await self._handle_feature_update(data)
+        except Exception:
+            logger.exception("Error handling SSE event")
 
+    async def _start_sse_refresh(self) -> None:
+        """Start SSE-based feature refresh"""
+        with self._refresh_lock:
+            if self._refresh_task is not None:  # Already running
+                return
+
+            # SSEClient invokes `on_event` synchronously from a background thread.
             main_loop = asyncio.get_running_loop()
 
             # We must not pass an `async def` callback here (it would never be awaited).
             def sse_handler(event_data: Dict[str, Any]) -> None:
                 # Schedule async processing onto the main event loop.
                 try:
-                    asyncio.run_coroutine_threadsafe(_handle_sse_event(event_data), main_loop)
+                    asyncio.run_coroutine_threadsafe(self._handle_sse_event(event_data), main_loop)
                 except Exception:
                     logger.exception("Failed to schedule SSE event handler")
 
