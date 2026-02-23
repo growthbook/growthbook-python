@@ -414,6 +414,18 @@ class UserContext:
     sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
     skip_all_experiments: bool = False
 
+class AbstractAsyncFeatureCache(ABC):
+    @abstractmethod
+    async def get(self, key: str) -> Optional[Dict]:
+        pass
+
+    @abstractmethod
+    async def set(self, key: str, value: Dict, ttl: int) -> None:
+        pass
+
+    async def clear(self) -> None:
+        pass
+
 @dataclass
 class Options:
     url: Optional[str] = None
@@ -431,6 +443,7 @@ class Options:
     on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], None]] = None
     on_feature_usage: Optional[Callable[[str, 'FeatureResult', UserContext], None]] = None
     tracking_plugins: Optional[List[Any]] = None
+    cache: Optional[AbstractAsyncFeatureCache] = None
 
 
 @dataclass

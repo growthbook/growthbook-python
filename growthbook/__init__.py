@@ -1,10 +1,12 @@
 from .growthbook import *
+from .common_types import AbstractAsyncFeatureCache
 
 from .growthbook_client import (
     GrowthBookClient,
     EnhancedFeatureRepository,
     FeatureCache,
-    BackoffStrategy
+    BackoffStrategy,
+    InMemoryAsyncFeatureCache
 )
 
 # Plugin support
