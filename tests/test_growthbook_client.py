@@ -111,7 +111,7 @@ async def test_feature_repository_load():
         "savedGroups": {}
     }
     
-    with patch('growthbook.FeatureRepository.load_features_async', 
+    with patch('growthbook.FeatureRepository._fetch_features_async', 
                new_callable=AsyncMock, return_value=features_response) as mock_load:
         result = await repo.load_features_async(api_host="", client_key="")
         assert result == features_response
@@ -286,7 +286,7 @@ async def test_http_refresh():
     mock_load.side_effect = [feature_updates[0], feature_updates[1], *[feature_updates[1]] * 10]
     
     try:
-        with patch('growthbook.FeatureRepository.load_features_async', mock_load):
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', mock_load):
             # Start HTTP refresh with a short interval for testing
             refresh_task = asyncio.create_task(repo._start_http_refresh(interval=0.1))
             
@@ -316,7 +316,7 @@ async def test_initialization_state_verification(mock_options, mock_features_res
         callback_called = True
         features_received = features
 
-    with patch('growthbook.FeatureRepository.load_features_async', 
+    with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
                new_callable=AsyncMock, return_value=mock_features_response) as mock_load:
         
         client = GrowthBookClient(mock_options)
@@ -349,7 +349,7 @@ async def test_sse_event_handling(mock_options):
         if event_data['type'] == 'features':
             await client._features_repository._handle_feature_update(event_data['data'])
 
-    with patch('growthbook.FeatureRepository.load_features_async', 
+    with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
                new_callable=AsyncMock, return_value={"features": {}, "savedGroups": {}}) as mock_load:
 
         # Create options with SSE strategy
@@ -407,7 +407,7 @@ async def test_http_refresh_backoff():
         return {"features": {}, "savedGroups": {}}
     
     try:
-        with patch('growthbook.FeatureRepository.load_features_async', side_effect=mock_load):
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', side_effect=mock_load):
             refresh_task = asyncio.create_task(repo._start_http_refresh(interval=0.1))
             try:
                 await asyncio.wait_for(done.wait(), timeout=5.0)
@@ -457,7 +457,7 @@ async def test_concurrent_initialization():
         shared_response["features"]["test-feature"]["defaultValue"] += 1
         return shared_response
 
-    with patch('growthbook.FeatureRepository.load_features_async', side_effect=mock_load):
+    with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', side_effect=mock_load):
         client = GrowthBookClient(Options(
             api_host="https://test.growthbook.io",
             client_key="test_key"
@@ -529,7 +529,7 @@ async def test_eval_feature(test_eval_feature_data, base_client_setup):
     
     try:
         # Set up mocks for both FeatureRepository and EnhancedFeatureRepository
-        with patch('growthbook.FeatureRepository.load_features_async', 
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
                   new_callable=AsyncMock, return_value=features_data), \
              patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
                   new_callable=AsyncMock), \
@@ -564,7 +564,7 @@ async def test_experiment_run(test_experiment_run_data, base_client_setup):
     
     try:
         # Set up mocks for both FeatureRepository and EnhancedFeatureRepository
-        with patch('growthbook.FeatureRepository.load_features_async', 
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
                   new_callable=AsyncMock, return_value=features_data), \
              patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
                   new_callable=AsyncMock), \
@@ -611,7 +611,7 @@ async def test_feature_methods():
 
     try:
         # Set up mocks for both FeatureRepository and EnhancedFeatureRepository
-        with patch('growthbook.FeatureRepository.load_features_async', 
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
                   new_callable=AsyncMock, return_value=features_data), \
              patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
                   new_callable=AsyncMock), \
@@ -704,7 +704,7 @@ async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup):
     
     try:
         # Set up mocks
-        with patch('growthbook.FeatureRepository.load_features_async', 
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
                   new_callable=AsyncMock, return_value=features_data), \
              patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
                   new_callable=AsyncMock), \
@@ -770,7 +770,7 @@ async def test_tracking():
 
     try:
         # Set up mocks for feature repository
-        with patch('growthbook.FeatureRepository.load_features_async', 
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
                   new_callable=AsyncMock, return_value={"features": {}, "savedGroups": {}}), \
              patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
                   new_callable=AsyncMock), \
@@ -831,7 +831,7 @@ async def test_handles_tracking_errors():
 
     try:
         # Set up mocks
-        with patch('growthbook.FeatureRepository.load_features_async', 
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
                   new_callable=AsyncMock, return_value={"features": {}, "savedGroups": {}}), \
              patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
                   new_callable=AsyncMock), \
@@ -884,7 +884,7 @@ async def test_feature_usage_callback():
             "savedGroups": {}
         }
         
-        with patch('growthbook.FeatureRepository.load_features_async', 
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
                   new_callable=AsyncMock, return_value=mock_features), \
              patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
                   new_callable=AsyncMock), \
@@ -957,7 +957,7 @@ async def test_feature_usage_callback_error_handling():
             "savedGroups": {}
         }
         
-        with patch('growthbook.FeatureRepository.load_features_async', 
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
                   new_callable=AsyncMock, return_value=mock_features), \
              patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
                   new_callable=AsyncMock), \
@@ -1019,7 +1019,7 @@ async def test_skip_all_experiments_flag():
             "savedGroups": {}
         }
         
-        with patch('growthbook.FeatureRepository.load_features_async', 
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.load_features_async', 
                   new_callable=AsyncMock, return_value=mock_features), \
              patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
                   new_callable=AsyncMock), \
