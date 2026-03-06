@@ -485,6 +485,9 @@ class Options:
     remote_eval: bool = False
     global_attributes: Dict[str, Any] = field(default_factory=dict)
     forced_features: Dict[str, Any] = field(default_factory=dict)
+    http_connect_timeout: Optional[int] = None
+    http_read_timeout: Optional[int] = None
+
 
 @dataclass
 class GlobalContext:

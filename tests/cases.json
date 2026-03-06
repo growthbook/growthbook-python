@@ -758,6 +758,174 @@
       false
     ],
     [
+      "$regexi - pass (case insensitive match)",
+      {
+        "userAgent": {
+          "$regexi": "(mobile|tablet)"
+        }
+      },
+      {
+        "userAgent": "Android Mobile Browser"
+      },
+      true
+    ],
+    [
+      "$regexi - pass (uppercase pattern, lowercase value)",
+      {
+        "userAgent": {
+          "$regexi": "(MOBILE|TABLET)"
+        }
+      },
+      {
+        "userAgent": "android mobile browser"
+      },
+      true
+    ],
+    [
+      "$regexi - fail",
+      {
+        "userAgent": {
+          "$regexi": "(mobile|tablet)"
+        }
+      },
+      {
+        "userAgent": "Chrome Desktop Browser"
+      },
+      false
+    ],
+    [
+      "$notRegex - pass",
+      {
+        "userAgent": {
+          "$notRegex": "(Mobile|Tablet)"
+        }
+      },
+      {
+        "userAgent": "Chrome Desktop Browser"
+      },
+      true
+    ],
+    [
+      "$notRegex - fail",
+      {
+        "userAgent": {
+          "$notRegex": "(Mobile|Tablet)"
+        }
+      },
+      {
+        "userAgent": "Android Mobile Browser"
+      },
+      false
+    ],
+    [
+      "$notRegexi - pass",
+      {
+        "userAgent": {
+          "$notRegexi": "(mobile|tablet)"
+        }
+      },
+      {
+        "userAgent": "Chrome Desktop Browser"
+      },
+      true
+    ],
+    [
+      "$notRegexi - fail",
+      {
+        "userAgent": {
+          "$notRegexi": "(mobile|tablet)"
+        }
+      },
+      {
+        "userAgent": "Android Mobile Browser"
+      },
+      false
+    ],
+    [
+      "$ini - pass",
+      {
+        "tags": {
+          "$ini": ["A", "B"]
+        }
+      },
+      {
+        "tags": "a"
+      },
+      true
+    ],
+    [
+      "$ini - fail",
+      {
+        "tags": {
+          "$ini": ["a", "b"]
+        }
+      },
+      {
+        "tags": "c"
+      },
+      false
+    ],
+    [
+      "$ini - array pass",
+      {
+        "tags": {
+          "$ini": ["A", "B"]
+        }
+      },
+      {
+        "tags": ["d", "a"]
+      },
+      true
+    ],
+    [
+      "$nini - pass",
+      {
+        "tags": {
+          "$nini": ["A", "B"]
+        }
+      },
+      {
+        "tags": "c"
+      },
+      true
+    ],
+    [
+      "$nini - fail",
+      {
+        "tags": {
+          "$nini": ["A", "B"]
+        }
+      },
+      {
+        "tags": "a"
+      },
+      false
+    ],
+    [
+      "$alli - pass",
+      {
+        "tags": {
+          "$alli": ["A", "B"]
+        }
+      },
+      {
+        "tags": ["a", "b", "c"]
+      },
+      true
+    ],
+    [
+      "$alli - fail",
+      {
+        "tags": {
+          "$alli": ["A", "B"]
+        }
+      },
+      {
+        "tags": ["a", "c"]
+      },
+      false
+    ],
+    [
       "$gt/$lt numbers - pass",
       {
         "age": {
