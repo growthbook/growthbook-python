@@ -431,6 +431,8 @@ class Options:
     on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], None]] = None
     on_feature_usage: Optional[Callable[[str, 'FeatureResult', UserContext], None]] = None
     tracking_plugins: Optional[List[Any]] = None
+    http_connect_timeout: Optional[int] = None
+    http_read_timeout: Optional[int] = None
 
 
 @dataclass

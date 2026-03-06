@@ -102,7 +102,13 @@ class FeatureCache:
             }
 
 class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
-    def __init__(self, api_host: str, client_key: str, decryption_key: str = "", cache_ttl: int = 60):
+    def __init__(self,
+                 api_host: str,
+                 client_key: str,
+                 decryption_key: str = "",
+                 cache_ttl: int = 60,
+                 http_connect_timeout: Optional[int] = None,
+                 http_read_timeout: Optional[int] = None):
         FeatureRepository.__init__(self)
         self._api_host = api_host
         self._client_key = client_key
@@ -116,6 +122,8 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._callbacks: List[Callable[[Dict[str, Any]], Awaitable[None]]] = []
         self._last_successful_refresh: Optional[datetime] = None
         self._refresh_in_progress = asyncio.Lock()
+        self.http_connect_timeout = http_connect_timeout
+        self.http_read_timeout = http_read_timeout
 
     @asynccontextmanager
     async def refresh_operation(self):
@@ -369,13 +377,15 @@ class GrowthBookClient:
         # Plugin support
         self._tracking_plugins: List[Any] = self.options.tracking_plugins or []
         self._initialized_plugins: List[Any] = []
-        
+
         self._features_repository = (
             EnhancedFeatureRepository(
-                self.options.api_host or "https://cdn.growthbook.io", 
-                self.options.client_key or "", 
-                self.options.decryption_key or "", 
-                self.options.cache_ttl
+                self.options.api_host or "https://cdn.growthbook.io",
+                self.options.client_key or "",
+                self.options.decryption_key or "",
+                self.options.cache_ttl,
+                self.options.http_connect_timeout,
+                self.options.http_read_timeout
             )
             if self.options.client_key
             else None
