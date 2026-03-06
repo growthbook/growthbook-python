@@ -7,6 +7,7 @@ More info at https://www.growthbook.io
 
 import hashlib
 from pathlib import Path
+import atexit
 import sys
 import json
 import threading
@@ -242,8 +243,9 @@ class SSEClient:
             return
 
         self.is_running = True
-        self._sse_thread = threading.Thread(target=self._run_sse_channel)
+        self._sse_thread = threading.Thread(target=self._run_sse_channel, daemon=True)
         self._sse_thread.start()
+        atexit.register(self.disconnect)
 
     def disconnect(self, timeout=10):
         """Gracefully disconnect with timeout"""
@@ -920,7 +922,7 @@ class GrowthBook(object):
         feature_repo.load_features_from_persistent_cache()
 
         if features:
-            self.setFeatures(features)
+            self.set_features(features)
 
         # Register for automatic feature updates when cache expires
         if self._client_key:
@@ -953,7 +955,7 @@ class GrowthBook(object):
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
         )
         if response is not None and "features" in response.keys():
-            self.setFeatures(response["features"])
+            self.set_features(response["features"])
 
         if response is not None and "savedGroups" in response:
             self._saved_groups = response["savedGroups"]
@@ -968,7 +970,7 @@ class GrowthBook(object):
 
         if features is not None:
             if "features" in features:
-                self.setFeatures(features["features"])
+                self.set_features(features["features"])
             if "savedGroups" in features:
                 self._saved_groups = features["savedGroups"]
             feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
@@ -982,7 +984,7 @@ class GrowthBook(object):
 
         if data is not None:
             if "features" in data:
-                self.setFeatures(data["features"])
+                self.set_features(data["features"])
             if "savedGroups" in data:
                 self._saved_groups = data["savedGroups"]
             feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
