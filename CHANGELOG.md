@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.1.5](https://github.com/growthbook/growthbook-python/compare/v2.1.4...v2.1.5) (2026-03-06)
+
+
+### Bug Fixes
+
+* Add optional timeout for PoolManager ([#91](https://github.com/growthbook/growthbook-python/issues/91)) ([2fe21f6](https://github.com/growthbook/growthbook-python/commit/2fe21f692189d7a37712d445b4545571ff2d3039))
+
 ## [2.1.4](https://github.com/growthbook/growthbook-python/compare/v2.1.3...v2.1.4) (2026-02-23)
 
 
