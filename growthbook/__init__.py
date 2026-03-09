@@ -9,7 +9,8 @@ from .growthbook_client import (
 
 from .cache_interfaces import (
     AbstractFeatureCache,
-    AbstractAsyncFeatureCache
+    AbstractAsyncFeatureCache,
+    InMemoryAsyncFeatureCache
 )
 
 # Plugin support

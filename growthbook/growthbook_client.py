@@ -9,7 +9,8 @@ import asyncio
 import threading
 import traceback
 from datetime import datetime
-from growthbook import FeatureRepository, feature_repo, AbstractAsyncFeatureCache
+from growthbook import FeatureRepository, feature_repo
+from growthbook.cache_interfaces import AbstractAsyncFeatureCache
 from contextlib import asynccontextmanager
 
 from .core import eval_feature as core_eval_feature, run_experiment
