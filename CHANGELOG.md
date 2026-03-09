@@ -1,5 +1,66 @@
 # Changelog
 
+## [2.1.5](https://github.com/growthbook/growthbook-python/compare/v2.1.4...v2.1.5) (2026-03-06)
+
+
+### Bug Fixes
+
+* Add optional timeout for PoolManager ([#91](https://github.com/growthbook/growthbook-python/issues/91)) ([2fe21f6](https://github.com/growthbook/growthbook-python/commit/2fe21f692189d7a37712d445b4545571ff2d3039))
+
+## [2.1.4](https://github.com/growthbook/growthbook-python/compare/v2.1.3...v2.1.4) (2026-02-23)
+
+
+### Bug Fixes
+
+* Fixes for process hanging and shutdown errors - Merge pull request [#103](https://github.com/growthbook/growthbook-python/issues/103) from growthbook/pr102 ([c89a385](https://github.com/growthbook/growthbook-python/commit/c89a385b0cd0b0c4a776b7b81fc1ab3d27e40738))
+* parsing data for SSE in GrowthbookClient ([d390223](https://github.com/growthbook/growthbook-python/commit/d390223c0035d65d91a930391d4731321f4c2f15))
+* prevent SSE thread from blocking process exit and suppressing shutdown errors ([bddfb82](https://github.com/growthbook/growthbook-python/commit/bddfb82fce6284d4edf48b6135b51b362f82eab9))
+
+## [2.1.3](https://github.com/growthbook/growthbook-python/compare/v2.1.2...v2.1.3) (2026-02-05)
+
+
+### Features
+
+* Supporting Dict Subclasses in Evaluation - Merge pull request [#99](https://github.com/growthbook/growthbook-python/issues/99) from growthbook/feat/isInstanceTypeCheck ([8ed4d4e](https://github.com/growthbook/growthbook-python/commit/8ed4d4e1aaf5b79408d60b16f856d66146600f91))
+* Replaced all type(x) is T checks with isinstance(x, T).
+* Updated getType, getPath, compare, and operator functions to use these new checks.
+
+## [2.1.2](https://github.com/growthbook/growthbook-python/compare/v2.1.1...v2.1.2) (2026-01-29)
+
+
+### Bug Fixes
+
+* Disabled features not being removed from cache ([#93](https://github.com/growthbook/growthbook-python/issues/93)) ([eac9717](https://github.com/growthbook/growthbook-python/commit/eac971782f7776ff4261cc4ef9b7894b5735eb9d))
+
+## [2.1.1](https://github.com/growthbook/growthbook-python/compare/v2.1.0...v2.1.1) (2026-01-27)
+
+
+### Features
+
+* Add support for case-insensitive membership operators: `$ini`, `$nini`, `$alli`
+  - `$ini`: Case-insensitive version of `$in` operator
+  - `$nini`: Case-insensitive version of `$nin` operator
+  - `$alli`: Case-insensitive version of `$all` operator ([0e26f7d](https://github.com/growthbook/growthbook-python/commit/0e26f7d55e2b4b5908a9e3dd0921c1ea1fa49f97))
+
+## [2.1.0](https://github.com/growthbook/growthbook-python/compare/v2.0.0...v2.1.0) (2026-01-22)
+
+
+### Features
+
+* Adds support for `regexi` and `$notRegexi` - Case insensitive regex ([b9fce8a](https://github.com/growthbook/growthbook-python/commit/b9fce8ab2e7c91e38a0f2cb7b1d2446d564e650b))
+- Adds support for `$notRegex`
+
+## [2.0.0](https://github.com/growthbook/growthbook-python/compare/v1.4.10...v2.0.0) (2026-01-14)
+
+
+### ⚠ BREAKING CHANGES
+
+* Fixes for Async wrapper execution and other enhancements
+
+### Bug Fixes
+
+* Fixes for Async wrapper execution and other enhancements ([e6a0eaf](https://github.com/growthbook/growthbook-python/commit/e6a0eaff7dcc391819ad92eeb94a4fd3aac7bdda))
+
 ## [1.4.10](https://github.com/growthbook/growthbook-python/compare/v1.4.9...v1.4.10) (2025-12-19)
 
 

@@ -89,10 +89,21 @@ async def test_sse_connection_lifecycle(mock_options, mock_features_response):
                      "refresh_strategy": FeatureRefreshStrategy.SERVER_SENT_EVENTS})
         )
         
-        with patch('growthbook.growthbook_client.EnhancedFeatureRepository._maintain_sse_connection') as mock_sse:
+        # `startAutoRefresh` is synchronous and should be invoked as part of SSE start-up.
+        # `stopAutoRefresh` should be called during shutdown to stop/join the SSE thread.
+        with patch('growthbook.growthbook_client.EnhancedFeatureRepository.startAutoRefresh') as mock_start, \
+             patch('growthbook.growthbook_client.EnhancedFeatureRepository.stopAutoRefresh') as mock_stop:
             await client.initialize()
-            assert mock_sse.called
+            # Allow the SSE lifecycle task to start and invoke startAutoRefresh
+            await asyncio.sleep(0.1)
+            assert mock_start.called
+            
+            # Verify the thread created is a daemon thread (if possible without real start)
+            # Since we mock startAutoRefresh, we can't check the real thread here.
+            # But we can check that SSEClient is initialized correctly if we don't mock it all.
+            
             await client.close()
+            assert mock_stop.called
 
 @pytest.mark.asyncio
 async def test_feature_repository_load():
@@ -152,19 +163,93 @@ async def test_concurrent_feature_updates():
         client_key="test_key"
     )
     features = {f"feature-{i}": {"defaultValue": i} for i in range(10)}
-    
+
     async def update_features(feature_subset):
         await repo._handle_feature_update({"features": feature_subset, "savedGroups": {}})
-            
+
     await asyncio.gather(*[
-        update_features({k: features[k]}) 
+        update_features({k: features[k]})
         for k in features
     ])
-    
+
     cache_state = repo._feature_cache.get_current_state()
     # Verify all features were properly stored
-    assert cache_state["features"] == features
+    assert len(cache_state["features"]) == 1
     assert cache_state["savedGroups"] == {}
+    feature_key = list(cache_state["features"].keys())[0]
+    assert feature_key in features
+    assert cache_state["features"][feature_key] == features[feature_key]
+
+
+@pytest.mark.asyncio
+async def test_feature_cache_thread_safety(cache):
+    """Verify FeatureCache is thread-safe during concurrent updates"""
+    repo = EnhancedFeatureRepository(
+        api_host="https://test.growthbook.io",
+        client_key="test_key"
+    )
+
+    feature_sets = [
+        {f"set-{i}-feature-{j}": {"value": j} for j in range(3)}
+        for i in range(5)
+    ]
+
+    async def update_full_set(feature_set):
+        await repo._handle_feature_update({
+            "features": feature_set,
+            "savedGroups": {}
+        })
+
+    # Concurrent updates
+    await asyncio.gather(*[update_full_set(fs) for fs in feature_sets])
+
+    cache = repo._feature_cache.get_current_state()
+
+    # One complete set should be in cache (race condition winner)
+    assert len(cache["features"]) == 3
+    cache_keys = set(cache["features"].keys())
+    assert any(cache_keys == set(fs.keys()) for fs in feature_sets)
+
+
+@pytest.mark.asyncio
+async def test_disabled_features_removed_from_cache(cache):
+    """
+    Regression test: disabled features must be removed from cache.
+
+    Previously, FeatureCache.update() used dict.update() which only
+    adds/modifies entries but never removes them. This caused disabled
+    features to persist in the cache indefinitely.
+    """
+    repo = EnhancedFeatureRepository(
+        api_host="https://test.growthbook.io",
+        client_key="test_key"
+    )
+
+    # Initial state: 2 features enabled
+    await repo._handle_feature_update({
+        "features": {
+            "feature-a": {"defaultValue": True},
+            "feature-b": {"defaultValue": False}
+        },
+        "savedGroups": {}
+    })
+
+    cache = repo._feature_cache.get_current_state()
+    assert "feature-a" in cache["features"]
+    assert "feature-b" in cache["features"]
+
+    # User disables feature-b in Growthbook UI
+    # API now returns only active features
+    await repo._handle_feature_update({
+        "features": {
+            "feature-a": {"defaultValue": True}
+        },
+        "savedGroups": {}
+    })
+
+    cache = repo._feature_cache.get_current_state()
+    assert "feature-a" in cache["features"]
+    assert "feature-b" not in cache["features"]  # Must be removed!
 
 @pytest.mark.asyncio
 async def test_callback_thread_safety():
@@ -257,17 +342,13 @@ async def test_initialization_state_verification(mock_options, mock_features_res
 
 @pytest.mark.asyncio
 async def test_sse_event_handling(mock_options):
-    """Test SSE event handling and reconnection logic"""
+    """Test SSE event handling including JSON parsing"""
     events = [
-        {'type': 'features', 'data': {'features': {'feature1': {'defaultValue': 1}}}},
-        {'type': 'ping', 'data': {}},  # Should be ignored
-        {'type': 'features', 'data': {'features': {'feature1': {'defaultValue': 2}}}}
+        # Real SSE payload is a raw string in 'data'
+        {'type': 'features', 'data': json.dumps({'features': {'feature1': {'defaultValue': 1}}})},
+        {'type': 'ping', 'data': '{}'},  # Should be ignored
+        {'type': 'features', 'data': json.dumps({'features': {'feature1': {'defaultValue': 2}}})}
     ]
-
-    async def mock_sse_handler(event_data):
-        """Mock the SSE event handler to directly update feature cache"""
-        if event_data['type'] == 'features':
-            await client._features_repository._handle_feature_update(event_data['data'])
 
     with patch('growthbook.FeatureRepository.load_features_async', 
                new_callable=AsyncMock, return_value={"features": {}, "savedGroups": {}}) as mock_load:
@@ -284,16 +365,15 @@ async def test_sse_event_handling(mock_options):
         try:
             await client.initialize()
 
-            # Simulate SSE events directly
+            # Simulate SSE events using the actual handler method
+            # This now tests the json.loads parsing logic!
             for event in events:
-                if event['type'] == 'features':
-                    await client._features_repository._handle_feature_update(event['data'])
+                await client._features_repository._handle_sse_event(event)
 
-            # print(f"AFTER TEST: Current cache state: {client._features_repository._feature_cache.get_current_state()}")
             # Verify feature update happened
-            assert client._features_repository._feature_cache.get_current_state()["features"]["feature1"]["defaultValue"] == 2
+            state = client._features_repository._feature_cache.get_current_state()
+            assert state["features"]["feature1"]["defaultValue"] == 2
         finally:
-            # Ensure we clean up the SSE connection
             await client.close()
 
 @pytest.mark.asyncio
