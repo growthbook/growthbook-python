@@ -9,7 +9,7 @@ import asyncio
 import threading
 import traceback
 from datetime import datetime
-from growthbook import FeatureRepository, feature_repo
+from growthbook import FeatureRepository, feature_repo, AbstractAsyncFeatureCache
 from contextlib import asynccontextmanager
 
 from .core import eval_feature as core_eval_feature, run_experiment
@@ -116,6 +116,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._callbacks: List[Callable[[Dict[str, Any]], Awaitable[None]]] = []
         self._last_successful_refresh: Optional[datetime] = None
         self._refresh_in_progress = asyncio.Lock()
+        self.async_cache: Optional[AbstractAsyncFeatureCache] = None
 
     @asynccontextmanager
     async def refresh_operation(self):
@@ -289,7 +290,27 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         if api_host == self._api_host and client_key == self._client_key:
             decryption_key = self._decryption_key
             ttl = self._cache_ttl
-        return await super().load_features_async(api_host, client_key, decryption_key, ttl)
+
+        key = api_host + "::" + client_key
+
+        if self.async_cache:
+            cached = await self.async_cache.get(key)
+            if cached:
+                return cached
+
+        res = await super().load_features_async(api_host, client_key, decryption_key, ttl)
+
+        if res is not None and self.async_cache:
+            await self.async_cache.set(key, res, ttl)
+
+        return res
+
+    def set_async_cache(self, cache: AbstractAsyncFeatureCache) -> None:
+        """
+        Set asynchronous cache implementation.
+        When set, load_features_async() will use this instead of sync cache.
+        """
+        self.async_cache = cache
 
 class GrowthBookClient:
     def __init__(
@@ -592,7 +613,7 @@ class GrowthBookClient:
     def user_agent_suffix(self) -> Optional[str]:
         """Get the suffix appended to the User-Agent header"""
         return feature_repo.user_agent_suffix
-        
+
     @user_agent_suffix.setter
     def user_agent_suffix(self, value: Optional[str]) -> None:
         """Set a suffix to be appended to the User-Agent header"""

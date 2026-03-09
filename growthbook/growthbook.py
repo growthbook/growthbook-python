@@ -23,8 +23,7 @@ from .common_types import (EvaluationContext,
                            Options,
                            Result, StackContext,
                            UserContext,
-                           AbstractStickyBucketService,
-                           FeatureRule
+                           AbstractStickyBucketService
                            )
 
 # Only require typing_extensions if using Python 3.7 or earlier
@@ -347,7 +346,6 @@ class SSEClient:
 class FeatureRepository(object):
     def __init__(self) -> None:
         self.cache: AbstractFeatureCache = InMemoryFeatureCache()
-        self.async_cache: Optional[AbstractAsyncFeatureCache] = None
         self.http: Optional[PoolManager] = None
         self.sse_client: Optional[SSEClient] = None
         self._feature_update_callbacks: List[Callable[[Dict], None]] = []
@@ -365,13 +363,6 @@ class FeatureRepository(object):
 
     def set_cache(self, cache: AbstractFeatureCache) -> None:
         self.cache = cache
-
-    def set_async_cache(self, cache: AbstractAsyncFeatureCache) -> None:
-        """
-        Set asynchronous cache implementation.
-        When set, load_features_async() will use this instead of sync cache.
-        """
-        self.async_cache = cache
 
     def clear_cache(self):
         self.cache.clear()
@@ -425,20 +416,13 @@ class FeatureRepository(object):
 
         key = api_host + "::" + client_key
 
-        # Use async cache if existed, unless fallback to sync
-        if self.async_cache:
-            cached = await self.async_cache.get(key)  # Async
-        else:
-            cached = self.cache.get(key)  # Fallback to sync cache
+        cached = self.cache.get(key)
 
         if not cached:
             res = await self._fetch_features_async(api_host, client_key, decryption_key)
             if res is not None:
                 # save in cache
-                if self.async_cache:
-                    await self.async_cache.set(key, res, ttl)  # Async!
-                else:
-                    self.cache.set(key, res, ttl)
+                self.cache.set(key, res, ttl)
 
                 logger.debug("Fetched features from API, stored in cache")
                 # Notify callbacks about fresh features
