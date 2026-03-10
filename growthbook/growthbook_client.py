@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-
+import json
 from dataclasses import dataclass, field
 import random
 import logging
@@ -10,7 +10,7 @@ import threading
 import traceback
 import time
 from datetime import datetime
-from growthbook import FeatureRepository, feature_repo, CacheEntry
+from .growthbook import FeatureRepository, feature_repo, CacheEntry
 from contextlib import asynccontextmanager
 
 from .core import eval_feature as core_eval_feature, run_experiment
@@ -36,11 +36,17 @@ class SingletonMeta(type):
     _lock = threading.Lock()
 
     def __call__(cls, *args, **kwargs):
+        # Identify instance by api_host and client_key (args[0] and args[1])
+        key = (args[0], args[1]) if len(args) >= 2 else "default"
+        
         with cls._lock:
             if cls not in cls._instances:
+                cls._instances[cls] = {}
+            
+            if key not in cls._instances[cls]:
                 instance = super().__call__(*args, **kwargs)
-                cls._instances[cls] = instance
-        return cls._instances[cls]
+                cls._instances[cls][key] = instance
+        return cls._instances[cls][key]
 
 class BackoffStrategy:
     """Exponential backoff with jitter for failed requests"""
@@ -103,6 +109,16 @@ class FeatureCache:
                 "savedGroups": self._cache['savedGroups']
             }
 
+class CacheEntry(object):
+    def __init__(self, value: Dict, ttl: int) -> None:
+        self.value = value
+        self.ttl = ttl
+        self.expires = time.time() + ttl
+
+    def update(self, value: Dict):
+        self.value = value
+        self.expires = time.time() + self.ttl
+
 class InMemoryAsyncFeatureCache(AbstractAsyncFeatureCache):
     def __init__(self) -> None:
         self.cache: Dict[str, CacheEntry] = {}
@@ -112,6 +128,8 @@ class InMemoryAsyncFeatureCache(AbstractAsyncFeatureCache):
             entry = self.cache[key]
             if entry.expires >= time.time():
                 return entry.value
+            else:
+                del self.cache[key]
         return None
 
     async def set(self, key: str, value: Dict, ttl: int) -> None:
@@ -123,8 +141,44 @@ class InMemoryAsyncFeatureCache(AbstractAsyncFeatureCache):
     async def clear(self) -> None:
         self.cache.clear()
 
+class RedisAsyncFeatureCache(AbstractAsyncFeatureCache):
+    def __init__(self, redis_url: str, key_prefix: str = "gb_cache:") -> None:
+        self.key_prefix = key_prefix
+        try:
+            import redis.asyncio as redis
+            self.redis = redis.from_url(redis_url, decode_responses=True)
+        except ImportError:
+            raise ImportError("redis package is required for RedisAsyncFeatureCache. Install it with `pip install redis`.")
+
+    def _get_key(self, key: str) -> str:
+        return f"{self.key_prefix}{key}"
+
+    async def get(self, key: str) -> Optional[Dict]:
+        data = await self.redis.get(self._get_key(key))
+        if data:
+            return json.loads(data)
+        return None
+
+    async def set(self, key: str, value: Dict, ttl: int) -> None:
+        await self.redis.set(self._get_key(key), json.dumps(value), ex=ttl)
+
+    async def clear(self) -> None:
+        keys = await self.redis.keys(f"{self.key_prefix}*")
+        if keys:
+            await self.redis.delete(*keys)
+    
+    async def close(self) -> None:
+        await self.redis.close()
+
 class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
-    def __init__(self, api_host: str, client_key: str, decryption_key: str = "", cache_ttl: int = 60, cache: Optional[AbstractAsyncFeatureCache] = None):
+    def __init__(self,
+                 api_host: str,
+                 client_key: str,
+                 decryption_key: str = "",
+                 cache_ttl: int = 60,
+                 cache: Optional[AbstractAsyncFeatureCache] = None,
+                 http_connect_timeout: Optional[int] = None,
+                 http_read_timeout: Optional[int] = None):
         FeatureRepository.__init__(self)
         self._api_host = api_host
         self._client_key = client_key
@@ -139,6 +193,8 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._last_successful_refresh: Optional[datetime] = None
         self._refresh_in_progress = asyncio.Lock()
         self.cache = cache if cache else InMemoryAsyncFeatureCache()
+        self.http_connect_timeout = http_connect_timeout
+        self.http_read_timeout = http_read_timeout
 
     @asynccontextmanager
     async def refresh_operation(self):
@@ -204,6 +260,25 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
     The Hand off - when the event arrives (we're still on the background thread), sse_handler uses `asyncio.run_coroutine_threadsafe` 
     to schedule the async processing `_handle_sse_event` onto the main event loop.
     """
+
+    async def _handle_sse_event(self, event_data: Dict[str, Any]) -> None:
+        """Process an event received from the SSE connection"""
+        try:
+            event_type = event_data.get("type")
+            if event_type == "features-updated":
+                response = await self.load_features_async(
+                    self._api_host, self._client_key, self._decryption_key, self._cache_ttl
+                )
+                if response is not None:
+                    await self._handle_feature_update(response)
+            elif event_type == "features":
+                data = event_data.get("data", "{}")
+                if isinstance(data, str):
+                    data = json.loads(data)
+                await self._handle_feature_update(data)
+        except Exception:
+            logger.exception("Error handling SSE event")
+
     async def _start_sse_refresh(self) -> None:
         """Start SSE-based feature refresh"""
         with self._refresh_lock:
@@ -211,27 +286,13 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                 return
 
             # SSEClient invokes `on_event` synchronously from a background thread.
-            async def _handle_sse_event(event_data: Dict[str, Any]) -> None:
-                try:
-                    event_type = event_data.get("type")
-                    if event_type == "features-updated":
-                        response = await self.load_features_async(
-                            self._api_host, self._client_key, self._decryption_key, self._cache_ttl
-                        )
-                        if response is not None:
-                            await self._handle_feature_update(response)
-                    elif event_type == "features":
-                        await self._handle_feature_update(event_data.get("data", {}))
-                except Exception:
-                    logger.exception("Error handling SSE event")
-
             main_loop = asyncio.get_running_loop()
 
             # We must not pass an `async def` callback here (it would never be awaited).
             def sse_handler(event_data: Dict[str, Any]) -> None:
                 # Schedule async processing onto the main event loop.
                 try:
-                    asyncio.run_coroutine_threadsafe(_handle_sse_event(event_data), main_loop)
+                    asyncio.run_coroutine_threadsafe(self._handle_sse_event(event_data), main_loop)
                 except Exception:
                     logger.exception("Failed to schedule SSE event handler")
 
@@ -401,14 +462,16 @@ class GrowthBookClient:
         # Plugin support
         self._tracking_plugins: List[Any] = self.options.tracking_plugins or []
         self._initialized_plugins: List[Any] = []
-        
+
         self._features_repository = (
             EnhancedFeatureRepository(
-                self.options.api_host or "https://cdn.growthbook.io", 
-                self.options.client_key or "", 
-                self.options.decryption_key or "", 
+                self.options.api_host or "https://cdn.growthbook.io",
+                self.options.client_key or "",
+                self.options.decryption_key or "",
                 self.options.cache_ttl,
-                self.options.cache
+                self.options.cache,
+                self.options.http_connect_timeout,
+                self.options.http_read_timeout
             )
             if self.options.client_key
             else None

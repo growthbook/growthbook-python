@@ -1,5 +1,30 @@
 # Changelog
 
+## [2.1.5](https://github.com/growthbook/growthbook-python/compare/v2.1.4...v2.1.5) (2026-03-06)
+
+
+### Bug Fixes
+
+* Add optional timeout for PoolManager ([#91](https://github.com/growthbook/growthbook-python/issues/91)) ([2fe21f6](https://github.com/growthbook/growthbook-python/commit/2fe21f692189d7a37712d445b4545571ff2d3039))
+
+## [2.1.4](https://github.com/growthbook/growthbook-python/compare/v2.1.3...v2.1.4) (2026-02-23)
+
+
+### Bug Fixes
+
+* Fixes for process hanging and shutdown errors - Merge pull request [#103](https://github.com/growthbook/growthbook-python/issues/103) from growthbook/pr102 ([c89a385](https://github.com/growthbook/growthbook-python/commit/c89a385b0cd0b0c4a776b7b81fc1ab3d27e40738))
+* parsing data for SSE in GrowthbookClient ([d390223](https://github.com/growthbook/growthbook-python/commit/d390223c0035d65d91a930391d4731321f4c2f15))
+* prevent SSE thread from blocking process exit and suppressing shutdown errors ([bddfb82](https://github.com/growthbook/growthbook-python/commit/bddfb82fce6284d4edf48b6135b51b362f82eab9))
+
+## [2.1.3](https://github.com/growthbook/growthbook-python/compare/v2.1.2...v2.1.3) (2026-02-05)
+
+
+### Features
+
+* Supporting Dict Subclasses in Evaluation - Merge pull request [#99](https://github.com/growthbook/growthbook-python/issues/99) from growthbook/feat/isInstanceTypeCheck ([8ed4d4e](https://github.com/growthbook/growthbook-python/commit/8ed4d4e1aaf5b79408d60b16f856d66146600f91))
+* Replaced all type(x) is T checks with isinstance(x, T).
+* Updated getType, getPath, compare, and operator functions to use these new checks.
+
 ## [2.1.2](https://github.com/growthbook/growthbook-python/compare/v2.1.1...v2.1.2) (2026-01-29)
 
 

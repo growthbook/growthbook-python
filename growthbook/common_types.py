@@ -444,6 +444,8 @@ class Options:
     on_feature_usage: Optional[Callable[[str, 'FeatureResult', UserContext], None]] = None
     tracking_plugins: Optional[List[Any]] = None
     cache: Optional[AbstractAsyncFeatureCache] = None
+    http_connect_timeout: Optional[int] = None
+    http_read_timeout: Optional[int] = None
 
 
 @dataclass
