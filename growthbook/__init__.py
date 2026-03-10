@@ -1,11 +1,13 @@
 from .growthbook import *
-
 from .growthbook_client import (
     GrowthBookClient,
     EnhancedFeatureRepository,
     FeatureCache,
-    BackoffStrategy
+    BackoffStrategy,
+    InMemoryAsyncFeatureCache,
+    RedisAsyncFeatureCache
 )
+from .common_types import AbstractAsyncFeatureCache
 
 # Plugin support
 from .plugins import (
