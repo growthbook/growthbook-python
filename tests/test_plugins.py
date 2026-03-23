@@ -6,6 +6,7 @@ Plugin Tests for GrowthBook Python SDK
 - GrowthBookTrackingPlugin functionality
 """
 
+import json
 import unittest
 from unittest.mock import patch, MagicMock
 from growthbook import (
@@ -426,3 +427,231 @@ class TestGrowthBookClientPlugins(unittest.TestCase):
         
         # Clean up request context
         clear_request_context()
+
+
+class TestLogEvent(unittest.TestCase):
+    """Tests for gb.log_event() and GrowthBookClient.log_event()."""
+
+    # ------------------------------------------------------------------
+    # Sync GrowthBook
+    # ------------------------------------------------------------------
+
+    def test_log_event_warns_without_plugin(self):
+        """log_event should warn and do nothing when no event logger is set."""
+        gb = GrowthBook(attributes={"id": "u1"})
+        with self.assertLogs("growthbook", level="WARNING") as cm:
+            gb.log_event("page_view", {"path": "/home"})
+        self.assertTrue(any("no event logger" in msg.lower() for msg in cm.output))
+        gb.destroy()
+
+    def test_set_event_logger_called_on_log_event(self):
+        """set_event_logger registers a callable invoked by log_event."""
+        received = []
+
+        def my_logger(event_name, properties, user_context):
+            received.append((event_name, properties, user_context))
+
+        gb = GrowthBook(attributes={"id": "u1"})
+        gb.set_event_logger(my_logger)
+        gb.log_event("button_clicked", {"button": "cta"})
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][0], "button_clicked")
+        self.assertEqual(received[0][1], {"button": "cta"})
+        gb.destroy()
+
+    def test_log_event_with_plugin_sends_correct_payload(self):
+        """Plugin wires the event logger; log_event triggers an ingestor POST."""
+        posted = []
+
+        def fake_post(url, data, headers, timeout):
+            posted.append({"url": url, "body": json.loads(data), "headers": headers})
+            response = MagicMock()
+            response.status_code = 200
+            return response
+
+        with patch("requests.post", side_effect=fake_post):
+            gb = GrowthBook(
+                attributes={"id": "user-42", "user_id": "u42"},
+                client_key="sdk-test-key",
+                plugins=[
+                    growthbook_tracking_plugin(
+                        ingestor_host="https://us1.gb-ingest.com",
+                        batch_size=1,  # flush immediately
+                    )
+                ],
+            )
+            gb.log_event("checkout_started", {"cart_value": 99})
+            # Give the daemon thread a moment to post
+            import time; time.sleep(0.05)
+
+        self.assertEqual(len(posted), 1, "Expected exactly one POST")
+        url = posted[0]["url"]
+        self.assertIn("/track", url)
+        self.assertIn("client_key=sdk-test-key", url)
+
+        body = posted[0]["body"]
+        self.assertIsInstance(body, list)
+        self.assertEqual(len(body), 1)
+
+        event = body[0]
+        self.assertEqual(event["event_name"], "checkout_started")
+        self.assertEqual(event["properties_json"], {"cart_value": 99})
+        self.assertEqual(event["sdk_language"], "python")
+        self.assertEqual(event["user_id"], "u42")
+        self.assertEqual(event["device_id"], "user-42")  # falls back to "id"
+
+        # UTM and other top-level attrs should NOT appear in context_json
+        self.assertNotIn("user_id", event["context_json"])
+
+        self.assertEqual(posted[0]["headers"]["Content-Type"], "text/plain")
+        gb.destroy()
+
+    def test_log_event_empty_properties(self):
+        """log_event works with no properties argument."""
+        received = []
+
+        def my_logger(event_name, properties, user_context):
+            received.append(properties)
+
+        gb = GrowthBook(attributes={"id": "u1"})
+        gb.set_event_logger(my_logger)
+        gb.log_event("page_view")
+
+        self.assertEqual(received[0], {})
+        gb.destroy()
+
+    def test_event_logger_cleared_on_destroy(self):
+        """Event logger reference is cleared when GrowthBook is destroyed."""
+        gb = GrowthBook(attributes={"id": "u1"})
+        gb.set_event_logger(lambda *a: None)
+        self.assertIsNotNone(gb._event_logger)
+        gb.destroy()
+        self.assertIsNone(gb._event_logger)
+
+    def test_log_event_uses_current_attributes_after_set_attributes(self):
+        """log_event must reflect the latest attributes, not the ones from __init__.
+
+        set_attributes() replaces self._attributes but _user_ctx.attributes still
+        points to the old dict until _get_eval_context() syncs it. log_event must
+        perform the same sync so callers always see current state.
+        """
+        received = []
+
+        def my_logger(event_name, properties, user_context):
+            received.append(dict(user_context.attributes))
+
+        gb = GrowthBook(attributes={"id": "old-user"})
+        gb.set_event_logger(my_logger)
+
+        gb.set_attributes({"id": "new-user"})
+        gb.log_event("page_view")
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0]["id"], "new-user")
+
+    # ------------------------------------------------------------------
+    # Async GrowthBookClient
+    # ------------------------------------------------------------------
+
+    def test_async_client_log_event_warns_without_plugin(self):
+        """GrowthBookClient.log_event warns when no event logger is configured."""
+        import asyncio
+        from growthbook.growthbook_client import GrowthBookClient
+        from growthbook.common_types import Options
+
+        client = GrowthBookClient(Options(client_key="sdk-key"))
+
+        async def run():
+            with self.assertLogs("growthbook.growthbook_client", level="WARNING") as cm:
+                await client.log_event("test_event")
+            self.assertTrue(any("no event logger" in msg.lower() for msg in cm.output))
+
+        asyncio.run(run())
+
+    def test_async_client_set_event_logger_and_log_event(self):
+        """GrowthBookClient.set_event_logger and log_event work together."""
+        import asyncio
+        from growthbook.growthbook_client import GrowthBookClient
+        from growthbook.common_types import Options, UserContext
+
+        received = []
+
+        def sync_logger(event_name, properties, user_context):
+            received.append((event_name, properties, user_context.attributes))
+
+        client = GrowthBookClient(Options(client_key="sdk-key"))
+        client.set_event_logger(sync_logger)
+
+        async def run():
+            ctx = UserContext(attributes={"id": "async-user"})
+            await client.log_event("form_submitted", {"form": "signup"}, ctx)
+
+        asyncio.run(run())
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0][0], "form_submitted")
+        self.assertEqual(received[0][1], {"form": "signup"})
+        self.assertEqual(received[0][2], {"id": "async-user"})
+
+    def test_async_client_plugin_wires_event_logger(self):
+        """Plugin initialised on GrowthBookClient registers an event logger."""
+        from growthbook.growthbook_client import GrowthBookClient
+        from growthbook.common_types import Options
+
+        client = GrowthBookClient(
+            Options(
+                client_key="sdk-key",
+                tracking_plugins=[
+                    growthbook_tracking_plugin(ingestor_host="https://us1.gb-ingest.com")
+                ],
+            )
+        )
+        # The plugin should have called set_event_logger
+        self.assertIsNotNone(client.options.event_logger)
+
+    # ------------------------------------------------------------------
+    # Payload format helpers
+    # ------------------------------------------------------------------
+
+    def test_build_event_payload_attribute_splitting(self):
+        """Known top-level attributes are promoted; others go into context_json."""
+        from growthbook.plugins.growthbook_tracking import _build_event_payload
+
+        attrs = {
+            "user_id": "u1",
+            "device_id": "d1",
+            "page_id": "p1",
+            "session_id": "s1",
+            "utmSource": "google",
+            "pageTitle": "Home",
+            "custom_attr": "keep",
+        }
+        payload = _build_event_payload(
+            event_name="test",
+            properties={"k": "v"},
+            attributes=attrs,
+            url="https://example.com/",
+            sdk_version="2.x.x",
+        )
+
+        self.assertEqual(payload["user_id"], "u1")
+        self.assertEqual(payload["device_id"], "d1")
+        self.assertEqual(payload["page_id"], "p1")
+        self.assertEqual(payload["session_id"], "s1")
+        self.assertEqual(payload["utm_source"], "google")
+        self.assertEqual(payload["page_title"], "Home")
+        self.assertEqual(payload["context_json"], {"custom_attr": "keep"})
+        # Top-level attrs must not leak into context_json
+        self.assertNotIn("user_id", payload["context_json"])
+        self.assertNotIn("utmSource", payload["context_json"])
+
+    def test_build_event_payload_device_id_fallback(self):
+        """device_id falls back to anonymous_id then id."""
+        from growthbook.plugins.growthbook_tracking import _build_event_payload
+
+        payload = _build_event_payload("e", {}, {"anonymous_id": "anon-1"}, "", "x")
+        self.assertEqual(payload["device_id"], "anon-1")
+
+        payload2 = _build_event_payload("e", {}, {"id": "raw-id"}, "", "x")
+        self.assertEqual(payload2["device_id"], "raw-id")
