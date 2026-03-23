@@ -1008,6 +1008,11 @@ class GrowthBook(object):
                 "Add GrowthBookTrackingPlugin to enable event logging."
             )
             return
+        # set_attributes() replaces self._attributes but does not write back to
+        # _user_ctx; _get_eval_context() does that lazily before every eval.
+        # Mirror the same sync here so log_event always sees current attributes.
+        self._user_ctx.attributes = self._attributes
+        self._user_ctx.url = self._url
         try:
             self._event_logger(event_name, properties or {}, self._user_ctx)
         except Exception as e:

@@ -529,6 +529,27 @@ class TestLogEvent(unittest.TestCase):
         gb.destroy()
         self.assertIsNone(gb._event_logger)
 
+    def test_log_event_uses_current_attributes_after_set_attributes(self):
+        """log_event must reflect the latest attributes, not the ones from __init__.
+
+        set_attributes() replaces self._attributes but _user_ctx.attributes still
+        points to the old dict until _get_eval_context() syncs it. log_event must
+        perform the same sync so callers always see current state.
+        """
+        received = []
+
+        def my_logger(event_name, properties, user_context):
+            received.append(dict(user_context.attributes))
+
+        gb = GrowthBook(attributes={"id": "old-user"})
+        gb.set_event_logger(my_logger)
+
+        gb.set_attributes({"id": "new-user"})
+        gb.log_event("page_view")
+
+        self.assertEqual(len(received), 1)
+        self.assertEqual(received[0]["id"], "new-user")
+
     # ------------------------------------------------------------------
     # Async GrowthBookClient
     # ------------------------------------------------------------------
