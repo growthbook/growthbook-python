@@ -1,5 +1,17 @@
 # Changelog
 
+## [2.2.0](https://github.com/growthbook/growthbook-python/compare/v2.1.5...v2.2.0) (2026-03-23)
+
+
+### Features
+
+* add log_event and set_event_logger to GrowthBook and GrowthBookClient ([ae095b7](https://github.com/growthbook/growthbook-python/commit/ae095b79624cc375d1ed5f261fe5d8c48952936f))
+
+
+### Bug Fixes
+
+* sync _user_ctx before invoking event logger in log_event ([e2eaab6](https://github.com/growthbook/growthbook-python/commit/e2eaab634be9bf1baea5e0e028d8109d240d97e6))
+
 ## [2.1.5](https://github.com/growthbook/growthbook-python/compare/v2.1.4...v2.1.5) (2026-03-06)
 
 

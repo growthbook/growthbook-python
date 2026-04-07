@@ -434,6 +434,7 @@ class Options:
     tracking_plugins: Optional[List[Any]] = None
     http_connect_timeout: Optional[int] = None
     http_read_timeout: Optional[int] = None
+    event_logger: Optional[Callable[..., Any]] = None
     cache: Optional[AbstractFeatureCache] = None
     async_cache: Optional[AbstractAsyncFeatureCache] = None
 

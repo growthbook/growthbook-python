@@ -474,6 +474,44 @@ class GrowthBookClient:
                 logger.exception("Error in subscription callback")
 
 
+    def set_event_logger(self, fn) -> None:
+        """Register a callable that will be invoked by log_event.
+
+        The callable receives (event_name: str, properties: dict, user_context: UserContext).
+        Typically set by GrowthBookTrackingPlugin rather than called directly.
+        """
+        self.options.event_logger = fn
+
+    async def log_event(
+        self,
+        event_name: str,
+        properties: Optional[Dict[str, Any]] = None,
+        user_context: Optional[UserContext] = None,
+    ) -> None:
+        """Log a custom event to the GrowthBook ingestor.
+
+        Requires GrowthBookTrackingPlugin to be configured; without it a warning
+        is emitted and the call is a no-op.
+
+        Args:
+            event_name: Name of the event (e.g. ``"button_clicked"``).
+            properties: Optional dict of event-specific properties.
+            user_context: User context for the event; uses an empty context if omitted.
+        """
+        if not self.options.event_logger:
+            logger.warning(
+                "log_event called but no event logger is configured. "
+                "Add GrowthBookTrackingPlugin to enable event logging."
+            )
+            return
+        ctx = user_context or UserContext()
+        try:
+            result = self.options.event_logger(event_name, properties or {}, ctx)
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as e:
+            logger.exception("Error in event logger: %s", e)
+
     async def set_features(self, features: dict) -> None:
         await self._feature_update_callback({"features": features})
 
