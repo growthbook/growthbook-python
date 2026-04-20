@@ -204,6 +204,14 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                 data = event_data.get("data", "{}")
                 if isinstance(data, str):
                     data = json.loads(data)
+
+                if self._decryption_key and isinstance(data, dict) and (
+                    "encryptedFeatures" in data or "encryptedSavedGroups" in data
+                ):
+                    logger.debug("Decrypting SSE payload...")
+                    data = self.decrypt_response(data, self._decryption_key)
+                    logger.debug(f"🟢 Decrypted. Features keys: {list(data.get('features', {}).keys())}")
+
                 await self._handle_feature_update(data)
         except Exception:
             logger.exception("Error handling SSE event")
