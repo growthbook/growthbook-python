@@ -1,6 +1,7 @@
 import logging
 import re
 import json
+from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
 from typing import Callable, Optional, Any, Set, Tuple, List, Dict
@@ -242,6 +243,10 @@ def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups)
         return not evalConditionValue(conditionValue, attributeValue, savedGroups)
     return False
 
+_re_ver_strip = re.compile(r"(^v|\+.*$)")
+_re_ver_split = re.compile(r"[-.]")
+
+@lru_cache(maxsize=512)
 def paddedVersionString(input) -> str:
     # If input is a number, convert to a string
     if _is_numeric(input):
@@ -251,10 +256,10 @@ def paddedVersionString(input) -> str:
         input = "0"
 
     # Remove build info and leading `v` if any
-    input = re.sub(r"(^v|\+.*$)", "", input)
+    input = _re_ver_strip.sub("", input)
     # Split version into parts (both core version numbers and pre-release tags)
     # "v1.2.3-rc.1+build123" -> ["1","2","3","rc","1"]
-    parts = re.split(r"[-.]", input)
+    parts = _re_ver_split.split(input)
     # If it's SemVer without a pre-release, add `~` to the end
     # ["1","0","0"] -> ["1","0","0","~"]
     # "~" is the largest ASCII character, so this will make "1.0.0" greater than "1.0.0-beta" for example
@@ -262,7 +267,7 @@ def paddedVersionString(input) -> str:
         parts.append("~")
     # Left pad each numeric part with spaces so string comparisons will work ("9">"10", but " 9"<"10")
     # Then, join back together into a single string
-    return "-".join([v.rjust(5, " ") if re.match(r"^[0-9]+$", v) else v for v in parts])
+    return "-".join([v.rjust(5, " ") if v.isdigit() else v for v in parts])
 
 
 def isIn(conditionValue, attributeValue, insensitive: bool = False) -> bool:
@@ -376,13 +381,14 @@ def _isFilteredOut(filters: List[Filter], eval_context: EvaluationContext) -> bo
     return False
 
 
-def fnv1a32(str: str) -> int:
+def fnv1a32(s: str) -> int:
     hval = 0x811C9DC5
-    prime = 0x01000193
-    uint32_max = 2 ** 32
-    for s in str:
-        hval = hval ^ ord(s)
-        hval = (hval * prime) % uint32_max
+    if s.isascii():
+        for b in s.encode():
+            hval = ((hval ^ b) * 0x01000193) & 0xFFFFFFFF
+    else:
+        for ch in s:
+            hval = ((hval ^ ord(ch)) * 0x01000193) & 0xFFFFFFFF
     return hval
 
 def inNamespace(userId: str, namespace: Tuple[str, float, float]) -> bool:
