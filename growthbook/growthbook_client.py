@@ -359,9 +359,11 @@ class GrowthBookClient:
             else Options()
         )
         
-        # Thread-safe tracking state
-        self._tracked: Dict[str, bool] = {}  # Access only within async context
+        # Thread-safe tracking state. Bounded so a long-lived client serving
+        # many distinct users doesn't grow this dedup map without limit.
+        self._tracked: Dict[str, bool] = {}
         self._tracked_lock = threading.Lock()
+        self._tracked_max = 100_000
         
         # Thread-safe subscription management
         self._subscriptions: Set[Callable[[Experiment, Result], None]] = set()
@@ -412,12 +414,17 @@ class GrowthBookClient:
         )
 
         with self._tracked_lock:
-            if not self._tracked.get(key):
-                try:
-                    self.options.on_experiment_viewed(experiment, result, user_context)
-                    self._tracked[key] = True
-                except Exception:
-                    logger.exception("Error in tracking callback")
+            if key in self._tracked:
+                return
+            try:
+                self.options.on_experiment_viewed(experiment, result, user_context)
+                if len(self._tracked) >= self._tracked_max:
+                    # Dedup is best-effort; an occasional duplicate fire after
+                    # reset is acceptable, unbounded memory growth is not.
+                    self._tracked.clear()
+                self._tracked[key] = True
+            except Exception:
+                logger.exception("Error in tracking callback")
 
     def subscribe(self, callback: Callable[[Experiment, Result], None]) -> Callable[[], None]:
         """Thread-safe subscription management"""
