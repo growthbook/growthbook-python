@@ -844,7 +844,6 @@ class GrowthBook(object):
                 self.set_features(features["features"])
             if "savedGroups" in features:
                 self._saved_groups = features["savedGroups"]
-            feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
 
     def _features_event_handler(self, features):
         decoded = json.loads(features)
@@ -852,13 +851,14 @@ class GrowthBook(object):
             return None
         
         data = feature_repo.decrypt_response(decoded, self._decryption_key)
+        key = self._api_host + "::" + self._client_key
 
         if data is not None:
             if "features" in data:
                 self.set_features(data["features"])
             if "savedGroups" in data:
                 self._saved_groups = data["savedGroups"]
-            feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
+            feature_repo.save_in_cache(key, data, self._cache_ttl)
 
     def _dispatch_sse_event(self, event_data):
         event_type = event_data['type']
