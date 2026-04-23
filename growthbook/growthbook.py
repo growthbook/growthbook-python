@@ -10,6 +10,7 @@ import json
 import threading
 import logging
 import warnings
+import weakref
 
 from abc import ABC, abstractmethod
 from typing import Optional, Any, Set, Tuple, List, Dict, Callable
@@ -359,22 +360,43 @@ class FeatureRepository(object):
         self.cache.set(key, res, ttl)
 
     def add_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
-        """Add a callback to be notified when features are updated due to cache expiry"""
-        if callback not in self._feature_update_callbacks:
-            self._feature_update_callbacks.append(callback)
+        """Add a callback to be notified when features are updated due to cache expiry.
+
+        Bound methods are stored as weak references so that registering a
+        per-request ``GrowthBook`` instance does not pin it (and its payload)
+        in memory for the lifetime of this module-level singleton.
+        """
+        # Wrap so every entry is callable as ref() -> Optional[callback]
+        if hasattr(callback, "__self__"):
+            ref = weakref.WeakMethod(callback)
+        else:
+            _cb = callback
+            ref = lambda: _cb  # noqa: E731 — strong ref is intentional for plain functions
+        for existing in self._feature_update_callbacks:
+            if existing() == callback:
+                return
+        self._feature_update_callbacks.append(ref)
 
     def remove_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
-        """Remove a feature update callback"""
-        if callback in self._feature_update_callbacks:
-            self._feature_update_callbacks.remove(callback)
+        """Remove a feature update callback (and prune any dead weak refs)."""
+        self._feature_update_callbacks = [
+            r for r in self._feature_update_callbacks
+            if r() is not None and r() != callback
+        ]
 
     def _notify_feature_update_callbacks(self, features_data: Dict) -> None:
-        """Notify all registered callbacks about feature updates"""
-        for callback in self._feature_update_callbacks:
+        """Notify all registered callbacks about feature updates."""
+        live = []
+        for ref in self._feature_update_callbacks:
+            cb = ref()
+            if cb is None:
+                continue
+            live.append(ref)
             try:
-                callback(features_data)
+                cb(features_data)
             except Exception as e:
                 logger.warning(f"Error in feature update callback: {e}")
+        self._feature_update_callbacks = live
 
     # Loads features with an in-memory cache in front using stale-while-revalidate approach
     def load_features(
@@ -758,6 +780,10 @@ class GrowthBook(object):
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Any] = set()
         self._is_updating_features = False
+        # Identity sentinel for the last raw payload we parsed; lets
+        # _ensure_fresh_features skip set_features() on a cache hit.
+        self._last_features_raw: Optional[dict] = None
+        self._last_saved_groups_raw: Optional[dict] = None
         self._event_logger: Optional[Any] = None
 
         # support plugins
@@ -825,11 +851,22 @@ class GrowthBook(object):
         response = feature_repo.load_features(
             self._api_host, self._client_key, self._decryption_key, self._cache_ttl
         )
-        if response is not None and "features" in response.keys():
-            self.set_features(response["features"])
+        if response is None:
+            return
 
-        if response is not None and "savedGroups" in response:
-            self._saved_groups = response["savedGroups"]
+        features = response.get("features")
+        saved_groups = response.get("savedGroups")
+
+        # On a cache hit feature_repo returns the same dict object, so an
+        # identity check lets _ensure_fresh_features (called per-eval) avoid
+        # rebuilding every Feature/FeatureRule when nothing changed.
+        if saved_groups is not None and saved_groups is not self._last_saved_groups_raw:
+            self._last_saved_groups_raw = saved_groups
+            self._saved_groups = saved_groups
+            self._global_ctx.saved_groups = saved_groups
+        if features is not None and features is not self._last_features_raw:
+            self._last_features_raw = features
+            self.set_features(features)
 
     async def load_features_async(self) -> None:
         if not self._client_key:
@@ -967,19 +1004,23 @@ class GrowthBook(object):
         except Exception as e:
             logger.warning(f"Error removing feature update callback: {e}")
         
-        # Clear all internal state
+        # Drop internal state. Reassign rather than .clear() so we never
+        # mutate dicts that were passed in by the caller or shared with
+        # other instances (e.g. a cached parsed-features dict).
         try:
-            self._subscriptions.clear()
-            self._tracked.clear()
-            self._assigned.clear()
+            self._subscriptions = set()
+            self._tracked = {}
+            self._assigned = {}
             self._trackingCallback = None
             self._featureUsageCallback = None
             self._event_logger = None
-            self._forcedVariations.clear()
-            self._overrides.clear()
-            self._groups.clear()
-            self._attributes.clear()
-            self._features.clear()
+            self._forcedVariations = {}
+            self._overrides = {}
+            self._groups = {}
+            self._attributes = {}
+            self._features = {}
+            self._last_features_raw = None
+            self._last_saved_groups_raw = None
             logger.debug("GrowthBook instance destroyed successfully")
         except Exception as e:
             logger.warning(f"Error clearing internal state: {e}")

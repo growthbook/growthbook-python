@@ -935,10 +935,7 @@ def _generate_sticky_bucket_assignment_doc(attribute_name: str, attribute_value:
 
     new_assignments = {**existing_assignments, **assignments}
 
-    # Compare JSON strings to see if they have changed
-    existing_json = json.dumps(existing_assignments, sort_keys=True)
-    new_json = json.dumps(new_assignments, sort_keys=True)
-    changed = existing_json != new_json
+    changed = new_assignments != existing_assignments
 
     return {
         'key': key,
