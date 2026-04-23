@@ -8,8 +8,9 @@ from typing import Set
 import asyncio
 import threading
 import traceback
+import time
 from datetime import datetime
-from growthbook import FeatureRepository, feature_repo
+from .growthbook import FeatureRepository, feature_repo, CacheEntry
 from contextlib import asynccontextmanager
 
 from .core import eval_feature as core_eval_feature, run_experiment
@@ -23,7 +24,8 @@ from .common_types import (
     StackContext,
     FeatureResult,
     FeatureRefreshStrategy,
-    Experiment
+    Experiment,
+    AbstractAsyncFeatureCache
 )
 
 logger = logging.getLogger("growthbook.growthbook_client")
@@ -34,11 +36,17 @@ class SingletonMeta(type):
     _lock = threading.Lock()
 
     def __call__(cls, *args, **kwargs):
+        # Identify instance by api_host and client_key (args[0] and args[1])
+        key = (args[0], args[1]) if len(args) >= 2 else "default"
+        
         with cls._lock:
             if cls not in cls._instances:
+                cls._instances[cls] = {}
+            
+            if key not in cls._instances[cls]:
                 instance = super().__call__(*args, **kwargs)
-                cls._instances[cls] = instance
-        return cls._instances[cls]
+                cls._instances[cls][key] = instance
+        return cls._instances[cls][key]
 
 class BackoffStrategy:
     """Exponential backoff with jitter for failed requests"""
@@ -101,12 +109,74 @@ class FeatureCache:
                 "savedGroups": self._cache['savedGroups']
             }
 
+class CacheEntry(object):
+    def __init__(self, value: Dict, ttl: int) -> None:
+        self.value = value
+        self.ttl = ttl
+        self.expires = time.time() + ttl
+
+    def update(self, value: Dict):
+        self.value = value
+        self.expires = time.time() + self.ttl
+
+class InMemoryAsyncFeatureCache(AbstractAsyncFeatureCache):
+    def __init__(self) -> None:
+        self.cache: Dict[str, CacheEntry] = {}
+    
+    async def get(self, key: str) -> Optional[Dict]:
+        if key in self.cache:
+            entry = self.cache[key]
+            if entry.expires >= time.time():
+                return entry.value
+            else:
+                del self.cache[key]
+        return None
+
+    async def set(self, key: str, value: Dict, ttl: int) -> None:
+        if key in self.cache:
+            self.cache[key].update(value)
+        else:
+            self.cache[key] = CacheEntry(value, ttl)
+
+    async def clear(self) -> None:
+        self.cache.clear()
+
+class RedisAsyncFeatureCache(AbstractAsyncFeatureCache):
+    def __init__(self, redis_url: str, key_prefix: str = "gb_cache:") -> None:
+        self.key_prefix = key_prefix
+        try:
+            import redis.asyncio as redis
+            self.redis = redis.from_url(redis_url, decode_responses=True)
+        except ImportError:
+            raise ImportError("redis package is required for RedisAsyncFeatureCache. Install it with `pip install redis`.")
+
+    def _get_key(self, key: str) -> str:
+        return f"{self.key_prefix}{key}"
+
+    async def get(self, key: str) -> Optional[Dict]:
+        data = await self.redis.get(self._get_key(key))
+        if data:
+            return json.loads(data)
+        return None
+
+    async def set(self, key: str, value: Dict, ttl: int) -> None:
+        await self.redis.set(self._get_key(key), json.dumps(value), ex=ttl)
+
+    async def clear(self) -> None:
+        keys = await self.redis.keys(f"{self.key_prefix}*")
+        if keys:
+            await self.redis.delete(*keys)
+    
+    async def close(self) -> None:
+        await self.redis.close()
+
 class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
     def __init__(self,
                  api_host: str,
                  client_key: str,
                  decryption_key: str = "",
                  cache_ttl: int = 60,
+                 cache: Optional[AbstractAsyncFeatureCache] = None,
                  http_connect_timeout: Optional[int] = None,
                  http_read_timeout: Optional[int] = None):
         FeatureRepository.__init__(self)
@@ -122,6 +192,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._callbacks: List[Callable[[Dict[str, Any]], Awaitable[None]]] = []
         self._last_successful_refresh: Optional[datetime] = None
         self._refresh_in_progress = asyncio.Lock()
+        self.cache = cache if cache else InMemoryAsyncFeatureCache()
         self.http_connect_timeout = http_connect_timeout
         self.http_read_timeout = http_read_timeout
 
@@ -354,7 +425,21 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         if api_host == self._api_host and client_key == self._client_key:
             decryption_key = self._decryption_key
             ttl = self._cache_ttl
-        return await super().load_features_async(api_host, client_key, decryption_key, ttl)
+        
+        key = api_host + "::" + client_key
+        
+        # Try async cache first
+        cached = await self.cache.get(key)
+        if cached:
+            return cached
+            
+        # Fetch from network
+        res = await self._fetch_features_async(api_host, client_key, decryption_key)
+        if res is not None:
+            await self.cache.set(key, res, ttl)
+            return res
+            
+        return None
 
 class GrowthBookClient:
     def __init__(
@@ -392,6 +477,7 @@ class GrowthBookClient:
                 self.options.client_key or "",
                 self.options.decryption_key or "",
                 self.options.cache_ttl,
+                self.options.cache,
                 self.options.http_connect_timeout,
                 self.options.http_read_timeout
             )
