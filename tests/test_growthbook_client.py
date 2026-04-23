@@ -12,7 +12,7 @@ except ImportError:
         async def __call__(self, *args, **kwargs):
             return super(AsyncMock, self).__call__(*args, **kwargs)
 
-from growthbook import InMemoryStickyBucketService
+from growthbook import InMemoryStickyBucketService, AbstractAsyncFeatureCache
 import pytest
 import asyncio
 import os
@@ -20,7 +20,7 @@ import json
 
 from growthbook.common_types import Experiment, Options
 from growthbook.growthbook_client import (
-    GrowthBookClient, 
+    GrowthBookClient,
     UserContext,
     FeatureRefreshStrategy,
     EnhancedFeatureRepository
@@ -1047,6 +1047,75 @@ async def test_skip_all_experiments_flag():
             # User should be assigned to a variation
             assert result_normal.value in ["control", "variation"]
             assert result_normal.source == "experiment"
-            
+
     finally:
         await client.close()
+
+
+@pytest.fixture
+def mock_async_cache():
+    """A mock AbstractAsyncFeatureCache for testing"""
+    cache = AsyncMock(spec=AbstractAsyncFeatureCache)
+    cache.get = AsyncMock(return_value=None)
+    cache.set = AsyncMock(return_value=None)
+    return cache
+
+
+@pytest.mark.asyncio
+async def test_async_cache_hit_skips_http(mock_async_cache, mock_features_response):
+    """Cache HIT: async_cache.get() returns data, no HTTP call should be made"""
+    mock_async_cache.get.return_value = mock_features_response
+
+    repo = EnhancedFeatureRepository(
+        api_host="https://test.growthbook.io",
+        client_key="test_key"
+    )
+    repo.set_async_cache(mock_async_cache)
+
+    with patch('growthbook.FeatureRepository.load_features_async', new_callable=AsyncMock) as mock_super:
+        result = await repo.load_features_async("https://test.growthbook.io", "test_key")
+
+    assert result == mock_features_response
+    mock_async_cache.get.assert_called_once_with("https://test.growthbook.io::test_key")
+    mock_super.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_async_cache_miss_fetches_and_populates(mock_async_cache, mock_features_response):
+    """Cache MISS: async_cache.get() returns None, HTTP fetch happens and result is stored"""
+    mock_async_cache.get.return_value = None
+
+    repo = EnhancedFeatureRepository(
+        api_host="https://test.growthbook.io",
+        client_key="test_key"
+    )
+    repo.set_async_cache(mock_async_cache)
+
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=mock_features_response):
+        result = await repo.load_features_async("https://test.growthbook.io", "test_key")
+
+    assert result == mock_features_response
+    mock_async_cache.set.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_async_cache_ttl_passed_correctly(mock_async_cache, mock_features_response):
+    """TTL from cache_ttl is passed to async_cache.set()"""
+    mock_async_cache.get.return_value = None
+    expected_ttl = 120
+
+    repo = EnhancedFeatureRepository(
+        api_host="https://test.growthbook.io",
+        client_key="test_key",
+        cache_ttl=expected_ttl
+    )
+    repo.set_async_cache(mock_async_cache)
+
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=mock_features_response):
+        await repo.load_features_async("https://test.growthbook.io", "test_key")
+
+    _, call_kwargs = mock_async_cache.set.call_args
+    call_args = mock_async_cache.set.call_args[0]
+    assert call_args[2] == expected_ttl

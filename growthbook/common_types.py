@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Union, Set, Tuple
 from enum import Enum
 from abc import ABC, abstractmethod
+from .cache_interfaces import AbstractFeatureCache, AbstractAsyncFeatureCache
 
 class VariationMeta(TypedDict):
     key: str
@@ -396,7 +397,7 @@ class AbstractStickyBucketService(ABC):
         return docs
 
 @dataclass
-class StackContext: 
+class StackContext:
     id: Optional[str] = None
     evaluated_features: Set[str] = field(default_factory=set)
 
@@ -434,6 +435,8 @@ class Options:
     http_connect_timeout: Optional[int] = None
     http_read_timeout: Optional[int] = None
     event_logger: Optional[Callable[..., Any]] = None
+    cache: Optional[AbstractFeatureCache] = None
+    async_cache: Optional[AbstractAsyncFeatureCache] = None
 
 
 @dataclass
