@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.1](https://github.com/growthbook/growthbook-python/compare/v2.2.0...v2.2.1) (2026-04-23)
+
+
+### Bug Fixes
+
+* decrypt SSE encrypted features payload and fix cache key ([#110](https://github.com/growthbook/growthbook-python/issues/110)) ([a07004c](https://github.com/growthbook/growthbook-python/commit/a07004cc77d3a49916177f8be5ea6a230e016a78))
+
 ## [2.2.0](https://github.com/growthbook/growthbook-python/compare/v2.1.5...v2.2.0) (2026-03-23)
 
 
