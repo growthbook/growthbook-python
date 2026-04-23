@@ -446,6 +446,7 @@ class Options:
     cache: Optional[AbstractAsyncFeatureCache] = None
     http_connect_timeout: Optional[int] = None
     http_read_timeout: Optional[int] = None
+    event_logger: Optional[Callable[..., Any]] = None
 
 
 @dataclass

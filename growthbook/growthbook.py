@@ -758,6 +758,7 @@ class GrowthBook(object):
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Any] = set()
         self._is_updating_features = False
+        self._event_logger: Optional[Any] = None
 
         # support plugins
         self._plugins: List[Any] = plugins if plugins is not None else []
@@ -843,7 +844,6 @@ class GrowthBook(object):
                 self.set_features(features["features"])
             if "savedGroups" in features:
                 self._saved_groups = features["savedGroups"]
-            feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
 
     def _features_event_handler(self, features):
         decoded = json.loads(features)
@@ -851,13 +851,14 @@ class GrowthBook(object):
             return None
         
         data = feature_repo.decrypt_response(decoded, self._decryption_key)
+        key = self._api_host + "::" + self._client_key
 
         if data is not None:
             if "features" in data:
                 self.set_features(data["features"])
             if "savedGroups" in data:
                 self._saved_groups = data["savedGroups"]
-            feature_repo.save_in_cache(self._client_key, features, self._cache_ttl)
+            feature_repo.save_in_cache(key, data, self._cache_ttl)
 
     def _dispatch_sse_event(self, event_data):
         event_type = event_data['type']
@@ -973,6 +974,7 @@ class GrowthBook(object):
             self._assigned.clear()
             self._trackingCallback = None
             self._featureUsageCallback = None
+            self._event_logger = None
             self._forcedVariations.clear()
             self._overrides.clear()
             self._groups.clear()
@@ -981,6 +983,40 @@ class GrowthBook(object):
             logger.debug("GrowthBook instance destroyed successfully")
         except Exception as e:
             logger.warning(f"Error clearing internal state: {e}")
+
+    def set_event_logger(self, fn) -> None:
+        """Register a callable that will be invoked by log_event.
+
+        The callable receives (event_name: str, properties: dict, user_context: UserContext).
+        Typically set by GrowthBookTrackingPlugin rather than called directly.
+        """
+        self._event_logger = fn
+
+    def log_event(self, event_name: str, properties: Optional[Dict[str, Any]] = None) -> None:
+        """Log a custom event to the GrowthBook ingestor.
+
+        Requires GrowthBookTrackingPlugin to be configured; without it a warning
+        is emitted and the call is a no-op.
+
+        Args:
+            event_name: Name of the event (e.g. ``"button_clicked"``).
+            properties: Optional dict of event-specific properties.
+        """
+        if self._event_logger is None:
+            logger.warning(
+                "log_event called but no event logger is configured. "
+                "Add GrowthBookTrackingPlugin to enable event logging."
+            )
+            return
+        # set_attributes() replaces self._attributes but does not write back to
+        # _user_ctx; _get_eval_context() does that lazily before every eval.
+        # Mirror the same sync here so log_event always sees current attributes.
+        self._user_ctx.attributes = self._attributes
+        self._user_ctx.url = self._url
+        try:
+            self._event_logger(event_name, properties or {}, self._user_ctx)
+        except Exception as e:
+            logger.exception("Error in event logger: %s", e)
 
     def isOn(self, key: str) -> bool:
         warnings.warn("isOn is deprecated, use is_on instead", DeprecationWarning)
