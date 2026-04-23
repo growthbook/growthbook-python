@@ -98,7 +98,7 @@ class FeatureCache:
         with self._lock:
             return {
                 "features": dict(self._cache['features']),
-                "savedGroups": self._cache['savedGroups']
+                "savedGroups": dict(self._cache['savedGroups'])
             }
 
 class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
@@ -380,7 +380,7 @@ class GrowthBookClient:
             'attributes': {},
             'assignments': {}
         }
-        self._sticky_bucket_cache_lock = False
+        self._sticky_bucket_cache_lock = asyncio.Lock()
         
         # Plugin support
         self._tracking_plugins: List[Any] = self.options.tracking_plugins or []
@@ -496,21 +496,14 @@ class GrowthBookClient:
             return {}
 
         # Use compare-and-swap pattern
-        while not self._sticky_bucket_cache_lock:
+        async with self._sticky_bucket_cache_lock:
             if attributes == self._sticky_bucket_cache['attributes']:
                 return self._sticky_bucket_cache['assignments']
-            
-            self._sticky_bucket_cache_lock = True
-            try:
-                assignments = self.options.sticky_bucket_service.get_all_assignments(attributes)
-                self._sticky_bucket_cache['attributes'] = attributes.copy()
-                self._sticky_bucket_cache['assignments'] = assignments
-                return assignments
-            finally:
-                self._sticky_bucket_cache_lock = False
-        
-        # Fallback return for edge case where loop condition is never satisfied
-        return {}
+
+            assignments=self.options.sticky_bucket_service.get_all_assignments(attributes)
+            self._sticky_bucket_cache['attributes']=attributes.copy()
+            self._sticky_bucket_cache['assignments']=assignments
+            return assignments
 
     async def initialize(self) -> bool:
         """Initialize client with features and start refresh"""
