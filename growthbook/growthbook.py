@@ -240,7 +240,9 @@ class SSEClient:
                 if decoded_line.startswith("event:"):
                     event_data['type'] = decoded_line[len("event:"):].strip()
                 elif decoded_line.startswith("data:"):
-                    event_data['data'] = event_data.get('data', '') + f"\n{decoded_line[len('data:'):].strip()}"
+                    chunk = decoded_line[len("data:"):].strip()
+                    existing = event_data.get('data')
+                    event_data['data'] = f"{existing}\n{chunk}" if existing is not None else chunk
                 elif not decoded_line:
                     if 'type' in event_data and 'data' in event_data:
                         try:

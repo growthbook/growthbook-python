@@ -2,6 +2,7 @@
 
 import json
 import os
+
 from growthbook import (
     FeatureRule,
     GrowthBook,
@@ -10,7 +11,7 @@ from growthbook import (
     InMemoryStickyBucketService,
     decrypt,
     feature_repo,
-    logger,
+    logger,FeatureRepository,
 )
 
 from growthbook.core import (
@@ -25,7 +26,10 @@ from growthbook.core import (
 )
 
 from time import time
+import asyncio
 import pytest
+from unittest.mock import MagicMock,AsyncMock,patch
+from growthbook.growthbook import SSEClient
 
 logger.setLevel("DEBUG")
 
@@ -1331,3 +1335,806 @@ def test_stale_while_revalidate_cleanup(mocker):
         if feature_repo._refresh_thread:
             feature_repo.stop_background_refresh()
         feature_repo.clear_cache()
+
+def make_repo() -> FeatureRepository:
+    repo=FeatureRepository()
+    repo.cache.clear()
+    return repo
+
+FEATURES_RESPONSE={
+    "features":{"dark-mode":{"defaultValue":False}},
+    "savedGroups":[{"id":"g1","values":["a"]}],
+}
+
+@pytest.mark.asyncio
+async def test_repo_cache_miss_fetches_and_stores():
+    """Cache miss → calls _fetch_features_async, stores result, returns it."""
+    repo=make_repo()
+    with patch.object(repo,"_fetch_features_async",new=AsyncMock(return_value=FEATURES_RESPONSE)):
+        result=await repo.load_features_async("https://cdn.example.com","sdk-key")
+
+    assert result==FEATURES_RESPONSE
+    # Result must be in cache now
+    assert repo.cache.get("https://cdn.example.com::sdk-key")==FEATURES_RESPONSE
+
+@pytest.mark.asyncio
+async def test_repo_cache_hit_skips_fetch():
+    """Cache hit → _fetch_features_async is NOT called."""
+    repo=make_repo()
+    repo.cache.set("https://cdn.example.com::sdk-key",FEATURES_RESPONSE,ttl=600)
+
+    with patch.object(repo,"_fetch_features_async",new=AsyncMock()) as mock_fetch:
+        result=await repo.load_features_async("https://cdn.example.com","sdk-key")
+
+    mock_fetch.assert_not_called()
+    assert result==FEATURES_RESPONSE
+
+@pytest.mark.asyncio
+async def test_repo_fetch_returns_none_does_not_cache():
+    """If fetch returns None (network error etc.) → nothing is cached, None returned."""
+    repo=make_repo()
+    with patch.object(repo,"_fetch_features_async",new=AsyncMock(return_value=None)):
+        result=await repo.load_features_async("https://cdn.example.com","sdk-key")
+
+    assert result is None
+    assert repo.cache.get("https://cdn.example.com::sdk-key") is None
+
+@pytest.mark.asyncio
+async def test_repo_notifies_callbacks_on_fresh_fetch():
+    """Feature-update callbacks are called when features are fetched fresh."""
+    repo=make_repo()
+    callback=MagicMock()
+    repo.add_feature_update_callback(callback)
+
+    with patch.object(repo,"_fetch_features_async",new=AsyncMock(return_value=FEATURES_RESPONSE)):
+        await repo.load_features_async("https://cdn.example.com","sdk-key")
+
+    callback.assert_called_once_with(FEATURES_RESPONSE)
+
+@pytest.mark.asyncio
+async def test_repo_no_callback_on_cache_hit():
+    """Callbacks must NOT fire on a cache hit — features didn't change."""
+    repo=make_repo()
+    repo.cache.set("https://cdn.example.com::sdk-key",FEATURES_RESPONSE,ttl=600)
+    callback=MagicMock()
+    repo.add_feature_update_callback(callback)
+
+    with patch.object(repo,"_fetch_features_async",new=AsyncMock(return_value=FEATURES_RESPONSE)):
+        await repo.load_features_async("https://cdn.example.com","sdk-key")
+
+    callback.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_repo_ttl_passed_to_cache():
+    """TTL argument is forwarded to cache.set."""
+    repo=make_repo()
+    with patch.object(repo,"_fetch_features_async",new=AsyncMock(return_value=FEATURES_RESPONSE)),\
+            patch.object(repo.cache,"set") as mock_set:
+        await repo.load_features_async("https://cdn.example.com","sdk-key",ttl=1234)
+
+    mock_set.assert_called_once_with("https://cdn.example.com::sdk-key",FEATURES_RESPONSE,1234)
+
+@pytest.mark.asyncio
+async def test_repo_cache_key_combines_host_and_key():
+    """Cache key = api_host + '::' + client_key."""
+    repo=make_repo()
+    with patch.object(repo,"_fetch_features_async",new=AsyncMock(return_value=FEATURES_RESPONSE)):
+        await repo.load_features_async("https://host-a.io","key-1")
+        await repo.load_features_async("https://host-b.io","key-2")
+
+    assert repo.cache.get("https://host-a.io::key-1")==FEATURES_RESPONSE
+    assert repo.cache.get("https://host-b.io::key-2")==FEATURES_RESPONSE
+
+def make_gb(**kwargs) -> GrowthBook:
+    defaults=dict(api_host="https://cdn.example.com",client_key="sdk-abc")
+    return GrowthBook(**{**defaults,**kwargs})
+
+@pytest.mark.asyncio
+async def test_gb_raises_without_client_key():
+    gb=GrowthBook()  # no client_key
+    with pytest.raises(ValueError,match="client_key"):
+        await gb.load_features_async()
+
+@pytest.mark.asyncio
+async def test_gb_sets_features_from_response():
+    gb=make_gb()
+    with patch("growthbook.growthbook.feature_repo.load_features_async",
+               new=AsyncMock(return_value=FEATURES_RESPONSE)):
+        await gb.load_features_async()
+
+    assert "dark-mode" in gb.getFeatures()
+
+@pytest.mark.asyncio
+async def test_gb_sets_saved_groups_from_response():
+    gb=make_gb()
+    with patch("growthbook.growthbook.feature_repo.load_features_async",
+               new=AsyncMock(return_value=FEATURES_RESPONSE)):
+        await gb.load_features_async()
+
+    assert gb._saved_groups==FEATURES_RESPONSE["savedGroups"]
+
+@pytest.mark.asyncio
+async def test_gb_handles_none_response_gracefully():
+    """If repo returns None, GrowthBook should not crash or modify features."""
+    gb=make_gb()
+    gb.set_features({"existing":{"defaultValue":True}})
+
+    with patch("growthbook.growthbook.feature_repo.load_features_async",
+               new=AsyncMock(return_value=None)):
+        await gb.load_features_async()  # must not raise
+
+    assert "existing" in gb.getFeatures()  # unchanged
+
+@pytest.mark.asyncio
+async def test_gb_response_without_saved_groups():
+    """Response may omit savedGroups — should not crash."""
+    gb=make_gb()
+    response={"features":{"flag":{"defaultValue":1}}}
+    with patch("growthbook.growthbook.feature_repo.load_features_async",
+               new=AsyncMock(return_value=response)):
+        await gb.load_features_async()
+
+    assert "flag" in gb.getFeatures()
+
+@pytest.mark.asyncio
+async def test_gb_passes_correct_args_to_repo():
+    """GrowthBook forwards api_host, client_key, decryption_key, cache_ttl to repo."""
+    gb=GrowthBook(
+        api_host="https://my-host.io",
+        client_key="sdk-xyz",
+        decryption_key="secret",
+        cache_ttl=120,
+    )
+    with patch("growthbook.growthbook.feature_repo.load_features_async",
+               new=AsyncMock(return_value=None)) as mock_load:
+        await gb.load_features_async()
+
+    mock_load.assert_called_once_with("https://my-host.io","sdk-xyz","secret",120)
+
+@pytest.mark.asyncio
+async def test_fetch_features_async_returns_decoded():
+    """_fetch_features_async returns data after decryption."""
+    repo=make_repo()
+    response={"features":{"flag":{"defaultValue":True}}}
+
+    with patch.object(repo,"_fetch_and_decode_async",new=AsyncMock(return_value=response)):
+        result=await repo._fetch_features_async("https://cdn.example.com","sdk-key")
+
+    assert result==response
+    assert result["features"]["flag"]["defaultValue"] is True
+
+@pytest.mark.asyncio
+async def test_fetch_features_async_returns_none_on_empty():
+    """_fetch_features_async returns None if _fetch_and_decode_async returned None."""
+    repo=make_repo()
+
+    with patch.object(repo,"_fetch_and_decode_async",new=AsyncMock(return_value=None)):
+        result=await repo._fetch_features_async("https://cdn.example.com","sdk-key")
+
+    assert result is None
+
+@pytest.mark.asyncio
+async def test_fetch_features_async_decrypts_payload():
+    """_fetch_features_async calls decrypt_response with decryption_key passed."""
+    repo=make_repo()
+    raw={"features":{"x":{"defaultValue":1}}}
+
+    with patch.object(repo,"_fetch_and_decode_async",new=AsyncMock(return_value=raw)),\
+         patch.object(repo,"decrypt_response",return_value=raw) as mock_decrypt:
+        await repo._fetch_features_async("https://cdn.example.com","sdk-key","my-secret")
+
+    mock_decrypt.assert_called_once_with(raw,"my-secret")
+
+@pytest.mark.asyncio
+async def test_fetch_and_decode_async_returns_json():
+    """_fetch_and_decode_async returns parsed JSON at 200."""
+    repo=make_repo()
+    payload={"features":{"dark-mode":{"defaultValue":False}}}
+
+    mock_response=AsyncMock()
+    mock_response.status=200
+    mock_response.json=AsyncMock(return_value=payload)
+    mock_response.headers={}
+    mock_response.__aenter__=AsyncMock(return_value=mock_response)
+    mock_response.__aexit__=AsyncMock(return_value=False)
+
+    mock_session=AsyncMock()
+    mock_session.get=MagicMock(return_value=mock_response)
+    mock_session.__aenter__=AsyncMock(return_value=mock_session)
+    mock_session.__aexit__=AsyncMock(return_value=False)
+
+    with patch("aiohttp.ClientSession",return_value=mock_session):
+        result=await repo._fetch_and_decode_async("https://cdn.example.com","sdk-key")
+
+    assert result==payload
+
+@pytest.mark.asyncio
+async def test_fetch_and_decode_async_returns_none_on_4xx():
+    """_fetch_and_decode_async returns None when HTTP >= 400."""
+    repo=make_repo()
+
+    mock_response=AsyncMock()
+    mock_response.status=403
+    mock_response.headers={}
+    mock_response.__aenter__=AsyncMock(return_value=mock_response)
+    mock_response.__aexit__=AsyncMock(return_value=False)
+
+    mock_session=AsyncMock()
+    mock_session.get=MagicMock(return_value=mock_response)
+    mock_session.__aenter__=AsyncMock(return_value=mock_session)
+    mock_session.__aexit__=AsyncMock(return_value=False)
+
+    with patch("aiohttp.ClientSession",return_value=mock_session):
+        result=await repo._fetch_and_decode_async("https://cdn.example.com","sdk-key")
+
+    assert result is None
+
+@pytest.mark.asyncio
+async def test_fetch_and_decode_async_uses_etag_cache():
+    """At 304, it returns data from the etag cache without parsing the body."""
+    repo=make_repo()
+    cached_payload={"features":{"cached":{"defaultValue":True}}}
+    url=repo._get_features_url("https://cdn.example.com","sdk-key")
+    repo._etag_cache[url]=("etag-abc",cached_payload)
+
+    mock_response=AsyncMock()
+    mock_response.status=304
+    mock_response.headers={}
+    mock_response.__aenter__=AsyncMock(return_value=mock_response)
+    mock_response.__aexit__=AsyncMock(return_value=False)
+
+    mock_session=AsyncMock()
+    mock_session.get=MagicMock(return_value=mock_response)
+    mock_session.__aenter__=AsyncMock(return_value=mock_session)
+    mock_session.__aexit__=AsyncMock(return_value=False)
+
+    with patch("aiohttp.ClientSession",return_value=mock_session):
+        result=await repo._fetch_and_decode_async("https://cdn.example.com","sdk-key")
+
+    assert result==cached_payload
+
+@pytest.mark.asyncio
+async def test_fetch_and_decode_async_stores_new_etag():
+    """The new ETag from the response is saved in _etag_cache."""
+    repo=make_repo()
+    payload={"features":{}}
+
+    mock_response=AsyncMock()
+    mock_response.status=200
+    mock_response.json=AsyncMock(return_value=payload)
+    mock_response.headers={"ETag":"new-etag-123"}
+    mock_response.__aenter__=AsyncMock(return_value=mock_response)
+    mock_response.__aexit__=AsyncMock(return_value=False)
+
+    mock_session=AsyncMock()
+    mock_session.get=MagicMock(return_value=mock_response)
+    mock_session.__aenter__=AsyncMock(return_value=mock_session)
+    mock_session.__aexit__=AsyncMock(return_value=False)
+
+    with patch("aiohttp.ClientSession",return_value=mock_session):
+        await repo._fetch_and_decode_async("https://cdn.example.com","sdk-key")
+
+    url=repo._get_features_url("https://cdn.example.com","sdk-key")
+    assert repo._etag_cache[url][0]=="new-etag-123"
+
+@pytest.mark.asyncio
+async def test_fetch_and_decode_async_returns_none_on_network_error():
+    """_fetch_and_decode_async return None when network error occur."""
+    import aiohttp
+    repo=make_repo()
+
+    with patch("aiohttp.ClientSession") as mock_cls:
+        mock_session=AsyncMock()
+        mock_session.__aenter__=AsyncMock(return_value=mock_session)
+        mock_session.__aexit__=AsyncMock(return_value=False)
+        mock_session.get=MagicMock(side_effect=aiohttp.ClientError("connection failed"))
+        mock_cls.return_value=mock_session
+
+        result=await repo._fetch_and_decode_async("https://cdn.example.com","sdk-key")
+
+    assert result is None
+
+def test_start_auto_refresh_creates_sse_client():
+    """startAutoRefresh creates SSEClient and calls connect."""
+    repo=make_repo()
+    cb=MagicMock()
+
+    with patch("growthbook.growthbook.SSEClient") as mock_sse_cls:
+        mock_sse=MagicMock()
+        mock_sse_cls.return_value=mock_sse
+        repo.startAutoRefresh("https://cdn.example.com","sdk-key",cb)
+
+    mock_sse_cls.assert_called_once_with(
+        api_host="https://cdn.example.com",
+        client_key="sdk-key",
+        on_event=cb,
+        timeout=30,
+    )
+    mock_sse.connect.assert_called_once()
+
+def test_start_auto_refresh_reuses_existing_client():
+    """startAutoRefresh does not create a new SSEClient if existed."""
+    repo=make_repo()
+    existing_client=MagicMock()
+    repo.sse_client=existing_client
+
+    with patch("growthbook.growthbook.SSEClient") as mock_sse_cls:
+        repo.startAutoRefresh("https://cdn.example.com","sdk-key",MagicMock())
+
+    mock_sse_cls.assert_not_called()
+    existing_client.connect.assert_called_once()
+
+def test_start_auto_refresh_raises_without_client_key():
+    """startAutoRefresh throws ValueError if there is no client_key."""
+    repo=make_repo()
+
+    with pytest.raises(ValueError,match="client_key"):
+        repo.startAutoRefresh("https://cdn.example.com","",MagicMock())
+
+def make_gb_simple(**kwargs):
+    defaults=dict(api_host="https://cdn.example.com", client_key="sdk-key")
+    return GrowthBook(**{**defaults, **kwargs})
+
+def test_dispatch_sse_event_features_calls_handler():
+    """Event 'features' pass data into _features_event_handler."""
+    gb=make_gb_simple()
+    event_data={"type":"features","data":'{"features":{"flag":{"defaultValue":True}}}'}
+
+    with patch.object(gb,"_features_event_handler") as mock_handler:
+        gb._dispatch_sse_event(event_data)
+
+    mock_handler.assert_called_once_with('{"features":{"flag":{"defaultValue":True}}}')
+
+def test_dispatch_sse_event_features_updated_calls_load():
+    """Event 'features-updated' calls load_features."""
+    gb=make_gb_simple()
+    event_data={"type":"features-updated","data":"{}"}
+
+    with patch.object(gb,"load_features") as mock_load:
+        gb._dispatch_sse_event(event_data)
+
+    mock_load.assert_called_once()
+
+def test_dispatch_sse_event_unknown_type_does_nothing():
+    """An unknown event type does not call either load_features or _features_event_handler."""
+    gb=make_gb_simple()
+    event_data={"type":"ping","data":"{}"}
+
+    with patch.object(gb,"load_features") as mock_load,\
+         patch.object(gb,"_features_event_handler") as mock_handler:
+        gb._dispatch_sse_event(event_data)
+
+    mock_load.assert_not_called()
+    mock_handler.assert_not_called()
+
+def test_dispatch_sse_event_features_updates_gb_state():
+    """After 'features' event, it updates features in GrowthBook."""
+    gb=make_gb_simple()
+    payload={"features":{"dark-mode":{"defaultValue":True}}}
+    event_data={"type":"features","data":json.dumps(payload)}
+
+    with patch.object(feature_repo,"decrypt_response",return_value=payload),\
+         patch.object(feature_repo,"save_in_cache"):
+        gb._dispatch_sse_event(event_data)
+
+    assert "dark-mode" in gb.get_features()
+
+def test_gb_start_auto_refresh_raises_without_client_key():
+    """startAutoRefresh throws ValueError if there is no client_key."""
+    gb=GrowthBook()
+
+    with pytest.raises(ValueError,match="client_key"):
+        gb.startAutoRefresh()
+
+def test_gb_start_auto_refresh_delegates_to_feature_repo():
+    """startAutoRefresh passes args into feature_repo.startAutoRefresh."""
+    gb=GrowthBook(
+        api_host="https://cdn.example.com",
+        client_key="sdk-key",
+        streaming_connection_timeout=60,
+    )
+
+    with patch.object(feature_repo,"startAutoRefresh") as mock_start:
+        gb.startAutoRefresh()
+
+    mock_start.assert_called_once_with(
+        api_host="https://cdn.example.com",
+        client_key="sdk-key",
+        cb=gb._dispatch_sse_event,
+        streaming_timeout=60,
+    )
+
+def test_gb_start_auto_refresh_passes_dispatch_as_callback():
+    """Passed callback into feature_repo — it is _dispatch_sse_event."""
+    gb=make_gb_simple()
+    captured={}
+
+    def fake_start(**kwargs):
+        captured["cb"]=kwargs["cb"]
+
+    with patch.object(feature_repo,"startAutoRefresh",side_effect=fake_start):
+        gb.startAutoRefresh()
+
+    assert captured["cb"].__func__ is gb._dispatch_sse_event.__func__
+    assert captured["cb"].__self__ is gb
+
+@pytest.mark.asyncio
+async def test_gb_load_features_async_sets_features():
+    """load_features_async updates features in GrowthBook via feature_repo."""
+    gb=make_gb_simple()
+    payload={"features":{"new-flag":{"defaultValue":42}},"savedGroups":[]}
+
+    with patch("growthbook.growthbook.feature_repo.load_features_async",
+               new=AsyncMock(return_value=payload)):
+        await gb.load_features_async()
+
+    assert "new-flag" in gb.get_features()
+    assert gb.get_features()["new-flag"].defaultValue==42
+
+@pytest.mark.asyncio
+async def test_gb_load_features_async_sets_saved_groups():
+    """load_features_async updates savedGroups."""
+    gb=make_gb_simple()
+    groups=[{"id":"g1","values":["a","b"]}]
+    payload={"features":{},"savedGroups":groups}
+
+    with patch("growthbook.growthbook.feature_repo.load_features_async",
+               new=AsyncMock(return_value=payload)):
+        await gb.load_features_async()
+
+    assert gb._saved_groups==groups
+
+@pytest.mark.asyncio
+async def test_gb_load_features_async_none_does_not_reset_features():
+    """If the repo returns None, the existing features are not reset."""
+    gb=make_gb_simple()
+    gb.set_features({"existing":{"defaultValue":True}})
+
+    with patch("growthbook.growthbook.feature_repo.load_features_async",
+               new=AsyncMock(return_value=None)):
+        await gb.load_features_async()
+
+    assert "existing" in gb.get_features()
+
+@pytest.mark.asyncio
+async def test_gb_load_features_async_raises_without_client_key():
+    """load_features_async throws ValueError if there is no client_key."""
+    gb=GrowthBook()
+
+    with pytest.raises(ValueError,match="client_key"):
+        await gb.load_features_async()
+
+def make_sse_client(**kwargs):
+    defaults=dict(api_host="https://cdn.example.com",client_key="sdk-key",on_event=MagicMock())
+    return SSEClient(**{**defaults,**kwargs})
+
+def make_fake_response(lines: list[str]):
+    """Converts a list of strings into an async byte iterator, like aiohttp does."""
+    async def content_iter():
+        for line in lines:
+            yield line.encode("utf-8")
+
+    response=MagicMock()
+    response.content=content_iter()
+    return response
+
+@pytest.mark.asyncio
+async def test_process_response_fires_on_event():
+    """A full SSE message calls on_event once."""
+    on_event=MagicMock()
+    client=make_sse_client(on_event=on_event)
+    client.is_running=True
+
+    response=make_fake_response([
+        "event: features\n",
+        "data: {\"features\":{}}\n",
+        "\n",  # empty line = end of message
+    ])
+
+    await client._process_response(response)
+
+    on_event.assert_called_once_with({"type":"features","data":'{"features":{}}'})
+
+@pytest.mark.asyncio
+async def test_process_response_no_event_without_empty_line():
+    """A message without an empty line separator does not trigger an on_event."""
+    on_event=MagicMock()
+    client=make_sse_client(on_event=on_event)
+    client.is_running=True
+
+    response=make_fake_response([
+        "event: features\n",
+        "data: {}\n",
+        # no empty line
+    ])
+
+    await client._process_response(response)
+
+    on_event.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_process_response_multiple_events():
+    """Multiple messages in one thread."""
+    on_event=MagicMock()
+    client=make_sse_client(on_event=on_event)
+    client.is_running=True
+
+    response=make_fake_response([
+        "event: features\n","data: first\n","\n",
+        "event: ping\n","data: {}\n","\n",
+    ])
+
+    await client._process_response(response)
+
+    assert on_event.call_count==2
+    assert on_event.call_args_list[0][0][0]["data"]=="first"
+    assert on_event.call_args_list[1][0][0]["type"]=="ping"
+
+@pytest.mark.asyncio
+async def test_process_response_stops_when_not_running():
+    """If is_running become False — process stops."""
+    on_event=MagicMock()
+    client=make_sse_client(on_event=on_event)
+    client.is_running=False
+
+    response=make_fake_response([
+        "event: features\n","data: {}\n","\n",
+    ])
+
+    await client._process_response(response)
+
+    on_event.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_process_response_handler_exception_does_not_crash():
+    """Exception in on_event should not stip processing."""
+    on_event=MagicMock(side_effect=RuntimeError("boom"))
+    client=make_sse_client(on_event=on_event)
+    client.is_running=True
+
+    response=make_fake_response([
+        "event: features\n","data: {}\n","\n",
+        "event: ping\n","data: {}\n","\n",
+    ])
+
+    await client._process_response(
+        response)
+    assert on_event.call_count==2
+
+@pytest.mark.asyncio
+async def test_init_session_connects_and_processes():
+    """_init_session calls GET and processes the response."""
+    on_event=MagicMock()
+    client=make_sse_client(on_event=on_event)
+    client.is_running=True
+
+    mock_response=MagicMock()
+    mock_response.raise_for_status=MagicMock()
+
+    # _process_response stops the loop, because is_running will be False
+    async def fake_process(response):
+        client.is_running=False
+
+    with patch.object(client,"_process_response",side_effect=fake_process),\
+            patch("aiohttp.ClientSession") as mock_session_cls:
+        mock_session=AsyncMock()
+        mock_session.__aenter__=AsyncMock(return_value=mock_session)
+        mock_session.__aexit__=AsyncMock(return_value=False)
+        mock_session.get=MagicMock(return_value=AsyncMock(
+            __aenter__=AsyncMock(return_value=mock_response),
+            __aexit__=AsyncMock(return_value=False),
+        ))
+        mock_session_cls.return_value=mock_session
+
+        await client._init_session()
+
+@pytest.mark.asyncio
+async def test_init_session_stops_on_4xx():
+    """HTTP 4xx stops is_running (not connect)."""
+    from aiohttp.client_exceptions import ClientResponseError
+
+    client=make_sse_client(on_event=MagicMock())
+    client.is_running=True
+
+    with patch("aiohttp.ClientSession") as mock_session_cls:
+        mock_session=AsyncMock()
+        mock_session.__aenter__=AsyncMock(return_value=mock_session)
+        mock_session.__aexit__=AsyncMock(return_value=False)
+
+        error=ClientResponseError(request_info=MagicMock(),history=(),status=401)
+        mock_response=MagicMock()
+        mock_response.raise_for_status=MagicMock(side_effect=error)
+        mock_session.get=MagicMock(return_value=AsyncMock(
+            __aenter__=AsyncMock(return_value=mock_response),
+            __aexit__=AsyncMock(return_value=False),
+        ))
+        mock_session_cls.return_value=mock_session
+
+        await client._init_session()
+
+    assert not client.is_running
+
+def test_connect_starts_thread():
+    client=make_sse_client(on_event=MagicMock())
+
+    with patch.object(client,
+                      "_run_sse_channel"):
+        client.connect()
+
+    assert client.is_running
+    assert client._sse_thread is not None
+
+def test_connect_is_idempotent():
+    """Calling connect() again does not start a new thread."""
+    client=make_sse_client(on_event=MagicMock())
+    client.is_running=True
+
+    with patch("threading.Thread") as mock_thread:
+        client.connect()
+
+    mock_thread.assert_not_called()
+
+def test_get_sse_url():
+    client=make_sse_client(on_event=MagicMock())
+    url=client._get_sse_url("https://cdn.growthbook.io","sdk-abc")
+    assert url=="https://cdn.growthbook.io/sub/sdk-abc"
+
+def test_get_sse_url_strips_trailing_slash():
+    client=make_sse_client(on_event=MagicMock())
+    url=client._get_sse_url("https://cdn.growthbook.io/","sdk-abc")
+    assert url=="https://cdn.growthbook.io/sub/sdk-abc"
+
+def test_custom_headers_merged():
+    client=make_sse_client(on_event=MagicMock(),headers={"X-Custom":"value"})
+    assert client.headers["X-Custom"]=="value"
+    assert "Accept" in client.headers
+
+@pytest.mark.asyncio
+async def test_wait_for_reconnect_sleeps():
+    """_wait_for_reconnect waits reconnect_delay s."""
+    client=make_sse_client(on_event=MagicMock(),reconnect_delay=7)
+
+    with patch("asyncio.sleep",new=AsyncMock()) as mock_sleep:
+        await client._wait_for_reconnect()
+
+    mock_sleep.assert_called_once_with(7)
+
+@pytest.mark.asyncio
+async def test_wait_for_reconnect_propagates_cancelled():
+    """CanceledError is thrown."""
+    client=make_sse_client(on_event=MagicMock())
+
+    with patch("asyncio.sleep",new=AsyncMock(side_effect=asyncio.CancelledError)):
+        with pytest.raises(asyncio.CancelledError):
+            await client._wait_for_reconnect()
+
+@pytest.mark.asyncio
+async def test_stop_session_closes_open_session():
+    """_stop_session closes opened session."""
+    client=make_sse_client(on_event=MagicMock())
+    mock_session=AsyncMock()
+    mock_session.closed=False
+    client._sse_session=mock_session
+    client._loop=None
+
+    await client._stop_session()
+
+    mock_session.close.assert_called_once()
+
+@pytest.mark.asyncio
+async def test_stop_session_skips_already_closed():
+    """_stop_session does not touch an already closed session."""
+    client=make_sse_client(on_event=MagicMock())
+    mock_session=AsyncMock()
+    mock_session.closed=True
+    client._sse_session=mock_session
+    client._loop=None
+
+    await client._stop_session()
+
+    mock_session.close.assert_not_called()
+
+@pytest.mark.asyncio
+async def test_stop_session_no_session_does_not_crash():
+    """_stop_session works when there is no session."""
+    client=make_sse_client(on_event=MagicMock())
+    client._sse_session=None
+    client._loop=None
+
+    await client._stop_session()
+
+def test_disconnect_sets_is_running_false():
+    """disconnect always sets is_running = False."""
+    client=make_sse_client(on_event=MagicMock())
+    client.is_running=True
+    client._loop=None
+    client._sse_thread=None
+
+    client.disconnect()
+
+    assert client.is_running is False
+
+def test_disconnect_no_loop_no_thread_does_not_crash():
+    """disconnect without loop and thread works without exceptions."""
+    client=make_sse_client(on_event=MagicMock())
+    client._loop=None
+    client._sse_thread=None
+
+    client.disconnect()
+
+def test_disconnect_joins_thread():
+    """disconnect calls join on the stream with the passed timeout."""
+    client=make_sse_client(on_event=MagicMock())
+    client._loop=None
+
+    mock_thread=MagicMock()
+    mock_thread.is_alive.return_value=False
+    client._sse_thread=mock_thread
+
+    client.disconnect(timeout=5)
+
+    mock_thread.join.assert_called_once_with(timeout=5)
+
+def test_disconnect_warns_if_thread_still_alive():
+    """disconnect logs a warning if the flow has not ended before the timeout."""
+    client=make_sse_client(on_event=MagicMock())
+    client._loop=None
+
+    mock_thread=MagicMock()
+    mock_thread.is_alive.return_value=True
+    client._sse_thread=mock_thread
+
+    with patch("growthbook.growthbook.logger") as mock_logger:
+        client.disconnect(timeout=1)
+
+    warning_calls=[str(c) for c in mock_logger.warning.call_args_list]
+    assert any("did not terminate" in w for w in warning_calls)
+
+def test_disconnect_calls_stop_session_when_loop_running():
+    """If the loop is running, disconnect sends _stop_session via run_coroutine_threadsafe."""
+    client=make_sse_client(on_event=MagicMock())
+    client._sse_thread=None
+
+    mock_loop=MagicMock()
+    mock_loop.is_running.return_value=True
+    client._loop=mock_loop
+
+    mock_future=MagicMock()
+    mock_future.result=MagicMock(return_value=None)
+
+    with patch("asyncio.run_coroutine_threadsafe",return_value=mock_future) as mock_rcts:
+        client.disconnect(timeout=7)
+
+    mock_rcts.assert_called_once()
+    mock_future.result.assert_called_once_with(timeout=7)
+
+def test_disconnect_force_stops_loop_on_future_exception():
+    """If future.result threw an exception, the loop is forced to stop."""
+    client=make_sse_client(on_event=MagicMock())
+    client._sse_thread=None
+
+    mock_loop=MagicMock()
+    mock_loop.is_running.return_value=True
+    client._loop=mock_loop
+
+    mock_future=MagicMock()
+    mock_future.result=MagicMock(side_effect=TimeoutError("timeout"))
+
+    with patch("asyncio.run_coroutine_threadsafe",return_value=mock_future):
+        client.disconnect()
+
+    mock_loop.call_soon_threadsafe.assert_called_once_with(mock_loop.stop)
+
+def test_disconnect_skips_stop_session_when_loop_not_running():
+    """If the loop is not running, run_coroutine_threadsafe is not called."""
+    client=make_sse_client(on_event=MagicMock())
+    client._sse_thread=None
+
+    mock_loop=MagicMock()
+    mock_loop.is_running.return_value=False
+    client._loop=mock_loop
+
+    with patch("asyncio.run_coroutine_threadsafe") as mock_rcts:
+        client.disconnect()
+
+    mock_rcts.assert_not_called()
