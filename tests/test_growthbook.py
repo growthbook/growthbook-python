@@ -106,6 +106,20 @@ def test_conditions(evalCondition_data):
     assert evalCondition(attributes, condition, savedGroups) == expected
 
 
+def test_version_comparison_normalizes_unhashable_values():
+    assert paddedVersionString(["1.2.3"]) == paddedVersionString("0")
+    assert paddedVersionString({"version": "1.2.3"}) == paddedVersionString("0")
+
+    assert evalCondition(
+        {"version": ["1.2.3"]},
+        {"version": {"$vgt": "1.0.0"}},
+    ) is False
+    assert evalCondition(
+        {"version": "1.0.0"},
+        {"version": {"$vgt": {"version": "0.9.0"}}},
+    ) is True
+
+
 def test_decrypt(decrypt_data):
     _, encrypted, key, expected = decrypt_data
     try:

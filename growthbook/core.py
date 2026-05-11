@@ -243,10 +243,6 @@ def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups)
         return not evalConditionValue(conditionValue, attributeValue, savedGroups)
     return False
 
-_re_ver_strip = re.compile(r"(^v|\+.*$)")
-_re_ver_split = re.compile(r"[-.]")
-
-@lru_cache(maxsize=512)
 def paddedVersionString(input) -> str:
     # If input is a number, convert to a string
     if _is_numeric(input):
@@ -255,6 +251,15 @@ def paddedVersionString(input) -> str:
     if not input or not isinstance(input, str):
         input = "0"
 
+    return _paddedVersionString(input)
+
+
+_re_ver_strip = re.compile(r"(^v|\+.*$)")
+_re_ver_split = re.compile(r"[-.]")
+
+
+@lru_cache(maxsize=512)
+def _paddedVersionString(input: str) -> str:
     # Remove build info and leading `v` if any
     input = _re_ver_strip.sub("", input)
     # Split version into parts (both core version numbers and pre-release tags)
