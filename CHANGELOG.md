@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.2.2](https://github.com/growthbook/growthbook-python/compare/v2.2.1...v2.2.2) (2026-05-11)
+
+
+### Bug Fixes
+
+* preserve version comparison normalization ([4d24d39](https://github.com/growthbook/growthbook-python/commit/4d24d39059b752ddeefb8fc70192605cb01d2413))
+
 ## [2.2.1](https://github.com/growthbook/growthbook-python/compare/v2.2.0...v2.2.1) (2026-04-23)
 
 
