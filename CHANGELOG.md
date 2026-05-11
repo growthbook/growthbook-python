@@ -3,8 +3,10 @@
 ## [2.2.2](https://github.com/growthbook/growthbook-python/compare/v2.2.1...v2.2.2) (2026-05-11)
 
 
-### Bug Fixes
+### Minor Enhancements - Performance
 
+* optimize Feature(...) payload parsing
+* `fnv1a32` processing fixes for ascii values ([4a0b5f6](https://github.com/growthbook/growthbook-python/commit/4a0b5f6d973a513452e61e165918627ffbd492ab)) 
 * preserve version comparison normalization ([4d24d39](https://github.com/growthbook/growthbook-python/commit/4d24d39059b752ddeefb8fc70192605cb01d2413))
 
 ## [2.2.1](https://github.com/growthbook/growthbook-python/compare/v2.2.0...v2.2.1) (2026-04-23)
