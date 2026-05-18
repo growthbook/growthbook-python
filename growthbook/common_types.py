@@ -235,35 +235,9 @@ class Feature(object):
         if rules is None:
             rules = []
         self.defaultValue = defaultValue
-        self.rules: List[FeatureRule] = []
-        for rule in rules:
-            if isinstance(rule, FeatureRule):
-                self.rules.append(rule)
-            else:
-                self.rules.append(FeatureRule(
-                    id=rule.get("id", None),
-                    key=rule.get("key", ""),
-                    variations=rule.get("variations", None),
-                    weights=rule.get("weights", None),
-                    coverage=rule.get("coverage", None),
-                    condition=rule.get("condition", None),
-                    namespace=rule.get("namespace", None),
-                    force=rule.get("force", None),
-                    hashAttribute=rule.get("hashAttribute", "id"),
-                    fallbackAttribute=rule.get("fallbackAttribute", None),
-                    hashVersion=rule.get("hashVersion", None),
-                    range=rule.get("range", None),
-                    ranges=rule.get("ranges", None),
-                    meta=rule.get("meta", None),
-                    filters=rule.get("filters", None),
-                    seed=rule.get("seed", None),
-                    name=rule.get("name", None),
-                    phase=rule.get("phase", None),
-                    disableStickyBucketing=rule.get("disableStickyBucketing", False),
-                    bucketVersion=rule.get("bucketVersion", None),
-                    minBucketVersion=rule.get("minBucketVersion", None),
-                    parentConditions=rule.get("parentConditions", None),
-                ))
+        self.rules: List[FeatureRule] = [
+            r if isinstance(r, FeatureRule) else FeatureRule(**r) for r in rules
+        ]
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -296,6 +270,7 @@ class FeatureRule(object):
         bucketVersion: Optional[int] = None,
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
+        **_ignored: Any,
     ) -> None:
 
         if disableStickyBucketing:
