@@ -409,6 +409,9 @@ class Options:
     http_connect_timeout: Optional[int] = None
     http_read_timeout: Optional[int] = None
     event_logger: Optional[Callable[..., Any]] = None
+    remote_eval: bool = False
+    cache_key_attributes: Optional[List[str]] = None
+    remote_eval_cache_size: int = 1000
 
 
 @dataclass
