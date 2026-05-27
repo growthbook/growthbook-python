@@ -316,7 +316,7 @@ def _getOrigHashValue(
     fallbackAttr: Optional[str] = None
 ) -> Tuple[str, str]:
     # attr = attr or "id" -- Fix for the flaky behavior of sticky bucket assignment
-    actual_attr: str = attr if attr is not None else ""
+    actual_attr: str = attr if attr is not None else "id"
     val = ""
 
     if actual_attr in eval_context.user.attributes:
@@ -327,7 +327,7 @@ def _getOrigHashValue(
         if fallbackAttr in eval_context.user.attributes:
             val = "" if eval_context.user.attributes[fallbackAttr] is None else eval_context.user.attributes[fallbackAttr]
 
-        if not val or val != "":
+        if val:
             actual_attr = fallbackAttr
 
     return (actual_attr, val)
@@ -635,14 +635,14 @@ def _get_sticky_bucket_assignments(evalContext: EvaluationContext,
     merged: Dict[str, str] = {}
 
     # Search for docs stored for attribute(id)
-    _, hashValue = _getHashValue(attr=attr, eval_context=evalContext)
-    key = f"{attr}||{hashValue}"
+    resolved_attr, hashValue = _getHashValue(attr=attr, eval_context=evalContext)
+    key = f"{resolved_attr}||{hashValue}"
     if key in evalContext.user.sticky_bucket_assignment_docs:
         merged = evalContext.user.sticky_bucket_assignment_docs[key].get("assignments", {})
 
     # Search for docs stored for fallback attribute
     if fallback:
-        _, hashValue = _getHashValue(fallbackAttr=fallback, eval_context=evalContext)
+        _, hashValue = _getHashValue(attr=fallback, eval_context=evalContext)
         key = f"{fallback}||{hashValue}"
         if key in evalContext.user.sticky_bucket_assignment_docs:
             # Merge the fallback assignments, but don't overwrite existing ones
