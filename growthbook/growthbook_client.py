@@ -8,6 +8,7 @@ from typing import Set
 import asyncio
 import threading
 import traceback
+from collections import OrderedDict
 from datetime import datetime
 from growthbook import FeatureRepository, feature_repo
 from contextlib import asynccontextmanager
@@ -108,7 +109,8 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                  decryption_key: str = "",
                  cache_ttl: int = 60,
                  http_connect_timeout: Optional[int] = None,
-                 http_read_timeout: Optional[int] = None):
+                 http_read_timeout: Optional[int] = None,
+                 remote_eval_cache_size: int = 1000):
         FeatureRepository.__init__(self)
         self._api_host = api_host
         self._client_key = client_key
@@ -124,6 +126,70 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._refresh_in_progress = asyncio.Lock()
         self.http_connect_timeout = http_connect_timeout
         self.http_read_timeout = http_read_timeout
+
+        # Remote-eval per-user response cache (LRU-bounded, distinct from
+        # the GET-path self.cache to keep eviction strategies clean).
+        self._remote_eval_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        self._remote_eval_cache_max = remote_eval_cache_size
+        self._remote_eval_cache_lock = asyncio.Lock()
+        # Inflight coalescing: when concurrent calls land for the same cache
+        # key, the second caller awaits the first's future instead of issuing
+        # a duplicate POST.
+        self._remote_eval_inflight: Dict[str, "asyncio.Future[Optional[Dict[str, Any]]]"] = {}
+
+    async def fetch_remote_eval(
+        self,
+        api_host: str,
+        client_key: str,
+        payload: Dict[str, Any],
+        cache_key_attributes: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """POST to /api/eval/{client_key}, caching per-payload with LRU eviction
+        and coalescing concurrent identical requests onto a single inflight POST."""
+        cache_key = self._compute_cache_key(api_host, client_key, True, payload, cache_key_attributes)
+
+        is_leader = False
+        async with self._remote_eval_cache_lock:
+            cached: Optional[Dict[str, Any]] = self._remote_eval_cache.get(cache_key)
+            if cached is not None:
+                self._remote_eval_cache.move_to_end(cache_key)
+                return cached
+            inflight = self._remote_eval_inflight.get(cache_key)
+            if inflight is None:
+                inflight = asyncio.get_event_loop().create_future()
+                self._remote_eval_inflight[cache_key] = inflight
+                is_leader = True
+
+        if not is_leader:
+            # Another coroutine is already POSTing — wait for its result.
+            return await inflight
+
+        # Leader path: perform the POST outside the cache lock.
+        try:
+            response = await self._fetch_and_decode_post_async(api_host, client_key, payload)
+        except Exception as e:
+            async with self._remote_eval_cache_lock:
+                self._remote_eval_inflight.pop(cache_key, None)
+            if not inflight.done():
+                inflight.set_exception(e)
+            raise
+
+        async with self._remote_eval_cache_lock:
+            self._remote_eval_inflight.pop(cache_key, None)
+            if response is not None:
+                self._remote_eval_cache[cache_key] = response
+                self._remote_eval_cache.move_to_end(cache_key)
+                while len(self._remote_eval_cache) > self._remote_eval_cache_max:
+                    self._remote_eval_cache.popitem(last=False)
+        if not inflight.done():
+            inflight.set_result(response)
+        return response
+
+    async def flush_remote_eval_cache(self) -> None:
+        """Drop all cached remote-eval responses. Called when the proxy
+        emits a features-updated SSE event."""
+        async with self._remote_eval_cache_lock:
+            self._remote_eval_cache.clear()
 
     @asynccontextmanager
     async def refresh_operation(self):
@@ -195,12 +261,26 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         try:
             event_type = event_data.get("type")
             if event_type == "features-updated":
+                # In remote-eval mode the proxy emits this event without a
+                # payload; the right response is to flush our per-user cache so
+                # subsequent evals re-POST lazily. We do NOT proactively re-POST
+                # for every cached user (could be millions in a busy service).
+                if self._remote_eval_cache_max and self._remote_eval_cache:
+                    await self.flush_remote_eval_cache()
+                    return
                 response = await self.load_features_async(
                     self._api_host, self._client_key, self._decryption_key, self._cache_ttl
                 )
                 if response is not None:
                     await self._handle_feature_update(response)
             elif event_type == "features":
+                # Remote-eval mode shouldn't receive inline payloads (they
+                # wouldn't be user-filtered), but if one arrives defensively
+                # flush the per-user cache instead of caching a bogus payload.
+                if self._remote_eval_cache_max and self._remote_eval_cache:
+                    await self.flush_remote_eval_cache()
+                    return
+
                 data = event_data.get("data", "{}")
                 if isinstance(data, str):
                     data = json.loads(data)
@@ -348,24 +428,52 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         await self.stop_refresh()
     
     async def load_features_async(
-        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
+        self,
+        api_host: str,
+        client_key: str,
+        decryption_key: str = "",
+        ttl: int = 60,
+        remote_eval: bool = False,
+        payload: Optional[Dict[str, Any]] = None,
+        cache_key_attributes: Optional[List[str]] = None,
     ) -> Optional[Dict]:
         # Use stored values when called internally
         if api_host == self._api_host and client_key == self._client_key:
             decryption_key = self._decryption_key
             ttl = self._cache_ttl
-        return await super().load_features_async(api_host, client_key, decryption_key, ttl)
+        return await super().load_features_async(
+            api_host, client_key, decryption_key, ttl,
+            remote_eval=remote_eval, payload=payload,
+            cache_key_attributes=cache_key_attributes,
+        )
 
 class GrowthBookClient:
     def __init__(
         self,
         options: Optional[Union[Dict[str, Any], Options]] = None
-    ):  
+    ):
         self.options = (
             options if isinstance(options, Options)
             else Options(**options) if options
             else Options()
         )
+
+        if self.options.remote_eval:
+            if not self.options.client_key:
+                raise ValueError("Must specify client_key for remote eval")
+            if self.options.decryption_key:
+                raise ValueError("Encryption is not available for remote eval")
+            if self.options.sticky_bucket_service is not None:
+                raise ValueError(
+                    "sticky_bucket_service is not compatible with remote_eval; "
+                    "the proxy handles sticky bucketing server-side"
+                )
+            from urllib.parse import urlparse as _urlparse
+            host = _urlparse(self.options.api_host or "").hostname or ""
+            if host == "growthbook.io" or host.endswith(".growthbook.io"):
+                raise ValueError(
+                    "Cloud host does not support remote eval; use a self-hosted proxy/edge"
+                )
         
         # Thread-safe tracking state
         self._tracked: Dict[str, bool] = {}  # Access only within async context
@@ -393,7 +501,8 @@ class GrowthBookClient:
                 self.options.decryption_key or "",
                 self.options.cache_ttl,
                 self.options.http_connect_timeout,
-                self.options.http_read_timeout
+                self.options.http_read_timeout,
+                self.options.remote_eval_cache_size,
             )
             if self.options.client_key
             else None
@@ -519,11 +628,33 @@ class GrowthBookClient:
             return False
 
         try:
+            if self.options.remote_eval:
+                # Remote-eval mode: do NOT fetch global features (responses are
+                # per-user, so there is no meaningful "global" payload). Skip
+                # callback registration (would cross-pollute cached per-user
+                # state). Establish a default empty global context so
+                # create_evaluation_context doesn't raise; features come from
+                # fetch_remote_eval at eval time.
+                async with self._context_lock:
+                    if self._global_context is None:
+                        self._global_context = GlobalContext(
+                            options=self.options, features={}, saved_groups={}
+                        )
+                refresh_strategy = self.options.refresh_strategy or FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
+                if refresh_strategy == FeatureRefreshStrategy.SERVER_SENT_EVENTS:
+                    # SSE: features-updated event will flush the remote-eval cache
+                    await self._features_repository.start_feature_refresh(
+                        refresh_strategy, callback=self._feature_update_callback
+                    )
+                # HTTP polling refresh is intentionally not started in remote-eval
+                # mode — the polling loop has no per-user payload to send.
+                return True
+
             # Initial feature load
             initial_features = await self._features_repository.load_features_async(
-                self.options.api_host or "https://cdn.growthbook.io", 
-                self.options.client_key or "", 
-                self.options.decryption_key or "", 
+                self.options.api_host or "https://cdn.growthbook.io",
+                self.options.client_key or "",
+                self.options.decryption_key or "",
                 self.options.cache_ttl
             )
             if not initial_features:
@@ -532,19 +663,54 @@ class GrowthBookClient:
 
             # Create global context with initial features
             await self._feature_update_callback(initial_features)
-            
+
             # Set up callback for future updates
             self._features_repository.add_callback(self._feature_update_callback)
-            
+
             # Start feature refresh
             refresh_strategy = self.options.refresh_strategy or FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
             await self._features_repository.start_feature_refresh(refresh_strategy)
             return True
-            
+
         except Exception as e:
             logger.error(f"Initialization failed: {str(e)}", exc_info=True)
             traceback.print_exc()
             return False
+
+    def _build_remote_eval_payload(self, user_context: UserContext) -> Dict[str, Any]:
+        return {
+            "attributes": user_context.attributes or {},
+            "forcedFeatures": [],  # not exposed on UserContext today; future extension
+            "forcedVariations": user_context.forced_variations or {},
+            "url": user_context.url or "",
+        }
+
+    def _materialize_features(self, response: Dict[str, Any]) -> Dict[str, Feature]:
+        features: Dict[str, Feature] = {}
+        for key, feature in (response.get("features") or {}).items():
+            if isinstance(feature, Feature):
+                features[key] = feature
+            else:
+                features[key] = Feature(
+                    rules=feature.get("rules", []),
+                    defaultValue=feature.get("defaultValue", None),
+                )
+        return features
+
+    async def preload_remote_eval(self, user_context: UserContext) -> None:
+        """Warm the remote-eval cache for this user context. No-op when
+        remote_eval is disabled. After this returns, subsequent eval_feature /
+        is_on / etc. calls for the same UserContext are cache hits and make no
+        network requests."""
+        if not self.options.remote_eval or not self._features_repository:
+            return
+        payload = self._build_remote_eval_payload(user_context)
+        await self._features_repository.fetch_remote_eval(
+            self.options.api_host or "https://cdn.growthbook.io",
+            self.options.client_key or "",
+            payload,
+            self.options.cache_key_attributes,
+        )
 
     async def _feature_update_callback(self, features_data: Dict[str, Any]) -> None:
         """Handle feature updates and manage global context"""
@@ -587,10 +753,33 @@ class GrowthBookClient:
         """Create evaluation context for feature evaluation"""
         if self._global_context is None:
             raise RuntimeError("GrowthBook client not properly initialized")
-            
+
+        if self.options.remote_eval and self._features_repository:
+            # Per-user POST + cache: features come from the proxy filtered for
+            # this UserContext, not from self._global_context.features.
+            payload = self._build_remote_eval_payload(user_context)
+            response = await self._features_repository.fetch_remote_eval(
+                self.options.api_host or "https://cdn.growthbook.io",
+                self.options.client_key or "",
+                payload,
+                self.options.cache_key_attributes,
+            ) or {}
+            features = self._materialize_features(response)
+            saved_groups = response.get("savedGroups") or {}
+            global_ctx = GlobalContext(
+                options=self.options,
+                features=features,
+                saved_groups=saved_groups,
+            )
+            return EvaluationContext(
+                user=user_context,
+                global_ctx=global_ctx,
+                stack=StackContext(evaluated_features=set()),
+            )
+
         # Get sticky bucket assignments if needed
         sticky_assignments = await self._refresh_sticky_buckets(user_context.attributes)
-        
+
         # update user context with sticky bucket assignments
         user_context.sticky_bucket_assignment_docs = sticky_assignments
 
