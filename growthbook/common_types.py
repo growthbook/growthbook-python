@@ -270,6 +270,7 @@ class FeatureRule(object):
         bucketVersion: Optional[int] = None,
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
+        tracks: Optional[List[Dict[str, Any]]] = None,
         **_ignored: Any,
     ) -> None:
 
@@ -298,6 +299,9 @@ class FeatureRule(object):
         self.bucketVersion = bucketVersion or 0
         self.minBucketVersion = minBucketVersion or 0
         self.parentConditions = parentConditions
+        # Remote-eval rules carry pre-evaluated experiment tracking events on
+        # the force branch; see _fireRuleTracks in core.py.
+        self.tracks = tracks
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {}
@@ -345,6 +349,8 @@ class FeatureRule(object):
             data["minBucketVersion"] = self.minBucketVersion
         if self.parentConditions:
             data["parentConditions"] = self.parentConditions
+        if self.tracks:
+            data["tracks"] = self.tracks
 
         return data
 

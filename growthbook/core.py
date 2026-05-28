@@ -480,6 +480,60 @@ def getBucketRanges(
 
     return ranges
 
+_EXPERIMENT_KW = {
+    "key", "variations", "weights", "active", "status", "coverage", "condition",
+    "namespace", "url", "include", "groups", "force", "hashAttribute",
+    "fallbackAttribute", "hashVersion", "ranges", "meta", "filters", "seed",
+    "name", "phase", "disableStickyBucketing", "bucketVersion",
+    "minBucketVersion", "parentConditions",
+}
+
+
+def _fire_rule_tracks(
+    rule_tracks: List[Dict[str, Any]],
+    eval_context: EvaluationContext,
+    tracking_cb: Optional[Callable[[Experiment, Result, UserContext], None]],
+) -> None:
+    """Fire tracking_cb for each deferred experiment-tracking entry attached to
+    a remote-eval force rule. The proxy server evaluates experiments server-side
+    and emits the resulting (experiment, result) pairs here so the SDK can still
+    drive its tracking pipeline. Mirrors the JS SDK behavior in
+    packages/sdk-js/src/core.ts (`if (rule.tracks) ...`)."""
+    if not rule_tracks or not tracking_cb:
+        return
+    for entry in rule_tracks:
+        exp_data = entry.get("experiment") or {}
+        res_data = entry.get("result") or {}
+        # Required fields for Experiment construction
+        if "key" not in exp_data or "variations" not in exp_data:
+            logger.debug("Skipping rule.tracks entry: missing experiment key/variations")
+            continue
+        exp_kwargs = {k: v for k, v in exp_data.items() if k in _EXPERIMENT_KW}
+        # The proxy emits Result in the JS shape: key/name/passthrough flat at
+        # the top level. Python's Result takes those via a nested `meta` dict.
+        meta: Optional[VariationMeta] = res_data.get("meta")
+        if meta is None:
+            flat = {k: res_data[k] for k in ("key", "name", "passthrough") if k in res_data}
+            meta = flat or None  # type: ignore[assignment]
+        try:
+            experiment = Experiment(**exp_kwargs)
+            result = Result(
+                variationId=res_data.get("variationId", 0),
+                inExperiment=res_data.get("inExperiment", False),
+                value=res_data.get("value"),
+                hashUsed=res_data.get("hashUsed", False),
+                hashAttribute=res_data.get("hashAttribute", "id"),
+                hashValue=res_data.get("hashValue", ""),
+                featureId=res_data.get("featureId"),
+                meta=meta,
+                bucket=res_data.get("bucket"),
+                stickyBucketUsed=res_data.get("stickyBucketUsed", False),
+            )
+            tracking_cb(experiment, result, eval_context.user)
+        except Exception:
+            logger.exception("Failed to fire rule.tracks tracking event")
+
+
 def eval_feature(
     key: str,
     evalContext: Optional[EvaluationContext] = None,
@@ -550,6 +604,11 @@ def eval_feature(
                 continue
 
             logger.debug("Force value from rule, feature %s", key)
+            # Fire deferred experiment tracking events attached by the
+            # remote-eval proxy (no-op when the rule was not produced by remote
+            # evaluation).
+            if rule.tracks:
+                _fire_rule_tracks(rule.tracks, evalContext, tracking_cb)
             return FeatureResult(rule.force, "force", ruleId=rule.id)
 
         if rule.variations is None:

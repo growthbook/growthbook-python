@@ -490,6 +490,177 @@ async def test_async_preload_noop_in_cdn_mode():
     await client.preload_remote_eval(UserContext(attributes={"id": "u1"}))
 
 
+class TestRemoteEvalRuleTracks:
+    """The proxy attaches a `tracks: [{experiment, result}]` array to rules so
+    the SDK can fire trackingCallback for experiments that were evaluated
+    server-side. Mirrors `if (rule.tracks)` in JS sdk-js/src/core.ts."""
+
+    def setup_method(self):
+        _reset_repo()
+
+    def test_sync_fires_tracking_callback_for_each_track_entry(self):
+        # Server-evaluated rule: force=True with two deferred tracking events.
+        body = {
+            "features": {
+                "ab-feature": {
+                    "defaultValue": False,
+                    "rules": [{
+                        "force": True,
+                        "tracks": [
+                            {
+                                "experiment": {"key": "exp-A", "variations": [0, 1]},
+                                "result": {
+                                    "variationId": 1,
+                                    "inExperiment": True,
+                                    "value": 1,
+                                    "hashUsed": True,
+                                    "hashAttribute": "id",
+                                    "hashValue": "u1",
+                                    "featureId": "ab-feature",
+                                    "key": "1",
+                                },
+                            },
+                            {
+                                "experiment": {"key": "exp-B", "variations": ["c", "t"]},
+                                "result": {
+                                    "variationId": 0,
+                                    "inExperiment": True,
+                                    "value": "c",
+                                    "hashUsed": True,
+                                    "hashAttribute": "id",
+                                    "hashValue": "u1",
+                                    "featureId": "ab-feature",
+                                    "key": "0",
+                                },
+                            },
+                        ],
+                    }],
+                },
+            },
+            "savedGroups": {},
+        }
+
+        tracked = []
+        def cb(experiment, result, user_context):
+            tracked.append((experiment.key, result.variationId, result.value))
+
+        with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)):
+            gb = GrowthBook(
+                api_host="https://proxy.example.com",
+                client_key="sdk-test",
+                attributes={"id": "u1"},
+                on_experiment_viewed=cb,
+                remoteEval=True,
+            )
+            result = gb.eval_feature("ab-feature")
+            assert result.value is True
+            assert result.source == "force"
+            assert tracked == [("exp-A", 1, 1), ("exp-B", 0, "c")]
+
+    def test_sync_no_tracks_no_callback_fire(self):
+        """Force rule with no tracks fires nothing."""
+        body = {
+            "features": {
+                "f": {"defaultValue": False, "rules": [{"force": True}]},
+            },
+            "savedGroups": {},
+        }
+        tracked = []
+        def cb(experiment, result, user_context):
+            tracked.append((experiment.key,))
+
+        with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)):
+            gb = GrowthBook(
+                api_host="https://proxy.example.com",
+                client_key="sdk-test",
+                attributes={"id": "u1"},
+                on_experiment_viewed=cb,
+                remoteEval=True,
+            )
+            gb.eval_feature("f")
+            assert tracked == []
+
+    def test_sync_malformed_track_entry_doesnt_crash(self):
+        """A tracks entry missing required experiment fields is skipped, not raised."""
+        body = {
+            "features": {
+                "f": {
+                    "defaultValue": False,
+                    "rules": [{
+                        "force": True,
+                        "tracks": [
+                            {"experiment": {}, "result": {}},  # missing key/variations
+                            {
+                                "experiment": {"key": "exp", "variations": [0, 1]},
+                                "result": {"variationId": 1, "inExperiment": True, "value": 1},
+                            },
+                        ],
+                    }],
+                },
+            },
+            "savedGroups": {},
+        }
+        tracked = []
+        def cb(experiment, result, user_context):
+            tracked.append(experiment.key)
+
+        with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)):
+            gb = GrowthBook(
+                api_host="https://proxy.example.com",
+                client_key="sdk-test",
+                attributes={"id": "u1"},
+                on_experiment_viewed=cb,
+                remoteEval=True,
+            )
+            gb.eval_feature("f")
+            assert tracked == ["exp"]  # only the valid one fired
+
+
+@pytest.mark.asyncio
+async def test_async_rule_tracks_fires_tracking_callback():
+    """Same as sync — async client also fires rule.tracks on force-rule path."""
+    body = {
+        "features": {
+            "ab-feature": {
+                "defaultValue": False,
+                "rules": [{
+                    "force": True,
+                    "tracks": [{
+                        "experiment": {"key": "exp-A", "variations": [0, 1]},
+                        "result": {
+                            "variationId": 1, "inExperiment": True, "value": 1,
+                            "hashUsed": True, "hashAttribute": "id", "hashValue": "u1",
+                            "featureId": "ab-feature", "key": "1",
+                        },
+                    }],
+                }],
+            },
+        },
+        "savedGroups": {},
+    }
+    tracked = []
+
+    async def post_handler(api_host, client_key, payload):
+        return body
+
+    def cb(experiment, result, *_):
+        tracked.append((experiment.key, result.variationId))
+
+    client = GrowthBookClient(Options(
+        api_host="https://proxy.example.com",
+        client_key="sdk-async",
+        on_experiment_viewed=cb,
+        remote_eval=True,
+        refresh_strategy=None,
+    ))
+    client._features_repository._fetch_and_decode_post_async = post_handler
+    await client.initialize()
+
+    result = await client.eval_feature("ab-feature", UserContext(attributes={"id": "u1"}))
+    assert result.value is True
+    assert tracked == [("exp-A", 1)]
+
+
 @pytest.mark.asyncio
 async def test_async_non_remote_eval_still_works():
     """Regression: when remote_eval is False, initialize() does the CDN load
