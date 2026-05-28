@@ -13,7 +13,7 @@ from unittest.mock import MagicMock, patch
 
 from growthbook import GrowthBook, feature_repo, FeatureRepository, InMemoryStickyBucketService
 from growthbook.common_types import Options, UserContext
-from growthbook.growthbook_client import GrowthBookClient, SingletonMeta
+from growthbook.growthbook_client import GrowthBookClient, SingletonMeta, EnhancedFeatureRepository
 
 
 def _make_post_response(body):
@@ -295,7 +295,16 @@ class TestRemoteEvalSyncRobustness:
 
 
 def _reset_singletons():
-    """Drop the EnhancedFeatureRepository singleton so each test gets fresh state."""
+    """Drop the EnhancedFeatureRepository singleton so each test gets fresh state.
+
+    test_growthbook_client.py uses `EnhancedFeatureRepository._instances = {}`
+    which creates a class attribute on EnhancedFeatureRepository that SHADOWS
+    the metaclass attribute `SingletonMeta._instances`. Once that has happened,
+    `SingletonMeta._instances.clear()` clears the wrong dict. To survive that
+    pattern, we ASSIGN a fresh empty dict on EnhancedFeatureRepository (so it
+    becomes the shadow that the metaclass's `cls._instances` lookup will find),
+    and ALSO clear the metaclass attribute in case nothing's shadowed it yet."""
+    EnhancedFeatureRepository._instances = {}
     SingletonMeta._instances.clear()
 
 
@@ -338,13 +347,23 @@ class TestRemoteEvalAsyncValidation:
             ))
 
 
-async def _make_async_client(post_handler):
-    """Build a GrowthBookClient with remote_eval on and the network method mocked."""
+async def _make_async_client(post_handler, **opts):
+    """Build a GrowthBookClient with remote_eval on and the network method mocked.
+
+    Defensively clears the SingletonMeta cache so each test gets a fresh
+    EnhancedFeatureRepository — pytest-asyncio creates a new event loop per
+    test, and the previous test's instance can still hold asyncio primitives
+    bound to a now-closed loop. Without this clear the conftest's async
+    teardown can hang on `await stop_refresh()` and the next test inherits
+    the stale `_remote_eval_cache`."""
+    EnhancedFeatureRepository._instances = {}
+    SingletonMeta._instances.clear()
     client = GrowthBookClient(Options(
         api_host="https://proxy.example.com",
         client_key="sdk-async",
         remote_eval=True,
         refresh_strategy=None,
+        **opts,
     ))
     client._features_repository._fetch_and_decode_post_async = post_handler
     await client.initialize()
@@ -420,15 +439,7 @@ async def test_async_lru_eviction():
         calls.append(payload["attributes"]["id"])
         return {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
 
-    client = GrowthBookClient(Options(
-        api_host="https://proxy.example.com",
-        client_key="sdk-async",
-        remote_eval=True,
-        refresh_strategy=None,
-        remote_eval_cache_size=2,
-    ))
-    client._features_repository._fetch_and_decode_post_async = post_handler
-    await client.initialize()
+    client = await _make_async_client(post_handler, remote_eval_cache_size=2)
 
     await client.is_on("flag1", UserContext(attributes={"id": "A"}))
     await client.is_on("flag1", UserContext(attributes={"id": "B"}))
@@ -479,6 +490,8 @@ async def test_async_sse_features_updated_flushes_cache():
 @pytest.mark.asyncio
 async def test_async_preload_noop_in_cdn_mode():
     """preload_remote_eval is a safe no-op when remote_eval is False."""
+    EnhancedFeatureRepository._instances = {}
+    SingletonMeta._instances.clear()
     client = GrowthBookClient(Options(
         api_host="https://proxy.example.com",
         client_key="sdk-cdn",
@@ -646,15 +659,7 @@ async def test_async_rule_tracks_fires_tracking_callback():
     def cb(experiment, result, *_):
         tracked.append((experiment.key, result.variationId))
 
-    client = GrowthBookClient(Options(
-        api_host="https://proxy.example.com",
-        client_key="sdk-async",
-        on_experiment_viewed=cb,
-        remote_eval=True,
-        refresh_strategy=None,
-    ))
-    client._features_repository._fetch_and_decode_post_async = post_handler
-    await client.initialize()
+    client = await _make_async_client(post_handler, on_experiment_viewed=cb)
 
     result = await client.eval_feature("ab-feature", UserContext(attributes={"id": "u1"}))
     assert result.value is True
@@ -670,6 +675,8 @@ async def test_async_non_remote_eval_still_works():
     async def cdn_fetch(api_host, client_key, decryption_key=""):
         return cdn_response
 
+    EnhancedFeatureRepository._instances = {}
+    SingletonMeta._instances.clear()
     client = GrowthBookClient(Options(
         api_host="https://cdn.growthbook.io",
         client_key="k",

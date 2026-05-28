@@ -129,9 +129,15 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
 
         # Remote-eval per-user response cache (LRU-bounded, distinct from
         # the GET-path self.cache to keep eviction strategies clean).
+        # NOTE: no asyncio.Lock here on purpose — the critical sections in
+        # fetch_remote_eval are pure dict ops with no `await`, so they're
+        # already atomic from asyncio's perspective. Binding an asyncio.Lock
+        # at __init__ time would tie it to whichever event loop happened to
+        # be running at construction (a footgun with the SingletonMeta +
+        # pytest-asyncio's per-test loops — leads to cross-loop awaits that
+        # hang forever).
         self._remote_eval_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._remote_eval_cache_max = remote_eval_cache_size
-        self._remote_eval_cache_lock = asyncio.Lock()
         # Inflight coalescing: when concurrent calls land for the same cache
         # key, the second caller awaits the first's future instead of issuing
         # a duplicate POST.
@@ -145,42 +151,45 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         cache_key_attributes: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         """POST to /api/eval/{client_key}, caching per-payload with LRU eviction
-        and coalescing concurrent identical requests onto a single inflight POST."""
+        and coalescing concurrent identical requests onto a single inflight POST.
+
+        The cache and inflight dicts are touched only between `await` points,
+        so no explicit lock is needed — asyncio coroutines yield only at
+        `await`, and the CPython interpreter makes single dict ops atomic."""
         cache_key = self._compute_cache_key(api_host, client_key, True, payload, cache_key_attributes)
 
-        is_leader = False
-        async with self._remote_eval_cache_lock:
-            cached: Optional[Dict[str, Any]] = self._remote_eval_cache.get(cache_key)
-            if cached is not None:
-                self._remote_eval_cache.move_to_end(cache_key)
-                return cached
-            inflight = self._remote_eval_inflight.get(cache_key)
-            if inflight is None:
-                inflight = asyncio.get_event_loop().create_future()
-                self._remote_eval_inflight[cache_key] = inflight
-                is_leader = True
+        # Cache lookup — no await between get and the on-hit handling.
+        cached: Optional[Dict[str, Any]] = self._remote_eval_cache.get(cache_key)
+        if cached is not None:
+            self._remote_eval_cache.move_to_end(cache_key)
+            return cached
 
-        if not is_leader:
-            # Another coroutine is already POSTing — wait for its result.
-            return await inflight
+        # Inflight check — if another coroutine is already POSTing for this
+        # cache key, await its future instead of issuing a duplicate POST.
+        existing = self._remote_eval_inflight.get(cache_key)
+        if existing is not None:
+            return await existing
 
-        # Leader path: perform the POST outside the cache lock.
+        # Leader path: create the future bound to the CURRENT running loop
+        # (using asyncio.Future() rather than capturing a loop reference),
+        # register inflight, then perform the POST.
+        inflight: "asyncio.Future[Optional[Dict[str, Any]]]" = asyncio.Future()
+        self._remote_eval_inflight[cache_key] = inflight
+
         try:
             response = await self._fetch_and_decode_post_async(api_host, client_key, payload)
         except Exception as e:
-            async with self._remote_eval_cache_lock:
-                self._remote_eval_inflight.pop(cache_key, None)
+            self._remote_eval_inflight.pop(cache_key, None)
             if not inflight.done():
                 inflight.set_exception(e)
             raise
 
-        async with self._remote_eval_cache_lock:
-            self._remote_eval_inflight.pop(cache_key, None)
-            if response is not None:
-                self._remote_eval_cache[cache_key] = response
-                self._remote_eval_cache.move_to_end(cache_key)
-                while len(self._remote_eval_cache) > self._remote_eval_cache_max:
-                    self._remote_eval_cache.popitem(last=False)
+        self._remote_eval_inflight.pop(cache_key, None)
+        if response is not None:
+            self._remote_eval_cache[cache_key] = response
+            self._remote_eval_cache.move_to_end(cache_key)
+            while len(self._remote_eval_cache) > self._remote_eval_cache_max:
+                self._remote_eval_cache.popitem(last=False)
         if not inflight.done():
             inflight.set_result(response)
         return response
@@ -188,8 +197,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
     async def flush_remote_eval_cache(self) -> None:
         """Drop all cached remote-eval responses. Called when the proxy
         emits a features-updated SSE event."""
-        async with self._remote_eval_cache_lock:
-            self._remote_eval_cache.clear()
+        self._remote_eval_cache.clear()
 
     @asynccontextmanager
     async def refresh_operation(self):
