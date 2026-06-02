@@ -140,13 +140,14 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
 
         # Remote-eval per-user response cache (LRU-bounded, distinct from
         # the GET-path self.cache to keep eviction strategies clean).
-        # NOTE: no asyncio.Lock here on purpose — the critical sections in
-        # fetch_remote_eval are pure dict ops with no `await`, so they're
-        # already atomic from asyncio's perspective. Binding an asyncio.Lock
-        # at __init__ time would tie it to whichever event loop happened to
-        # be running at construction (a footgun with the SingletonMeta +
-        # pytest-asyncio's per-test loops — leads to cross-loop awaits that
-        # hang forever).
+        # No lock guards this dict: the critical sections in fetch_remote_eval
+        # are pure dict ops with no `await` between them, and asyncio
+        # coroutines only yield at await points — so the operations are
+        # already atomic from asyncio's perspective. The other asyncio
+        # primitives in this class (_refresh_in_progress, _stop_event) DO
+        # need locking because they guard state across awaits; Python 3.10+
+        # binds them lazily to whichever loop is running at first acquire,
+        # so creating them in __init__ is safe even outside a running loop.
         self._remote_eval_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
         self._remote_eval_cache_max = remote_eval_cache_size
         # Inflight coalescing: when concurrent calls land for the same cache
@@ -181,9 +182,10 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         if existing is not None:
             return await existing
 
-        # Leader path: create the future bound to the CURRENT running loop
-        # (using asyncio.Future() rather than capturing a loop reference),
-        # register inflight, then perform the POST.
+        # Leader path: create the future inside the running coroutine so it
+        # binds to the current loop (asyncio.Future() picks up the running
+        # loop, unlike capturing a loop reference at __init__ time which
+        # would freeze the binding).
         inflight: "asyncio.Future[Optional[Dict[str, Any]]]" = asyncio.Future()
         self._remote_eval_inflight[cache_key] = inflight
 
