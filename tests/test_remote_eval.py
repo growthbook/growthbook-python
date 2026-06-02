@@ -289,6 +289,89 @@ class TestRemoteEvalSyncRobustness:
             assert gb2.get_feature_value("flag1", "fallback") == "for-u2"
 
 
+class TestRemoteEvalSyncSSE:
+    """SSE wiring for the sync class. The proxy emits parameter-less
+    `features-updated` events in remote-eval mode as a cache-invalidation
+    signal — they must reach _dispatch_sse_event and trigger load_features()."""
+
+    def setup_method(self):
+        _reset_repo()
+
+    def test_dispatch_handles_event_with_no_data_field(self):
+        """_dispatch_sse_event must not raise KeyError when 'data' is absent."""
+        body = {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
+        with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)) as mock_post:
+            gb = GrowthBook(
+                api_host="https://proxy.example.com",
+                client_key="sdk-test",
+                attributes={"id": "u1"},
+                remoteEval=True,
+            )
+            initial = mock_post.call_count
+            # Simulate the proxy's parameter-less SSE event arriving directly
+            # at the dispatcher (no 'data' key in event_data).
+            gb._dispatch_sse_event({"type": "features-updated"})
+            # The dispatcher must (a) not crash and (b) trigger a refetch.
+            # Same payload → cache hit, so no extra POST is required for (b).
+            # What we're really asserting is that no exception escaped.
+            gb.set_attributes({"id": "u2"})  # force a payload change → POST
+            assert mock_post.call_count == initial + 1
+            gb.destroy()
+
+    def test_sse_parser_dispatches_parameter_less_events(self):
+        """SSEClient's parser must dispatch type-only events. Previously it
+        gated on both 'type' and 'data' being present, silently dropping the
+        proxy's parameter-less features-updated event."""
+        from growthbook.growthbook import SSEClient
+
+        # A captured event stream the proxy might emit in remote-eval mode:
+        # one event with data (initial features push), one without (the
+        # subsequent cache-invalidation signal).
+        events_seen = []
+
+        class _FakeResponse:
+            class _Content:
+                def __init__(self, lines):
+                    self._lines = lines
+
+                def __aiter__(self):
+                    self._iter = iter(self._lines)
+                    return self
+
+                async def __anext__(self):
+                    try:
+                        return next(self._iter)
+                    except StopIteration:
+                        raise StopAsyncIteration
+
+            def __init__(self, lines):
+                self.content = self._Content(lines)
+
+        sse = SSEClient(api_host="http://h", client_key="k", on_event=events_seen.append)
+        sse.is_running = True
+
+        # Two events: one with data, one without. Each terminated by a blank line.
+        raw = [
+            b"event: features\n",
+            b"data: {\"features\": {}}\n",
+            b"\n",
+            b"event: features-updated\n",
+            b"\n",
+        ]
+        response = _FakeResponse(raw)
+
+        # Pump the parser
+        asyncio.get_event_loop().run_until_complete(sse._process_response(response)) \
+            if not asyncio.get_event_loop().is_closed() else \
+            asyncio.run(sse._process_response(response))
+
+        types_dispatched = [e.get("type") for e in events_seen]
+        assert "features" in types_dispatched, f"first event lost: {types_dispatched}"
+        assert "features-updated" in types_dispatched, (
+            f"parameter-less features-updated was silently dropped: {types_dispatched}"
+        )
+
+
 # ---------------------------------------------------------------------------
 # Async GrowthBookClient tests
 # ---------------------------------------------------------------------------

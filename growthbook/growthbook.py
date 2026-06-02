@@ -243,15 +243,22 @@ class SSEClient:
                 elif decoded_line.startswith("data:"):
                     event_data['data'] = event_data.get('data', '') + f"\n{decoded_line[len('data:'):].strip()}"
                 elif not decoded_line:
-                    if 'type' in event_data and 'data' in event_data:
+                    # End-of-event marker. Per the W3C EventSource spec, an
+                    # event with only a `type` (no `data:` line) is still a
+                    # valid event — the proxy emits parameter-less
+                    # `features-updated` events this way in remote-eval mode as
+                    # a cache-invalidation signal. Gating dispatch on
+                    # `'data' in event_data` would silently drop them.
+                    if 'type' in event_data:
                         try:
                             self.on_event(event_data)
                         except Exception as e:
                             logger.warning(f"Error in event handler: {e}")
                     event_data = {}
-            
-            # Process any remaining event data
-            if 'type' in event_data and 'data' in event_data:
+
+            # Process any remaining event data (stream closed without a
+            # trailing blank line).
+            if 'type' in event_data:
                 try:
                     self.on_event(event_data)
                 except Exception as e:
@@ -1026,8 +1033,7 @@ class GrowthBook(object):
             feature_repo.save_in_cache(key, data, self._cache_ttl)
 
     def _dispatch_sse_event(self, event_data):
-        event_type = event_data['type']
-        data = event_data['data']
+        event_type = event_data.get('type')
         if event_type == 'features-updated':
             # In remote-eval mode the proxy emits this event with no inline
             # payload (the payload would be per-user). load_features() handles
@@ -1040,7 +1046,7 @@ class GrowthBook(object):
                 # refetch via the remote-eval path.
                 self.load_features()
             else:
-                self._features_event_handler(data)
+                self._features_event_handler(event_data.get('data', '{}'))
 
 
     def startAutoRefresh(self):
