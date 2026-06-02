@@ -24,6 +24,12 @@ def _make_post_response(body):
     return resp
 
 
+# Default response body used by most async tests — a single boolean flag
+# defaulting to True. Tests that care about specific feature shapes (rule.tracks,
+# cross-pollution, etc.) inline their own payload.
+DEFAULT_BODY = {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
+
+
 def _reset_repo():
     """Clear shared singleton repo state between tests."""
     feature_repo.clear_cache()
@@ -95,7 +101,7 @@ class TestRemoteEvalSyncWireFormat:
         _reset_repo()
 
     def test_post_url_and_body_shape(self):
-        body = {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
+        body = DEFAULT_BODY
         with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)) as mock_post:
             GrowthBook(
                 api_host="https://proxy.example.com",
@@ -119,7 +125,7 @@ class TestRemoteEvalSyncWireFormat:
         assert call.args[2]["Content-Type"] == "application/json"
 
     def test_eval_uses_response_features(self):
-        body = {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
+        body = DEFAULT_BODY
         with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)):
             gb = GrowthBook(
                 api_host="https://proxy.example.com",
@@ -147,7 +153,7 @@ class TestRemoteEvalSyncRefetch:
         _reset_repo()
 
     def test_set_attributes_triggers_refetch(self):
-        body = {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
+        body = DEFAULT_BODY
         with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)) as mock_post:
             gb = GrowthBook(
                 api_host="https://proxy.example.com",
@@ -299,7 +305,7 @@ class TestRemoteEvalSyncSSE:
 
     def test_dispatch_handles_event_with_no_data_field(self):
         """_dispatch_sse_event must not raise KeyError when 'data' is absent."""
-        body = {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
+        body = DEFAULT_BODY
         with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)) as mock_post:
             gb = GrowthBook(
                 api_host="https://proxy.example.com",
@@ -360,10 +366,7 @@ class TestRemoteEvalSyncSSE:
         ]
         response = _FakeResponse(raw)
 
-        # Pump the parser
-        asyncio.get_event_loop().run_until_complete(sse._process_response(response)) \
-            if not asyncio.get_event_loop().is_closed() else \
-            asyncio.run(sse._process_response(response))
+        asyncio.run(sse._process_response(response))
 
         types_dispatched = [e.get("type") for e in events_seen]
         assert "features" in types_dispatched, f"first event lost: {types_dispatched}"
@@ -481,7 +484,7 @@ async def test_async_cache_hit_same_user_context():
 
     async def post_handler(api_host, client_key, payload):
         calls.append(payload)
-        return {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
+        return DEFAULT_BODY
 
     client = await _make_async_client(post_handler)
     uc = UserContext(attributes={"id": "u1"})
@@ -499,7 +502,7 @@ async def test_async_cache_miss_different_user_context():
 
     async def post_handler(api_host, client_key, payload):
         calls.append(payload)
-        return {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
+        return DEFAULT_BODY
 
     client = await _make_async_client(post_handler)
     await client.is_on("flag1", UserContext(attributes={"id": "u1"}))
@@ -518,7 +521,7 @@ async def test_async_inflight_coalescing():
         calls.append(payload)
         started.set()
         await finish.wait()
-        return {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
+        return DEFAULT_BODY
 
     client = await _make_async_client(slow_post)
     uc = UserContext(attributes={"id": "u1"})
@@ -542,7 +545,7 @@ async def test_async_lru_eviction():
 
     async def post_handler(api_host, client_key, payload):
         calls.append(payload["attributes"]["id"])
-        return {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
+        return DEFAULT_BODY
 
     client = await _make_async_client(post_handler, remote_eval_cache_size=2)
 
@@ -559,7 +562,7 @@ async def test_async_preload_warms_cache():
 
     async def post_handler(api_host, client_key, payload):
         calls.append(payload)
-        return {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
+        return DEFAULT_BODY
 
     client = await _make_async_client(post_handler)
     uc = UserContext(attributes={"id": "u1"})
@@ -577,7 +580,7 @@ async def test_async_sse_features_updated_flushes_cache():
 
     async def post_handler(api_host, client_key, payload):
         calls.append(payload)
-        return {"features": {"flag1": {"defaultValue": True}}, "savedGroups": {}}
+        return DEFAULT_BODY
 
     client = await _make_async_client(post_handler)
     uc = UserContext(attributes={"id": "u1"})
@@ -629,8 +632,7 @@ async def test_async_sse_event_before_any_eval_does_not_call_cdn_path():
 @pytest.mark.asyncio
 async def test_async_preload_noop_in_cdn_mode():
     """preload_remote_eval is a safe no-op when remote_eval is False."""
-    EnhancedFeatureRepository._instances = {}
-    SingletonMeta._instances.clear()
+    # Autouse _reset_async_singletons handles singleton cleanup.
     client = GrowthBookClient(Options(
         api_host="https://proxy.example.com",
         client_key="sdk-cdn",
@@ -814,8 +816,7 @@ async def test_async_non_remote_eval_still_works():
     async def cdn_fetch(api_host, client_key, decryption_key=""):
         return cdn_response
 
-    EnhancedFeatureRepository._instances = {}
-    SingletonMeta._instances.clear()
+    # Autouse _reset_async_singletons handles singleton cleanup.
     client = GrowthBookClient(Options(
         api_host="https://cdn.growthbook.io",
         client_key="k",

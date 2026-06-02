@@ -480,15 +480,6 @@ def getBucketRanges(
 
     return ranges
 
-_EXPERIMENT_KW = {
-    "key", "variations", "weights", "active", "status", "coverage", "condition",
-    "namespace", "url", "include", "groups", "force", "hashAttribute",
-    "fallbackAttribute", "hashVersion", "ranges", "meta", "filters", "seed",
-    "name", "phase", "disableStickyBucketing", "bucketVersion",
-    "minBucketVersion", "parentConditions",
-}
-
-
 def _fire_rule_tracks(
     rule_tracks: List[Dict[str, Any]],
     eval_context: EvaluationContext,
@@ -504,19 +495,20 @@ def _fire_rule_tracks(
     for entry in rule_tracks:
         exp_data = entry.get("experiment") or {}
         res_data = entry.get("result") or {}
-        # Required fields for Experiment construction
+        # Experiment requires at minimum a key and variations list.
         if "key" not in exp_data or "variations" not in exp_data:
             logger.debug("Skipping rule.tracks entry: missing experiment key/variations")
             continue
-        exp_kwargs = {k: v for k, v in exp_data.items() if k in _EXPERIMENT_KW}
         # The proxy emits Result in the JS shape: key/name/passthrough flat at
         # the top level. Python's Result takes those via a nested `meta` dict.
-        meta: Optional[VariationMeta] = res_data.get("meta")
+        # Re-pack if no explicit `meta` was provided.
+        meta = res_data.get("meta")
         if meta is None:
             flat = {k: res_data[k] for k in ("key", "name", "passthrough") if k in res_data}
-            meta = flat or None  # type: ignore[assignment]
+            meta = flat or None
         try:
-            experiment = Experiment(**exp_kwargs)
+            # Experiment accepts **_ignored, so passing the raw proxy dict is safe.
+            experiment = Experiment(**exp_data)
             result = Result(
                 variationId=res_data.get("variationId", 0),
                 inExperiment=res_data.get("inExperiment", False),
@@ -525,7 +517,7 @@ def _fire_rule_tracks(
                 hashAttribute=res_data.get("hashAttribute", "id"),
                 hashValue=res_data.get("hashValue", ""),
                 featureId=res_data.get("featureId"),
-                meta=meta,
+                meta=meta,  # type: ignore[arg-type]
                 bucket=res_data.get("bucket"),
                 stickyBucketUsed=res_data.get("stickyBucketUsed", False),
             )

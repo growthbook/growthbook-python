@@ -14,16 +14,21 @@ import warnings
 from abc import ABC, abstractmethod
 from typing import Optional, Any, Set, Tuple, List, Dict, Callable
 
-from .common_types import ( EvaluationContext, 
-    Experiment, 
-    FeatureResult, 
+from .common_types import (
+    EvaluationContext,
+    Experiment,
+    FeatureResult,
     Feature,
-    GlobalContext, 
-    Options, 
-    Result, StackContext, 
-    UserContext, 
+    GlobalContext,
+    Options,
+    Result,
+    StackContext,
+    UserContext,
     AbstractStickyBucketService,
-    FeatureRule
+    FeatureRule,
+    build_remote_eval_payload,
+    features_from_dict,
+    validate_remote_eval_options,
 )
 
 # Only require typing_extensions if using Python 3.7 or earlier
@@ -41,7 +46,6 @@ from aiohttp.client_exceptions import ClientConnectorError, ClientResponseError,
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from urllib3 import PoolManager, Timeout
-from urllib.parse import urlparse
 
 from .core import _getHashValue, eval_feature as core_eval_feature, run_experiment
 
@@ -849,22 +853,11 @@ class GrowthBook(object):
         self._cacheKeyAttributes = cacheKeyAttributes
 
         if remoteEval:
-            if not client_key:
-                raise ValueError("Must specify client_key for remote eval")
-            if decryption_key:
-                raise ValueError("Encryption is not available for remote eval")
-            if sticky_bucket_service is not None:
-                raise ValueError(
-                    "sticky_bucket_service is not compatible with remote_eval; "
-                    "the proxy handles sticky bucketing server-side"
-                )
+            validate_remote_eval_options(
+                client_key, decryption_key, sticky_bucket_service, api_host
+            )
             if stale_while_revalidate:
                 raise ValueError("stale_while_revalidate is not compatible with remote_eval")
-            host = urlparse(api_host or "").hostname or ""
-            if host == "growthbook.io" or host.endswith(".growthbook.io"):
-                raise ValueError(
-                    "Cloud host does not support remote eval; use a self-hosted proxy/edge"
-                )
 
         self._enabled = enabled
         self._attributes = attributes
@@ -964,13 +957,11 @@ class GrowthBook(object):
             feature_repo.http_connect_timeout = http_connect_timeout
             feature_repo.http_read_timeout = http_read_timeout
 
-    def _build_remote_eval_payload(self) -> Dict[str, Any]:
-        return {
-            "attributes": self._attributes,
-            "forcedFeatures": [],  # not exposed on sync class today; future extension
-            "forcedVariations": self._forcedVariations or {},
-            "url": self._url or "",
-        }
+    def _remote_eval_payload(self) -> Dict[str, Any]:
+        # forcedFeatures is not exposed on the sync class today; always [].
+        return build_remote_eval_payload(
+            self._attributes, self._forcedVariations, self._url
+        )
 
     def _on_feature_update(self, features_data: Dict) -> None:
         """Callback to handle automatic feature updates from FeatureRepository"""
@@ -980,7 +971,7 @@ class GrowthBook(object):
             self._saved_groups = features_data["savedGroups"]
 
     def load_features(self) -> None:
-        payload = self._build_remote_eval_payload() if self._remoteEval else None
+        payload = self._remote_eval_payload() if self._remoteEval else None
         response = feature_repo.load_features(
             self._api_host,
             self._client_key,
@@ -1000,7 +991,7 @@ class GrowthBook(object):
         if not self._client_key:
             raise ValueError("Must specify `client_key` to refresh features")
 
-        payload = self._build_remote_eval_payload() if self._remoteEval else None
+        payload = self._remote_eval_payload() if self._remoteEval else None
         features = await feature_repo.load_features_async(
             self._api_host,
             self._client_key,

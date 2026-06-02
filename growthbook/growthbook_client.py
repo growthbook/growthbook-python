@@ -24,7 +24,10 @@ from .common_types import (
     StackContext,
     FeatureResult,
     FeatureRefreshStrategy,
-    Experiment
+    Experiment,
+    build_remote_eval_payload,
+    features_from_dict,
+    validate_remote_eval_options,
 )
 
 logger = logging.getLogger("growthbook.growthbook_client")
@@ -202,9 +205,10 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             inflight.set_result(response)
         return response
 
-    async def flush_remote_eval_cache(self) -> None:
+    def flush_remote_eval_cache(self) -> None:
         """Drop all cached remote-eval responses. Called when the proxy
-        emits a features-updated SSE event."""
+        emits a features-updated SSE event. Sync — clearing a dict needs
+        no await."""
         self._remote_eval_cache.clear()
 
     @asynccontextmanager
@@ -282,7 +286,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                 # subsequent evals re-POST lazily. We do NOT proactively re-POST
                 # for every cached user (could be millions in a busy service).
                 if self._remote_eval:
-                    await self.flush_remote_eval_cache()
+                    self.flush_remote_eval_cache()
                     return
                 response = await self.load_features_async(
                     self._api_host, self._client_key, self._decryption_key, self._cache_ttl
@@ -294,7 +298,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                 # wouldn't be user-filtered), but if one arrives defensively
                 # flush the per-user cache instead of caching a bogus payload.
                 if self._remote_eval:
-                    await self.flush_remote_eval_cache()
+                    self.flush_remote_eval_cache()
                     return
 
                 data = event_data.get("data", "{}")
@@ -475,30 +479,19 @@ class GrowthBookClient:
         )
 
         if self.options.remote_eval:
-            if not self.options.client_key:
-                raise ValueError("Must specify client_key for remote eval")
-            if self.options.decryption_key:
-                raise ValueError("Encryption is not available for remote eval")
-            if self.options.sticky_bucket_service is not None:
-                raise ValueError(
-                    "sticky_bucket_service is not compatible with remote_eval; "
-                    "the proxy handles sticky bucketing server-side"
-                )
+            validate_remote_eval_options(
+                self.options.client_key,
+                self.options.decryption_key,
+                self.options.sticky_bucket_service,
+                self.options.api_host,
+            )
             if self.options.refresh_strategy == FeatureRefreshStrategy.STALE_WHILE_REVALIDATE:
                 # HTTP polling has no per-user payload to send, so it would
                 # silently no-op. Sync GrowthBook raises on the equivalent
                 # stale_while_revalidate=True; keep the two clients consistent.
-                # Pass refresh_strategy=FeatureRefreshStrategy.SERVER_SENT_EVENTS
-                # or refresh_strategy=None instead.
                 raise ValueError(
                     "refresh_strategy=STALE_WHILE_REVALIDATE is not compatible with remote_eval; "
                     "use SERVER_SENT_EVENTS or pass refresh_strategy=None"
-                )
-            from urllib.parse import urlparse as _urlparse
-            host = _urlparse(self.options.api_host or "").hostname or ""
-            if host == "growthbook.io" or host.endswith(".growthbook.io"):
-                raise ValueError(
-                    "Cloud host does not support remote eval; use a self-hosted proxy/edge"
                 )
         
         # Thread-safe tracking state
@@ -704,25 +697,11 @@ class GrowthBookClient:
             traceback.print_exc()
             return False
 
-    def _build_remote_eval_payload(self, user_context: UserContext) -> Dict[str, Any]:
-        return {
-            "attributes": user_context.attributes or {},
-            "forcedFeatures": [],  # not exposed on UserContext today; future extension
-            "forcedVariations": user_context.forced_variations or {},
-            "url": user_context.url or "",
-        }
-
-    def _materialize_features(self, response: Dict[str, Any]) -> Dict[str, Feature]:
-        features: Dict[str, Feature] = {}
-        for key, feature in (response.get("features") or {}).items():
-            if isinstance(feature, Feature):
-                features[key] = feature
-            else:
-                features[key] = Feature(
-                    rules=feature.get("rules", []),
-                    defaultValue=feature.get("defaultValue", None),
-                )
-        return features
+    def _remote_eval_payload(self, user_context: UserContext) -> Dict[str, Any]:
+        # forcedFeatures isn't exposed on UserContext today; always [].
+        return build_remote_eval_payload(
+            user_context.attributes, user_context.forced_variations, user_context.url
+        )
 
     async def preload_remote_eval(self, user_context: UserContext) -> None:
         """Warm the remote-eval cache for this user context. No-op when
@@ -731,11 +710,10 @@ class GrowthBookClient:
         network requests."""
         if not self.options.remote_eval or not self._features_repository:
             return
-        payload = self._build_remote_eval_payload(user_context)
         await self._features_repository.fetch_remote_eval(
             self.options.api_host or "https://cdn.growthbook.io",
             self.options.client_key or "",
-            payload,
+            self._remote_eval_payload(user_context),
             self.options.cache_key_attributes,
         )
 
@@ -746,28 +724,16 @@ class GrowthBookClient:
             return
 
         async with self._context_lock:
-            features = {}
-
-            for key, feature in features_data.get("features", {}).items():
-                if isinstance(feature, Feature):
-                    features[key] = feature
-                else:
-                    features[key] = Feature(
-                        rules=feature.get("rules", []),
-                        defaultValue=feature.get("defaultValue", None),
-                    )
+            features = features_from_dict(features_data.get("features"))
+            saved_groups = features_data.get("savedGroups", {})
 
             if self._global_context is None:
-                # Initial creation of global context
                 self._global_context = GlobalContext(
-                        options=self.options,
-                        features=features,
-                        saved_groups=features_data.get("savedGroups", {})
+                    options=self.options, features=features, saved_groups=saved_groups
                 )
             else:
-                # Update existing global context
                 self._global_context.features = features
-                self._global_context.saved_groups = features_data.get("savedGroups", {})
+                self._global_context.saved_groups = saved_groups
 
     async def __aenter__(self):
         await self.initialize()
@@ -784,19 +750,16 @@ class GrowthBookClient:
         if self.options.remote_eval and self._features_repository:
             # Per-user POST + cache: features come from the proxy filtered for
             # this UserContext, not from self._global_context.features.
-            payload = self._build_remote_eval_payload(user_context)
             response = await self._features_repository.fetch_remote_eval(
                 self.options.api_host or "https://cdn.growthbook.io",
                 self.options.client_key or "",
-                payload,
+                self._remote_eval_payload(user_context),
                 self.options.cache_key_attributes,
             ) or {}
-            features = self._materialize_features(response)
-            saved_groups = response.get("savedGroups") or {}
             global_ctx = GlobalContext(
                 options=self.options,
-                features=features,
-                saved_groups=saved_groups,
+                features=features_from_dict(response.get("features")),
+                saved_groups=response.get("savedGroups") or {},
             )
             return EvaluationContext(
                 user=user_context,
