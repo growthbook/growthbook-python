@@ -106,6 +106,37 @@ def test_conditions(evalCondition_data):
     assert evalCondition(attributes, condition, savedGroups) == expected
 
 
+def test_ne_on_missing_or_none_attribute():
+    """Regression: negated operators routing through compare() used to return
+    False (the safe default for $eq/$lt) on TypeError, silently giving the
+    wrong answer for $ne. Matches JS/Go/Rust/Mongo: missing != value → True.
+
+    The shared spec only covers $ne with numeric condition values (where
+    compare()'s None→0 coercion masks the bug); these cover the gap."""
+    # Missing attribute
+    assert evalCondition({}, {"country": {"$ne": "de"}}, {}) is True
+    # Explicit None attribute (same root cause — compare(None, "de") raises)
+    assert evalCondition({"country": None}, {"country": {"$ne": "de"}}, {}) is True
+    # Symmetry with $not + $eq, which was already correct
+    assert evalCondition({}, {"country": {"$not": {"$eq": "de"}}}, {}) is True
+    # Existing behavior preserved: $ne with a matching value still returns False
+    assert evalCondition({"country": "de"}, {"country": {"$ne": "de"}}, {}) is False
+    # Existing behavior preserved: numeric coercion via compare()
+    assert evalCondition({"x": "1"}, {"x": {"$ne": 1}}, {}) is False
+
+
+def test_not_regex_on_missing_attribute():
+    """Same inverted-default bug as $ne. re.search(None) raises; the
+    semantically correct answer for $notRegex on a missing attribute is True
+    (the absent value doesn't match the regex)."""
+    assert evalCondition({}, {"name": {"$notRegex": "abc"}}, {}) is True
+    assert evalCondition({}, {"name": {"$notRegexi": "ABC"}}, {}) is True
+    assert evalCondition({"name": None}, {"name": {"$notRegex": "abc"}}, {}) is True
+    # Existing behavior preserved
+    assert evalCondition({"name": "abc123"}, {"name": {"$notRegex": "abc"}}, {}) is False
+    assert evalCondition({"name": "xyz"}, {"name": {"$notRegex": "abc"}}, {}) is True
+
+
 def test_version_comparison_normalizes_unhashable_values():
     assert paddedVersionString(["1.2.3"]) == paddedVersionString("0")
     assert paddedVersionString({"version": "1.2.3"}) == paddedVersionString("0")

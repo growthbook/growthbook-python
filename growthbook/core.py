@@ -134,7 +134,12 @@ def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups)
         try:
             return compare(attributeValue, conditionValue) != 0
         except Exception:
-            return False
+            # Incomparable values (e.g. missing attribute → None vs a string —
+            # compare() raises TypeError on the None > str comparison) are by
+            # definition NOT equal. Matches Mongo/JS/Go/Rust SDKs: $ne on a
+            # missing attribute returns True. The False default that's correct
+            # for $eq is inverted for $ne.
+            return True
     elif operator == "$lt":
         try:
             return compare(attributeValue, conditionValue) < 0
@@ -196,13 +201,16 @@ def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups)
             r = re.compile(conditionValue)
             return not bool(r.search(attributeValue))
         except Exception:
-            return False
+            # Same inverted-default trap as $ne: a missing attribute means
+            # re.search(None) raises, but the semantic answer for $notRegex
+            # is "the missing value doesn't match the regex" → True.
+            return True
     elif operator == "$notRegexi":
         try:
             r = re.compile(conditionValue, re.IGNORECASE)
             return not bool(r.search(attributeValue))
         except Exception:
-            return False
+            return True
     elif operator == "$in":
         if not isinstance(conditionValue, list):
             return False
