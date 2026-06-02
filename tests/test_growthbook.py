@@ -2152,3 +2152,167 @@ def test_disconnect_skips_stop_session_when_loop_not_running():
         client.disconnect()
 
     mock_rcts.assert_not_called()
+
+def test_bucket_range_serializes_as_two_element_array():
+    rule = FeatureRule(key="exp", variations=[0, 1], range=(0.0, 0.5))
+    d = rule.to_dict()
+    serialized = json.dumps(d["range"])
+    assert json.loads(serialized) == [0.0, 0.5]
+    assert len(d["range"]) == 2
+
+
+def test_bucket_ranges_list_serializes_as_array_of_two_element_arrays():
+    rule = FeatureRule(
+        key="exp",
+        variations=[0, 1],
+        ranges=[(0.0, 0.5), (0.5, 1.0)],
+    )
+    d = rule.to_dict()
+    serialized = json.dumps(d["ranges"])
+    parsed = json.loads(serialized)
+    assert parsed == [[0.0, 0.5], [0.5, 1.0]]
+    for bucket_range in parsed:
+        assert len(bucket_range) == 2, "each BucketRange must have exactly 2 elements"
+
+
+def test_namespace_serializes_as_three_element_array():
+    rule = FeatureRule(key="exp", variations=[0, 1], namespace=("my-ns", 0.0, 1.0))
+    d = rule.to_dict()
+    serialized = json.dumps(d["namespace"])
+    parsed = json.loads(serialized)
+    assert parsed == ["my-ns", 0.0, 1.0]
+    assert len(parsed) == 3
+
+
+def test_bucket_range_distinct_from_namespace_in_serialization():
+    rule = FeatureRule(
+        key="exp",
+        variations=[0, 1],
+        ranges=[(0.0, 0.5), (0.5, 1.0)],
+        namespace=("pricing", 0.0, 1.0),
+    )
+    d = rule.to_dict()
+    assert len(d["ranges"][0]) == 2, "BucketRange must be 2-element, not 3 like Namespace"
+    assert len(d["namespace"]) == 3, "Namespace must be 3-element"
+
+
+def test_experiment_bucket_ranges_serialization():
+    exp = Experiment(
+        key="my-exp",
+        variations=[0, 1],
+        weights=[0.5, 0.5],
+        ranges=[(0.0, 0.5), (0.5, 1.0)],
+        namespace=("pricing", 0.0, 1.0),
+    )
+    d = exp.to_dict()
+    serialized = json.dumps(d)
+    parsed = json.loads(serialized)
+    assert parsed["ranges"] == [[0.0, 0.5], [0.5, 1.0]]
+    assert parsed["namespace"] == ["pricing", 0.0, 1.0]
+
+
+def test_feature_with_bucket_ranges_round_trip():
+    feature = Feature(
+        defaultValue=None,
+        rules=[
+            FeatureRule(
+                key="my-exp",
+                variations=["control", "treatment"],
+                weights=[0.5, 0.5],
+                ranges=[(0.0, 0.5), (0.5, 1.0)],
+                namespace=("pricing", 0.0, 0.5),
+            )
+        ],
+    )
+    json_str = json.dumps(feature.to_dict())
+    parsed = json.loads(json_str)
+    rule = parsed["rules"][0]
+
+    assert rule["ranges"] == [[0.0, 0.5], [0.5, 1.0]]
+    assert rule["namespace"] == ["pricing", 0.0, 0.5]
+
+    feature2 = Feature(**parsed)
+    json_str2 = json.dumps(feature2.to_dict())
+    assert json.loads(json_str2) == parsed
+
+
+def test_get_bucket_ranges_serializes_correctly():
+    ranges = getBucketRanges(2, 1.0, [0.5, 0.5])
+    serialized = json.dumps(ranges)
+    parsed = json.loads(serialized)
+    assert parsed == [[0.0, 0.5], [0.5, 1.0]]
+    for r in parsed:
+        assert len(r) == 2
+
+
+def test_ranges_three_buckets_round_trip():
+    rule = FeatureRule(
+        key="exp",
+        variations=[0, 1, 2],
+        ranges=[(0.0, 0.33), (0.33, 0.66), (0.66, 1.0)],
+    )
+    restored = Feature(defaultValue=None, rules=[rule.to_dict()])
+    d = json.loads(json.dumps(restored.to_dict()))
+    assert d["rules"][0]["ranges"] == [[0.0, 0.33], [0.33, 0.66], [0.66, 1.0]]
+    for r in d["rules"][0]["ranges"]:
+        assert len(r) == 2
+
+
+def test_ranges_deserialized_from_raw_json():
+    from typing import Any, Dict, List
+    raw_rules: List[Dict[str, Any]] = [{"key": "exp-raw", "ranges": [[0.0, 0.5], [0.5, 1.0]]}]
+    feature = Feature(defaultValue=None, rules=raw_rules)
+    d = json.loads(json.dumps(feature.to_dict()))
+    assert d["rules"][0]["ranges"] == [[0.0, 0.5], [0.5, 1.0]]
+    for r in d["rules"][0]["ranges"]:
+        assert len(r) == 2, "BucketRange from raw JSON must remain a 2-element array"
+
+
+def test_experiment_to_dict_all_scalar_fields():
+    exp = Experiment(
+        key="full-exp",
+        variations=[0, 1],
+        active=False,
+        coverage=0.5,
+        force=1,
+        hashVersion=2,
+        bucketVersion=3,
+        minBucketVersion=1,
+        seed="abc",
+        name="Full experiment",
+        phase="1",
+        hashAttribute="id",
+        fallbackAttribute="device",
+        weights=[0.5, 0.5],
+        ranges=[(0.0, 0.5), (0.5, 1.0)],
+        namespace=("my-ns", 0.0, 1.0),
+    )
+    d = exp.to_dict()
+    assert d["key"] == "full-exp"
+    assert d["active"] is False
+    assert d["coverage"] == 0.5
+    assert d["force"] == 1
+    assert d["hashVersion"] == 2
+    assert d["bucketVersion"] == 3
+    assert d["minBucketVersion"] == 1
+    assert d["seed"] == "abc"
+    assert d["name"] == "Full experiment"
+    assert d["phase"] == "1"
+    assert d["hashAttribute"] == "id"
+    assert d["fallbackAttribute"] == "device"
+    assert d["weights"] == [0.5, 0.5]
+    serialized = json.loads(json.dumps(d))
+    assert serialized["ranges"] == [[0.0, 0.5], [0.5, 1.0]]
+    assert serialized["namespace"] == ["my-ns", 0.0, 1.0]
+
+
+def test_experiment_disable_sticky_bucketing_clears_fallback_attribute():
+    exp = Experiment(
+        key="exp",
+        variations=[0, 1],
+        disableStickyBucketing=True,
+        fallbackAttribute="device",
+    )
+    d = exp.to_dict()
+    assert d["disableStickyBucketing"] is True
+    assert "fallbackAttribute" not in d
