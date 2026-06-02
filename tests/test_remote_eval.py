@@ -427,7 +427,29 @@ class TestRemoteEvalAsyncValidation:
                 api_host="https://cdn.growthbook.io",
                 client_key="k",
                 remote_eval=True,
+                refresh_strategy=None,  # bypass the STALE_WHILE_REVALIDATE guard
             ))
+
+    def test_stale_while_revalidate_raises(self):
+        """Async parity with sync: STALE_WHILE_REVALIDATE is incompatible
+        with remote_eval (HTTP polling has no per-user payload to send)."""
+        from growthbook.common_types import FeatureRefreshStrategy
+        with pytest.raises(ValueError, match="STALE_WHILE_REVALIDATE is not compatible"):
+            GrowthBookClient(Options(
+                api_host="https://proxy.example.com",
+                client_key="k",
+                remote_eval=True,
+                # default refresh_strategy IS STALE_WHILE_REVALIDATE, so the
+                # plainest possible misconfig — no explicit refresh_strategy —
+                # must be rejected.
+            ))
+        # SERVER_SENT_EVENTS is allowed.
+        GrowthBookClient(Options(
+            api_host="https://proxy.example.com",
+            client_key="k",
+            remote_eval=True,
+            refresh_strategy=FeatureRefreshStrategy.SERVER_SENT_EVENTS,
+        ))
 
 
 async def _make_async_client(post_handler, **opts):
@@ -568,6 +590,40 @@ async def test_async_sse_features_updated_flushes_cache():
 
     await client.is_on("flag1", uc)
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_async_sse_event_before_any_eval_does_not_call_cdn_path():
+    """Regression: an SSE features-updated event arriving BEFORE any user
+    has been evaluated used to fall through to the CDN GET path (because
+    the repo inferred remote-eval mode from cache-non-empty, and the cache
+    is empty at that point). Must now route through the remote-eval flush
+    regardless of cache contents."""
+    posts = 0
+    cdn_gets = 0
+
+    async def post_handler(*args, **kwargs):
+        nonlocal posts
+        posts += 1
+        return {"features": {}, "savedGroups": {}}
+
+    async def cdn_fetch(*args, **kwargs):
+        nonlocal cdn_gets
+        cdn_gets += 1
+        return {"features": {}, "savedGroups": {}}
+
+    client = await _make_async_client(post_handler)
+    # Patch the CDN GET path so we can detect erroneous calls into it.
+    client._features_repository._fetch_features_async = cdn_fetch
+
+    # Sanity: no evals yet, so the remote-eval cache is empty.
+    assert not client._features_repository._remote_eval_cache
+
+    # The SSE event must NOT take the CDN branch.
+    await client._features_repository._handle_sse_event({"type": "features-updated"})
+
+    assert cdn_gets == 0, "SSE handler took the CDN path on a remote-eval client"
+    assert posts == 0, "SSE handler shouldn't POST either — flush only"
 
 
 @pytest.mark.asyncio

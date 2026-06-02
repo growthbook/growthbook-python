@@ -110,12 +110,20 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                  cache_ttl: int = 60,
                  http_connect_timeout: Optional[int] = None,
                  http_read_timeout: Optional[int] = None,
-                 remote_eval_cache_size: int = 1000):
+                 remote_eval_cache_size: int = 1000,
+                 remote_eval: bool = False):
         FeatureRepository.__init__(self)
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
         self._cache_ttl = cache_ttl
+        # Whether this repo serves a remote-eval client. Drives SSE handling:
+        # remote-eval invalidation is a cache flush, NOT a CDN re-fetch.
+        # Stored as an explicit flag rather than inferred from cache contents
+        # because `_remote_eval_cache` is empty until the first user is
+        # evaluated — inferring from emptiness would silently route SSE events
+        # down the CDN path on a fresh client.
+        self._remote_eval = remote_eval
         self._refresh_lock = threading.Lock()
         self._refresh_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
@@ -273,7 +281,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                 # payload; the right response is to flush our per-user cache so
                 # subsequent evals re-POST lazily. We do NOT proactively re-POST
                 # for every cached user (could be millions in a busy service).
-                if self._remote_eval_cache_max and self._remote_eval_cache:
+                if self._remote_eval:
                     await self.flush_remote_eval_cache()
                     return
                 response = await self.load_features_async(
@@ -285,7 +293,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                 # Remote-eval mode shouldn't receive inline payloads (they
                 # wouldn't be user-filtered), but if one arrives defensively
                 # flush the per-user cache instead of caching a bogus payload.
-                if self._remote_eval_cache_max and self._remote_eval_cache:
+                if self._remote_eval:
                     await self.flush_remote_eval_cache()
                     return
 
@@ -476,6 +484,16 @@ class GrowthBookClient:
                     "sticky_bucket_service is not compatible with remote_eval; "
                     "the proxy handles sticky bucketing server-side"
                 )
+            if self.options.refresh_strategy == FeatureRefreshStrategy.STALE_WHILE_REVALIDATE:
+                # HTTP polling has no per-user payload to send, so it would
+                # silently no-op. Sync GrowthBook raises on the equivalent
+                # stale_while_revalidate=True; keep the two clients consistent.
+                # Pass refresh_strategy=FeatureRefreshStrategy.SERVER_SENT_EVENTS
+                # or refresh_strategy=None instead.
+                raise ValueError(
+                    "refresh_strategy=STALE_WHILE_REVALIDATE is not compatible with remote_eval; "
+                    "use SERVER_SENT_EVENTS or pass refresh_strategy=None"
+                )
             from urllib.parse import urlparse as _urlparse
             host = _urlparse(self.options.api_host or "").hostname or ""
             if host == "growthbook.io" or host.endswith(".growthbook.io"):
@@ -511,6 +529,7 @@ class GrowthBookClient:
                 self.options.http_connect_timeout,
                 self.options.http_read_timeout,
                 self.options.remote_eval_cache_size,
+                self.options.remote_eval,
             )
             if self.options.client_key
             else None
@@ -648,14 +667,14 @@ class GrowthBookClient:
                         self._global_context = GlobalContext(
                             options=self.options, features={}, saved_groups={}
                         )
-                refresh_strategy = self.options.refresh_strategy or FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
-                if refresh_strategy == FeatureRefreshStrategy.SERVER_SENT_EVENTS:
-                    # SSE: features-updated event will flush the remote-eval cache
+                # Only SSE is meaningful in remote-eval mode (the validation
+                # guard already rejects STALE_WHILE_REVALIDATE). None means
+                # "no background refresh; rely on cache TTL".
+                if self.options.refresh_strategy == FeatureRefreshStrategy.SERVER_SENT_EVENTS:
                     await self._features_repository.start_feature_refresh(
-                        refresh_strategy, callback=self._feature_update_callback
+                        self.options.refresh_strategy,
+                        callback=self._feature_update_callback,
                     )
-                # HTTP polling refresh is intentionally not started in remote-eval
-                # mode — the polling loop has no per-user payload to send.
                 return True
 
             # Initial feature load

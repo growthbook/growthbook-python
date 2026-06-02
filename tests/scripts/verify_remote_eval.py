@@ -617,9 +617,13 @@ async def a_validation(proxy: ProxyHandle) -> None:
          Options(api_host=proxy.url, client_key=proxy.client_key,
                  sticky_bucket_service=InMemoryStickyBucketService(), remote_eval=True),
          "sticky_bucket_service is not compatible"),
+        ("STALE_WHILE_REVALIDATE + remote_eval (the default refresh strategy)",
+         Options(api_host=proxy.url, client_key=proxy.client_key,
+                 remote_eval=True),
+         "STALE_WHILE_REVALIDATE is not compatible"),
         ("cloud host + remote_eval",
          Options(api_host="https://cdn.growthbook.io", client_key=proxy.client_key,
-                 remote_eval=True),
+                 remote_eval=True, refresh_strategy=None),
          "Cloud host does not support remote eval"),
     ]
     for label, options, match in checks:
