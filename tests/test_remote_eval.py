@@ -600,6 +600,67 @@ async def test_async_cache_hit_same_user_context():
 
 
 @pytest.mark.asyncio
+async def test_singleton_keyed_by_api_host_and_client_key():
+    """Two GrowthBookClients with different (api_host, client_key) must get
+    different EnhancedFeatureRepository instances — otherwise the second
+    client silently inherits the first's `_remote_eval` flag, `_api_host`,
+    `_client_key`, etc., which broke SSE routing and the cache-flush path."""
+    EnhancedFeatureRepository._instances = {}
+    SingletonMeta._instances.clear()
+
+    cdn = GrowthBookClient(Options(
+        api_host="https://cdn-A.example.com",
+        client_key="key-A",
+        refresh_strategy=None,
+    ))
+    remote = GrowthBookClient(Options(
+        api_host="https://proxy-B.example.com",
+        client_key="key-B",
+        remote_eval=True,
+        refresh_strategy=None,
+    ))
+
+    assert cdn._features_repository is not remote._features_repository
+    assert cdn._features_repository._remote_eval is False
+    assert remote._features_repository._remote_eval is True
+    assert cdn._features_repository._api_host == "https://cdn-A.example.com"
+    assert remote._features_repository._api_host == "https://proxy-B.example.com"
+
+
+@pytest.mark.asyncio
+async def test_post_and_cache_releases_inflight_on_cancellation():
+    """`asyncio.CancelledError` derives from BaseException — `except Exception`
+    used to miss it, leaving the inflight map populated and any concurrent
+    waiters hung on the never-resolved Future. After the fix, cancelling a
+    leader call cleanly releases the inflight slot."""
+    release = asyncio.Event()
+
+    async def slow_post(api_host, client_key, payload):
+        await release.wait()  # never set
+        return DEFAULT_BODY
+
+    client = await _make_async_client(slow_post)
+    repo = client._features_repository
+    uc = UserContext(attributes={"id": "u-cancel"})
+
+    task = asyncio.create_task(client.is_on("flag1", uc))
+    # Give it time to enter the inflight map.
+    await asyncio.sleep(0.02)
+    assert len(repo._remote_eval_inflight) == 1, "inflight slot should be populated"
+
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    # CRITICAL: inflight map must NOT leak the cache key after cancellation.
+    assert len(repo._remote_eval_inflight) == 0, (
+        "cancellation leaked the inflight slot — future callers would hang forever"
+    )
+
+
+@pytest.mark.asyncio
 async def test_async_cache_miss_different_user_context():
     calls = []
 

@@ -34,16 +34,26 @@ from .common_types import (
 logger = logging.getLogger("growthbook.growthbook_client")
 
 class SingletonMeta(type):
-    """Thread-safe implementation of Singleton pattern"""
-    _instances: Dict[type, Any] = {}
+    """One instance per (class, api_host, client_key). Two GrowthBookClients
+    talking to different proxies — or one CDN-mode and one remote-eval-mode
+    client in the same process — used to silently share a single repo with the
+    first caller's config: wrong host, wrong client_key, wrong `_remote_eval`
+    flag (so SSE invalidation took the CDN path on the remote-eval client).
+
+    Keying on the constructor's identity args fixes that. The first two
+    positional args of `EnhancedFeatureRepository.__init__` are `(api_host,
+    client_key)`; we extract them here and fall back to kwargs for safety."""
+    _instances: Dict[Any, Any] = {}
     _lock = threading.Lock()
 
     def __call__(cls, *args, **kwargs):
+        api_host = args[0] if len(args) > 0 else kwargs.get("api_host", "")
+        client_key = args[1] if len(args) > 1 else kwargs.get("client_key", "")
+        key = (cls, api_host, client_key)
         with cls._lock:
-            if cls not in cls._instances:
-                instance = super().__call__(*args, **kwargs)
-                cls._instances[cls] = instance
-        return cls._instances[cls]
+            if key not in cls._instances:
+                cls._instances[key] = super().__call__(*args, **kwargs)
+        return cls._instances[key]
 
 class BackoffStrategy:
     """Exponential backoff with jitter for failed requests"""
@@ -157,6 +167,11 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         # for that cache key is already in flight, so concurrent foreground
         # callers and background-SWR refresh tasks both observe and skip.
         self._remote_eval_inflight: Dict[str, "asyncio.Future[Optional[Dict[str, Any]]]"] = {}
+        # Fire-and-forget SWR refresh tasks. Tracked so `stop_refresh()` can
+        # cancel them on shutdown — otherwise they may try to write to a
+        # closed aiohttp session / event loop and emit
+        # "Task was destroyed but it is pending" / "Event loop is closed".
+        self._swr_tasks: Set["asyncio.Task[Any]"] = set()
 
     async def fetch_remote_eval(
         self,
@@ -199,9 +214,13 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                     and stale_at <= now
                     and cache_key not in self._remote_eval_inflight
                 ):
-                    asyncio.create_task(self._post_and_cache(
+                    task = asyncio.create_task(self._post_and_cache(
                         api_host, client_key, payload, cache_key, effective_stale_ttl
                     ))
+                    # Track so stop_refresh() can cancel pending SWR work
+                    # before the loop / aiohttp session closes.
+                    self._swr_tasks.add(task)
+                    task.add_done_callback(self._swr_tasks.discard)
                 return response
             # Past max_age — evict and fall through to a synchronous refetch.
             self._remote_eval_cache.pop(cache_key, None)
@@ -236,7 +255,11 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._remote_eval_inflight[cache_key] = inflight
         try:
             response = await self._fetch_and_decode_post_async(api_host, client_key, payload)
-        except Exception as e:
+        except BaseException as e:
+            # `except Exception` would miss `asyncio.CancelledError` (Python 3.8+
+            # derives it from BaseException). Without cleanup on cancellation
+            # the inflight map leaks the cache_key forever and any waiters
+            # blocked on `await existing` hang indefinitely.
             self._remote_eval_inflight.pop(cache_key, None)
             if not inflight.done():
                 inflight.set_exception(e)
@@ -474,6 +497,16 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         except Exception:
             # Best-effort cleanup; task cancellation below will proceed.
             logger.exception("Error stopping SSE auto-refresh")
+        # Cancel any pending SWR (stale-while-revalidate) background refresh
+        # tasks before the event loop / aiohttp session closes.
+        for task in list(self._swr_tasks):
+            task.cancel()
+        if self._swr_tasks:
+            try:
+                await asyncio.gather(*self._swr_tasks, return_exceptions=True)
+            except Exception:
+                logger.exception("Error draining SWR background tasks")
+            self._swr_tasks.clear()
         if self._refresh_task:
             # Cancel the task
             self._refresh_task.cancel()
@@ -833,9 +866,28 @@ class GrowthBookClient:
             stack=StackContext(evaluated_features=set())
         )
 
+    @asynccontextmanager
+    async def _eval_lock(self):
+        """Lock for the duration of an evaluation.
+
+        In CDN mode this guards against `_global_context` mutations (the
+        shared features dict) during `create_evaluation_context` +
+        `core_eval_feature`.
+
+        In remote-eval mode the EvaluationContext is built fresh per-call
+        from the per-user POST response — no shared state to guard, and
+        holding the lock across the network round-trip would serialize all
+        evaluations through one POST even for unrelated users (a real
+        throughput cliff on busy services)."""
+        if self.options.remote_eval:
+            yield
+        else:
+            async with self._context_lock:
+                yield
+
     async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult:
         """Evaluate a feature with proper async context management"""
-        async with self._context_lock:
+        async with self._eval_lock():
             context = await self.create_evaluation_context(user_context)
             result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             # Call feature usage callback if provided
@@ -848,7 +900,7 @@ class GrowthBookClient:
 
     async def is_on(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is enabled with proper async context management"""
-        async with self._context_lock:
+        async with self._eval_lock():
             context = await self.create_evaluation_context(user_context)
             result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             # Call feature usage callback if provided
@@ -858,10 +910,10 @@ class GrowthBookClient:
                 except Exception:
                     logger.exception("Error in feature usage callback")
             return result.on
-    
+
     async def is_off(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is set to off with proper async context management"""
-        async with self._context_lock:
+        async with self._eval_lock():
             context = await self.create_evaluation_context(user_context)
             result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             # Call feature usage callback if provided
@@ -871,9 +923,9 @@ class GrowthBookClient:
                 except Exception:
                     logger.exception("Error in feature usage callback")
             return result.off
-    
+
     async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext) -> Any:
-        async with self._context_lock:
+        async with self._eval_lock():
             context = await self.create_evaluation_context(user_context)
             result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             # Call feature usage callback if provided
@@ -886,7 +938,7 @@ class GrowthBookClient:
 
     async def run(self, experiment: Experiment, user_context: UserContext) -> Result:
         """Run experiment with tracking"""
-        async with self._context_lock:
+        async with self._eval_lock():
             context = await self.create_evaluation_context(user_context)
             result = run_experiment(
                 experiment=experiment, 
