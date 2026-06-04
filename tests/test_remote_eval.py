@@ -390,22 +390,6 @@ class TestRemoteEvalSyncSSE:
     def setup_method(self):
         _reset_repo()
 
-    def test_dispatch_handles_event_with_no_data_field(self):
-        """_dispatch_sse_event must not raise KeyError when 'data' is absent
-        on a parameter-less features-updated event. Beyond not crashing, it
-        also triggers a force-refresh POST (covered separately below)."""
-        body = DEFAULT_BODY
-        with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)):
-            gb = GrowthBook(
-                api_host="https://proxy.example.com",
-                client_key="sdk-test",
-                attributes={"id": "u1"},
-                remoteEval=True,
-            )
-            # Must not raise.
-            gb._dispatch_sse_event({"type": "features-updated"})
-            gb.destroy()
-
     def test_features_updated_invalidates_cache_and_fetches_fresh_payload(self):
         """Regression: SSE `features-updated` used to call load_features() which
         hit the cache and returned the stale payload — the proxy's invalidation
@@ -627,6 +611,18 @@ class TestRemoteEvalAsyncValidation:
             refresh_strategy=FeatureRefreshStrategy.SERVER_SENT_EVENTS,
         ))
 
+    def test_stale_while_revalidate_explicit_also_raises(self):
+        """Sanity: the guard fires when STALE_WHILE_REVALIDATE is set
+        explicitly too, not just on the default."""
+        from growthbook.common_types import FeatureRefreshStrategy
+        with pytest.raises(ValueError, match="STALE_WHILE_REVALIDATE is not compatible"):
+            GrowthBookClient(Options(
+                api_host="https://proxy.example.com",
+                client_key="k",
+                remote_eval=True,
+                refresh_strategy=FeatureRefreshStrategy.STALE_WHILE_REVALIDATE,
+            ))
+
 
 async def _make_async_client(post_handler, **opts):
     """Build a GrowthBookClient with remote_eval on and the network method mocked.
@@ -703,10 +699,12 @@ async def test_post_and_cache_releases_inflight_on_cancellation():
     used to miss it, leaving the inflight map populated and any concurrent
     waiters hung on the never-resolved Future. After the fix, cancelling a
     leader call cleanly releases the inflight slot."""
-    release = asyncio.Event()
+    entered = asyncio.Event()  # signals "POST has been entered"
+    release = asyncio.Event()  # never set — we cancel before this
 
     async def slow_post(api_host, client_key, payload):
-        await release.wait()  # never set
+        entered.set()
+        await release.wait()
         return DEFAULT_BODY
 
     client = await _make_async_client(slow_post)
@@ -714,8 +712,11 @@ async def test_post_and_cache_releases_inflight_on_cancellation():
     uc = UserContext(attributes={"id": "u-cancel"})
 
     task = asyncio.create_task(client.is_on("flag1", uc))
-    # Give it time to enter the inflight map.
-    await asyncio.sleep(0.02)
+    # Deterministic: wait until we KNOW the inflight POST has started, not a
+    # speculative sleep. The inflight map entry is added BEFORE the await on
+    # _fetch_and_decode_post_async, so `entered.wait()` returning guarantees
+    # the slot is populated.
+    await entered.wait()
     assert len(repo._remote_eval_inflight) == 1, "inflight slot should be populated"
 
     task.cancel()
@@ -728,6 +729,17 @@ async def test_post_and_cache_releases_inflight_on_cancellation():
     assert len(repo._remote_eval_inflight) == 0, (
         "cancellation leaked the inflight slot — future callers would hang forever"
     )
+
+    # Stronger assertion: a fresh foreground call for the same UserContext
+    # after cancellation must not hang. If the future was orphaned in the
+    # inflight map, this would await indefinitely.
+    release.set()  # so future POSTs can complete
+    # Have to swap in a different handler now since `entered` is already set.
+    async def fast_post(*a, **kw):
+        return DEFAULT_BODY
+    repo._fetch_and_decode_post_async = fast_post
+    result = await asyncio.wait_for(client.is_on("flag1", uc), timeout=1.0)
+    assert result is True, "post-cancellation foreground call should complete"
 
 
 @pytest.mark.asyncio
@@ -848,21 +860,26 @@ async def test_async_swr_dedupes_concurrent_background_refreshes():
     await client.is_on("flag1", uc)
     assert posts == 2, "concurrent SWR triggers must coalesce"
 
-    # Unblock and confirm clean shutdown.
+    # Unblock and confirm clean shutdown — wait for the bg task to finish
+    # instead of a speculative sleep.
     release.set()
-    await asyncio.sleep(0.02)
+    if client._features_repository._swr_tasks:
+        await asyncio.gather(
+            *list(client._features_repository._swr_tasks),
+            return_exceptions=True,
+        )
 
 
 @pytest.mark.asyncio
 async def test_async_inflight_coalescing():
     """Three concurrent evals for the same UserContext = exactly 1 POST."""
     calls = []
-    started = asyncio.Event()
-    finish = asyncio.Event()
+    waiting = asyncio.Event()  # POST has entered the handler
+    finish = asyncio.Event()   # gate to release the POST
 
     async def slow_post(api_host, client_key, payload):
         calls.append(payload)
-        started.set()
+        waiting.set()
         await finish.wait()
         return DEFAULT_BODY
 
@@ -872,9 +889,15 @@ async def test_async_inflight_coalescing():
     t1 = asyncio.create_task(client.is_on("flag1", uc))
     t2 = asyncio.create_task(client.is_on("flag1", uc))
     t3 = asyncio.create_task(client.is_on("flag1", uc))
-    await started.wait()
-    # Give the other coroutines time to reach the inflight check
-    await asyncio.sleep(0.05)
+    await waiting.wait()  # leader entered POST handler
+
+    # Yield until t2 and t3 have parked on the inflight Future. We can't
+    # observe the future-awaiters directly, but each `await` suspends so
+    # asyncio.sleep(0) ticks the scheduler past their await points.
+    # Three yields = all three coroutines have reached their respective
+    # `await existing` (or in t1's case, the long POST).
+    for _ in range(3):
+        await asyncio.sleep(0)
     finish.set()
     r1, r2, r3 = await asyncio.gather(t1, t2, t3)
     assert (r1, r2, r3) == (True, True, True)
@@ -973,18 +996,156 @@ async def test_async_sse_event_before_any_eval_does_not_call_cdn_path():
 
 
 @pytest.mark.asyncio
+async def test_async_flush_during_inflight_post_doesnt_repopulate_stale():
+    """Race: SSE flush_remote_eval_cache() fires while a foreground POST is
+    in flight. After the POST lands, the stale (pre-flush) response must NOT
+    be written into the cache — otherwise the proxy's invalidation signal is
+    effectively reverted by the late-landing POST.
+
+    Verified by reproducing the bug pre-fix: the cache would re-contain
+    'stale-value' after the flush + late POST. After fix, the cache is empty
+    and the next eval triggers a fresh POST."""
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    posts = 0
+
+    async def slow_post(*a, **kw):
+        nonlocal posts
+        posts += 1
+        entered.set()
+        await release.wait()
+        # First POST returns "stale-value"; subsequent POSTs return "fresh-value".
+        return {
+            "features": {"f": {"defaultValue": "stale-value" if posts == 1 else "fresh-value"}},
+            "savedGroups": {},
+        }
+
+    client = await _make_async_client(slow_post)
+    uc = UserContext(attributes={"id": "u1"})
+
+    task = asyncio.create_task(client.get_feature_value("f", "fb", uc))
+    await entered.wait()
+
+    # Proxy publishes → SSE event flushes the cache.
+    client._features_repository.flush_remote_eval_cache()
+    # Now let the (now-stale) inflight POST complete.
+    release.set()
+    await task
+
+    # The stale response must NOT have been written back into the cache.
+    assert len(client._features_repository._remote_eval_cache) == 0, (
+        "flush race: stale-response repopulated the cache after the proxy "
+        "told us to invalidate"
+    )
+    # Next eval forces a fresh POST that returns the new value.
+    fresh = await client.get_feature_value("f", "fb", uc)
+    assert fresh == "fresh-value"
+    assert posts == 2
+
+
+@pytest.mark.asyncio
+async def test_async_negative_cache_size_doesnt_crash():
+    """Regression: `remote_eval_cache_size < 0` used to raise KeyError when
+    the LRU eviction loop tried to popitem from an already-empty dict. The
+    guard `while self._remote_eval_cache and ...` prevents the crash; the
+    cache effectively holds nothing."""
+    posts = 0
+    async def post_handler(*a, **kw):
+        nonlocal posts; posts += 1
+        return DEFAULT_BODY
+
+    client = await _make_async_client(post_handler, remote_eval_cache_size=-1)
+    uc = UserContext(attributes={"id": "u1"})
+    # Two evals — both should succeed and both POST (cache holds nothing).
+    assert await client.is_on("flag1", uc) is True
+    assert await client.is_on("flag1", uc) is True
+    assert posts == 2
+    assert len(client._features_repository._remote_eval_cache) == 0
+
+
+@pytest.mark.asyncio
+async def test_async_swr_tasks_cancelled_on_close():
+    """Regression: SWR background tasks were created via asyncio.create_task
+    but never tracked. On close()/stop_refresh() they kept running against a
+    potentially-closed aiohttp session/loop, emitting "Task was destroyed"
+    warnings. After fix, stop_refresh() cancels them and awaits drainage."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def gated_post(*a, **kw):
+        started.set()
+        await release.wait()
+        return DEFAULT_BODY
+
+    client = await _make_async_client(gated_post, cache_ttl=60, stale_ttl=0)
+    uc = UserContext(attributes={"id": "u1"})
+
+    # Prime cache (let initial POST through).
+    release.set()
+    await client.is_on("flag1", uc)
+    release.clear()
+    started.clear()
+
+    # Trigger a background SWR refresh that will be left pending.
+    await client.is_on("flag1", uc)  # cache hit + schedules bg refresh
+    await started.wait()
+    repo = client._features_repository
+    assert len(repo._swr_tasks) == 1, "SWR task should be tracked"
+    swr_task = next(iter(repo._swr_tasks))
+
+    # Close without releasing the gate. The background task must be cancelled.
+    release.set()  # allow the cancelled task to unblock its await and exit
+    await client.close()
+    assert swr_task.cancelled() or swr_task.done(), (
+        "SWR task should have been cancelled/awaited by close()"
+    )
+    assert len(repo._swr_tasks) == 0
+
+
+@pytest.mark.asyncio
+async def test_async_post_returning_none_doesnt_poison_cache():
+    """Network failure / 5xx surfaces as `_fetch_and_decode_post_async`
+    returning None. That None must NOT be written to the cache (otherwise
+    subsequent evals would hit a cached None and silently return falsy
+    fallbacks forever)."""
+    responses = iter([None, DEFAULT_BODY])  # first call fails, second succeeds
+
+    async def post_handler(*a, **kw):
+        return next(responses)
+
+    client = await _make_async_client(post_handler)
+    uc = UserContext(attributes={"id": "u1"})
+
+    # First call: POST returns None — cache must NOT be populated.
+    result = await client.get_feature_value("flag1", "fallback", uc)
+    assert result == "fallback", "failed POST should not produce a result"
+    assert len(client._features_repository._remote_eval_cache) == 0
+
+    # Second call: POST succeeds — cache populates normally.
+    result = await client.is_on("flag1", uc)
+    assert result is True
+
+
+@pytest.mark.asyncio
 async def test_async_preload_noop_in_cdn_mode():
-    """preload_remote_eval is a safe no-op when remote_eval is False."""
-    # Autouse _reset_async_singletons handles singleton cleanup.
+    """preload_remote_eval is a safe no-op when remote_eval is False — must
+    not POST and must not touch the remote-eval cache."""
     client = GrowthBookClient(Options(
         api_host="https://proxy.example.com",
         client_key="sdk-cdn",
         remote_eval=False,
         refresh_strategy=None,
     ))
-    # Don't initialize (no features to load in a CDN-only smoke). Just make
-    # sure preload doesn't raise or hit the network.
+    posts = 0
+    async def post_handler(*args, **kwargs):
+        nonlocal posts
+        posts += 1
+        return {"features": {}, "savedGroups": {}}
+    client._features_repository._fetch_and_decode_post_async = post_handler
+
     await client.preload_remote_eval(UserContext(attributes={"id": "u1"}))
+    assert posts == 0, "preload_remote_eval should never POST in CDN mode"
+    assert len(client._features_repository._remote_eval_cache) == 0
 
 
 class TestRemoteEvalRuleTracks:
