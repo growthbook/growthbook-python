@@ -512,6 +512,16 @@ def validate_remote_eval_options(
     `refresh_strategy=STALE_WHILE_REVALIDATE`)."""
     if not client_key:
         raise ValueError("Must specify client_key for remote eval")
+    if not api_host:
+        # Without this guard, `_get_remote_eval_url(api_host, ...)` would fall
+        # back to `https://cdn.growthbook.io` and POST `/api/eval/{key}` to
+        # Cloud, which doesn't expose that endpoint — surfacing as an opaque
+        # 404 (or SSL/connectivity error) instead of a clear config error.
+        # The sync class's `api_host` defaults to "" and the async client's
+        # Options accepts "" or None — both hit this without an explicit guard.
+        raise ValueError(
+            "Must specify api_host (pointing at a self-hosted proxy/edge) for remote eval"
+        )
     if decryption_key:
         raise ValueError("Encryption is not available for remote eval")
     if sticky_bucket_service is not None:

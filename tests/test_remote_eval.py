@@ -52,6 +52,13 @@ class TestRemoteEvalSyncValidation:
         with pytest.raises(ValueError, match="client_key for remote eval"):
             GrowthBook(api_host="https://proxy.example.com", remoteEval=True)
 
+    def test_missing_api_host_raises(self):
+        """sync `api_host: str = ""` defaults to empty — must reject in
+        remote_eval mode, otherwise `_get_remote_eval_url` silently falls
+        through to the Cloud CDN, surfacing as an opaque 404."""
+        with pytest.raises(ValueError, match="api_host .* for remote eval"):
+            GrowthBook(client_key="sdk-test", remoteEval=True)  # api_host omitted
+
     def test_decryption_key_raises(self):
         with pytest.raises(ValueError, match="Encryption is not available"):
             GrowthBook(
@@ -485,6 +492,22 @@ class TestRemoteEvalAsyncValidation:
     def test_missing_client_key_raises(self):
         with pytest.raises(ValueError, match="client_key for remote eval"):
             GrowthBookClient(Options(api_host="https://proxy.example.com", remote_eval=True))
+
+    def test_empty_api_host_raises(self):
+        """Explicit api_host="" bypasses the cloud-host check (which sees
+        an empty hostname) and would otherwise fall through to the Cloud
+        CDN at runtime — must fail fast at construction."""
+        with pytest.raises(ValueError, match="api_host .* for remote eval"):
+            GrowthBookClient(Options(
+                api_host="", client_key="k", remote_eval=True, refresh_strategy=None,
+            ))
+
+    def test_none_api_host_raises(self):
+        """Explicit api_host=None has the same effect — fail fast."""
+        with pytest.raises(ValueError, match="api_host .* for remote eval"):
+            GrowthBookClient(Options(
+                api_host=None, client_key="k", remote_eval=True, refresh_strategy=None,
+            ))
 
     def test_decryption_key_raises(self):
         with pytest.raises(ValueError, match="Encryption is not available"):
