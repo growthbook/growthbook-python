@@ -460,6 +460,51 @@ class TestRemoteEvalSyncSSE:
         assert "features-updated" in types_dispatched, (
             f"parameter-less features-updated was silently dropped: {types_dispatched}"
         )
+        # Single-line data event must NOT have a leading newline (W3C spec:
+        # data lines are joined with newlines BETWEEN them, not prepended).
+        first_data = next(e for e in events_seen if e.get("type") == "features")["data"]
+        assert first_data == '{"features": {}}', (
+            f"data line had leading newline: {first_data!r}"
+        )
+
+    def test_sse_parser_joins_multi_data_lines_per_spec(self):
+        """Multi-line data: events must be joined with `\\n` BETWEEN lines,
+        not prepended to each. Per W3C EventSource."""
+        from growthbook.growthbook import SSEClient
+
+        events_seen = []
+
+        class _FakeResponse:
+            class _Content:
+                def __init__(self, lines):
+                    self._lines = lines
+
+                def __aiter__(self):
+                    self._iter = iter(self._lines)
+                    return self
+
+                async def __anext__(self):
+                    try:
+                        return next(self._iter)
+                    except StopIteration:
+                        raise StopAsyncIteration
+
+            def __init__(self, lines):
+                self.content = self._Content(lines)
+
+        sse = SSEClient(api_host="http://h", client_key="k", on_event=events_seen.append)
+        sse.is_running = True
+        raw = [
+            b"event: chunked\n",
+            b"data: line-1\n",
+            b"data: line-2\n",
+            b"data: line-3\n",
+            b"\n",
+        ]
+        asyncio.run(sse._process_response(_FakeResponse(raw)))
+        assert events_seen[0]["data"] == "line-1\nline-2\nline-3", (
+            f"data joined incorrectly: {events_seen[0]['data']!r}"
+        )
 
 
 # ---------------------------------------------------------------------------

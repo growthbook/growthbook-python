@@ -245,7 +245,17 @@ class SSEClient:
                 if decoded_line.startswith("event:"):
                     event_data['type'] = decoded_line[len("event:"):].strip()
                 elif decoded_line.startswith("data:"):
-                    event_data['data'] = event_data.get('data', '') + f"\n{decoded_line[len('data:'):].strip()}"
+                    # Per W3C EventSource spec, multiple `data:` lines in a
+                    # single event are joined with `\n` BETWEEN them, not
+                    # prepended to each one. The old logic produced
+                    # "\n<line1>\n<line2>" (leading newline), which json.loads
+                    # tolerates by luck but breaks for empty-data events
+                    # ("\n" alone) and any non-JSON consumer.
+                    line_data = decoded_line[len("data:"):].strip()
+                    if "data" in event_data:
+                        event_data["data"] += "\n" + line_data
+                    else:
+                        event_data["data"] = line_data
                 elif not decoded_line:
                     # End-of-event marker. Per the W3C EventSource spec, an
                     # event with only a `type` (no `data:` line) is still a
