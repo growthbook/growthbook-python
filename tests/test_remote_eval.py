@@ -743,6 +743,59 @@ async def test_post_and_cache_releases_inflight_on_cancellation():
 
 
 @pytest.mark.asyncio
+async def test_cancellation_does_not_log_future_exception_warning():
+    """Cancelling a leader POST used to call `inflight.set_exception(
+    CancelledError)`, which triggers asyncio's "Future exception was never
+    retrieved" warning when the Future is garbage-collected with no observer.
+    The fix is `inflight.cancel()` — cancelled Futures don't trigger the warning
+    while still propagating CancelledError to any waiters.
+
+    We intercept the loop's exception handler to detect the warning rather
+    than capture stderr, because asyncio routes it through
+    `loop.call_exception_handler(...)`."""
+    import gc
+
+    captured: list = []
+    loop = asyncio.get_running_loop()
+    prev_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda lp, ctx: captured.append(ctx.get("message", "")))
+    try:
+        release = asyncio.Event()  # never set
+
+        async def slow_post(*a, **kw):
+            await release.wait()
+            return DEFAULT_BODY
+
+        client = await _make_async_client(slow_post)
+        uc = UserContext(attributes={"id": "u-cancel-quiet"})
+
+        task = asyncio.create_task(client.is_on("flag1", uc))
+        # Wait until the inflight slot is populated.
+        while not client._features_repository._remote_eval_inflight:
+            await asyncio.sleep(0)
+
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        # Force GC of the inflight Future and let __del__ fire its handler.
+        del task
+        gc.collect()
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        gc.collect()
+
+        unretrieved = [m for m in captured if "exception was never retrieved" in m]
+        assert not unretrieved, (
+            f"asyncio logged unretrieved future exception(s): {unretrieved}"
+        )
+    finally:
+        loop.set_exception_handler(prev_handler)
+
+
+@pytest.mark.asyncio
 async def test_async_cache_miss_different_user_context():
     calls = []
 

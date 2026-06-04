@@ -262,7 +262,16 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             # blocked on `await existing` hang indefinitely.
             self._remote_eval_inflight.pop(cache_key, None)
             if not inflight.done():
-                inflight.set_exception(e)
+                if isinstance(e, asyncio.CancelledError):
+                    # Cancel the inflight Future instead of `set_exception(e)`.
+                    # Both propagate CancelledError to any concurrent waiters,
+                    # but a cancelled Future never triggers the
+                    # "Future exception was never retrieved" warning when
+                    # garbage-collected without an observer — `set_exception`
+                    # does, producing stderr noise on every cancellation.
+                    inflight.cancel()
+                else:
+                    inflight.set_exception(e)
             raise
 
         # If `flush_remote_eval_cache()` ran while we were awaiting the POST,
