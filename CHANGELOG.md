@@ -1,5 +1,16 @@
 # Changelog
 
+## [3.0.0](https://github.com/growthbook/growthbook-python/compare/v2.2.2...v3.0.0) (2026-06-04)
+
+
+### ⚠ BREAKING CHANGES
+
+* Merge pull request #118 from growthbook/feat/remote-eval
+
+### Bug Fixes
+
+* Merge pull request [#118](https://github.com/growthbook/growthbook-python/issues/118) from growthbook/feat/remote-eval ([f6b7c0a](https://github.com/growthbook/growthbook-python/commit/f6b7c0a224a021bd66eda9d6a939aad2064add35))
+
 ## [2.2.2](https://github.com/growthbook/growthbook-python/compare/v2.2.1...v2.2.2) (2026-05-11)
 
 
