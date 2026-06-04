@@ -406,7 +406,13 @@ class Options:
     api_host: Optional[str] = "https://cdn.growthbook.io"
     client_key: Optional[str] = None
     decryption_key: Optional[str] = None
-    cache_ttl: int = 60
+    cache_ttl: int = 60  # max_age: hard expiry for cached payloads (seconds).
+    # Soft-expiry threshold (seconds). When set < cache_ttl AND remote_eval is
+    # on, the async GrowthBookClient serves stale cached payloads inside
+    # [stale_ttl, cache_ttl) and fires a fire-and-forget background refetch.
+    # None = no SWR window (hard expiry at cache_ttl). Sync GrowthBook remote_eval
+    # uses cache_ttl-only and ignores this field.
+    stale_ttl: Optional[int] = None
     enabled: bool = True
     qa_mode: bool = False
     enable_dev_mode: bool = False

@@ -7,6 +7,7 @@ from typing import Any, Dict, List, Optional, Union, Callable, Awaitable
 from typing import Set
 import asyncio
 import threading
+import time
 import traceback
 from collections import OrderedDict
 from datetime import datetime
@@ -140,19 +141,21 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
 
         # Remote-eval per-user response cache (LRU-bounded, distinct from
         # the GET-path self.cache to keep eviction strategies clean).
+        # Entries are (response, stale_at) where stale_at = time.monotonic() +
+        # effective_stale_ttl at write time. The max_age boundary is derived
+        # JS-style: an entry is valid iff `stale_at > now - cache_ttl +
+        # effective_stale_ttl` (algebraically: write_time > now - cache_ttl).
+        # Storing a single timestamp mirrors `packages/sdk-js/src/feature-repository.ts`.
+        #
         # No lock guards this dict: the critical sections in fetch_remote_eval
         # are pure dict ops with no `await` between them, and asyncio
         # coroutines only yield at await points — so the operations are
-        # already atomic from asyncio's perspective. The other asyncio
-        # primitives in this class (_refresh_in_progress, _stop_event) DO
-        # need locking because they guard state across awaits; Python 3.10+
-        # binds them lazily to whichever loop is running at first acquire,
-        # so creating them in __init__ is safe even outside a running loop.
-        self._remote_eval_cache: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        # already atomic from asyncio's perspective.
+        self._remote_eval_cache: "OrderedDict[str, tuple[Dict[str, Any], float]]" = OrderedDict()
         self._remote_eval_cache_max = remote_eval_cache_size
-        # Inflight coalescing: when concurrent calls land for the same cache
-        # key, the second caller awaits the first's future instead of issuing
-        # a duplicate POST.
+        # Inflight coalescing AND SWR-dedup: a key in this dict means a POST
+        # for that cache key is already in flight, so concurrent foreground
+        # callers and background-SWR refresh tasks both observe and skip.
         self._remote_eval_inflight: Dict[str, "asyncio.Future[Optional[Dict[str, Any]]]"] = {}
 
     async def fetch_remote_eval(
@@ -161,34 +164,76 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         client_key: str,
         payload: Dict[str, Any],
         cache_key_attributes: Optional[List[str]] = None,
+        cache_ttl: int = 60,
+        stale_ttl: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
-        """POST to /api/eval/{client_key}, caching per-payload with LRU eviction
-        and coalescing concurrent identical requests onto a single inflight POST.
+        """POST to /api/eval/{client_key} with JS-SDK-style cache lifecycle.
 
-        The cache and inflight dicts are touched only between `await` points,
-        so no explicit lock is needed — asyncio coroutines yield only at
-        `await`, and the CPython interpreter makes single dict ops atomic."""
+        Age windows for the per-payload cache (matches
+        `packages/sdk-js/src/feature-repository.ts`):
+            age < stale_ttl              → serve cached, no refresh
+            stale_ttl <= age < cache_ttl → serve cached + fire-and-forget bg refresh
+            age >= cache_ttl             → cache miss, await network
+
+        With `stale_ttl=None` the SWR window collapses — entries are served
+        until cache_ttl and then refetched synchronously.
+
+        Concurrent foreground callers AND background SWR refreshes coalesce
+        on a single inflight POST per cache key.
+        """
         cache_key = self._compute_cache_key(api_host, client_key, True, payload, cache_key_attributes)
+        effective_stale_ttl = stale_ttl if stale_ttl is not None else cache_ttl
+        now = time.monotonic()
 
-        # Cache lookup — no await between get and the on-hit handling.
-        cached: Optional[Dict[str, Any]] = self._remote_eval_cache.get(cache_key)
+        cached = self._remote_eval_cache.get(cache_key)
         if cached is not None:
-            self._remote_eval_cache.move_to_end(cache_key)
-            return cached
+            response, stale_at = cached
+            # JS-style max_age check: write_time > now - cache_ttl, i.e.
+            # stale_at > now - cache_ttl + effective_stale_ttl.
+            if stale_at > now - cache_ttl + effective_stale_ttl:
+                self._remote_eval_cache.move_to_end(cache_key)
+                # SWR: past stale_ttl, under cache_ttl — schedule a
+                # background refetch unless one's already in flight.
+                if (
+                    stale_ttl is not None
+                    and stale_at <= now
+                    and cache_key not in self._remote_eval_inflight
+                ):
+                    asyncio.create_task(self._post_and_cache(
+                        api_host, client_key, payload, cache_key, effective_stale_ttl
+                    ))
+                return response
+            # Past max_age — evict and fall through to a synchronous refetch.
+            self._remote_eval_cache.pop(cache_key, None)
 
-        # Inflight check — if another coroutine is already POSTing for this
-        # cache key, await its future instead of issuing a duplicate POST.
+        # Foreground POST (or join an existing inflight one).
+        existing = self._remote_eval_inflight.get(cache_key)
+        if existing is not None:
+            return await existing
+        return await self._post_and_cache(
+            api_host, client_key, payload, cache_key, effective_stale_ttl
+        )
+
+    async def _post_and_cache(
+        self,
+        api_host: str,
+        client_key: str,
+        payload: Dict[str, Any],
+        cache_key: str,
+        effective_stale_ttl: int,
+    ) -> Optional[Dict[str, Any]]:
+        """POST + cache-write helper shared by foreground misses and background
+        SWR refreshes. Registers `cache_key` in the inflight map for the POST's
+        duration so duplicate POSTs are coalesced. Bumps `stale_at` on every
+        successful write — even an unchanged payload refreshes freshness
+        (matches JS SDK)."""
+        # Re-check inflight: a concurrent caller might have raced us.
         existing = self._remote_eval_inflight.get(cache_key)
         if existing is not None:
             return await existing
 
-        # Leader path: create the future inside the running coroutine so it
-        # binds to the current loop (asyncio.Future() picks up the running
-        # loop, unlike capturing a loop reference at __init__ time which
-        # would freeze the binding).
         inflight: "asyncio.Future[Optional[Dict[str, Any]]]" = asyncio.Future()
         self._remote_eval_inflight[cache_key] = inflight
-
         try:
             response = await self._fetch_and_decode_post_async(api_host, client_key, payload)
         except Exception as e:
@@ -199,7 +244,8 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
 
         self._remote_eval_inflight.pop(cache_key, None)
         if response is not None:
-            self._remote_eval_cache[cache_key] = response
+            stale_at = time.monotonic() + effective_stale_ttl
+            self._remote_eval_cache[cache_key] = (response, stale_at)
             self._remote_eval_cache.move_to_end(cache_key)
             while len(self._remote_eval_cache) > self._remote_eval_cache_max:
                 self._remote_eval_cache.popitem(last=False)
@@ -719,6 +765,8 @@ class GrowthBookClient:
             self.options.client_key or "",
             self._remote_eval_payload(user_context),
             self.options.cache_key_attributes,
+            cache_ttl=self.options.cache_ttl,
+            stale_ttl=self.options.stale_ttl,
         )
 
     async def _feature_update_callback(self, features_data: Dict[str, Any]) -> None:
@@ -759,6 +807,8 @@ class GrowthBookClient:
                 self.options.client_key or "",
                 self._remote_eval_payload(user_context),
                 self.options.cache_key_attributes,
+                cache_ttl=self.options.cache_ttl,
+                stale_ttl=self.options.stale_ttl,
             ) or {}
             global_ctx = GlobalContext(
                 options=self.options,

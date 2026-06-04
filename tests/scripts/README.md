@@ -92,16 +92,35 @@ are the moments where docs (or the SDK itself) could remove a step.
    and that `forcedFeatures` is a list of tuples, not a dict. This script's
    fake proxy doubles as living documentation of the wire format.
 
-4. **`forcedFeatures` is unused on the async client.** `UserContext` doesn't
-   carry a `forced_features` field today — the async client always sends
-   `[]`. Worth a docs callout so people don't expect symmetry with the sync
-   class.
+4. **`forcedFeatures` semantics in remote-eval.** Both clients now wire
+   `forcedFeatures` (sync via `GrowthBook(forced_features={...})` +
+   `set_forced_features()`, async via `UserContext.forced_features`). On
+   the wire it ships as `[[k, v], ...]` (JS-SDK-shaped). One quirk worth
+   docs: `forcedFeatures` is **deliberately excluded from the cache key**
+   (matches JS — the proxy doesn't filter on it). So calling
+   `set_forced_features()` alone is a cache hit, not a network round-trip;
+   the new value ships on the next refetch triggered by another setter.
 
 5. **Refresh strategy interaction.** `stale_while_revalidate=True` is
    rejected with `remote_eval=True` (raises). SSE refresh is allowed (cache
    gets flushed on `features-updated`). HTTP polling is silently a no-op in
    remote-eval mode because there's no global features payload to refresh.
    Documenting this matrix would prevent confusion.
+
+5b. **`cache_ttl` / `stale_ttl` asymmetry between sync and async.** Both
+   options live on `Options`, but in remote-eval mode they're honored
+   differently:
+   - **Async `GrowthBookClient`** — full JS-style cache lifecycle on the
+     per-user cache. `cache_ttl` is hard expiry (max_age). `stale_ttl` (when
+     set < `cache_ttl`) enables SWR: serve cached + fire-and-forget
+     background refresh in `[stale_ttl, cache_ttl)`. Stale_at resets on
+     every successful write, even unchanged payloads (matches JS).
+   - **Sync `GrowthBook`** — `cache_ttl` only (hard expiry via the existing
+     `InMemoryFeatureCache`). `stale_ttl` and `stale_while_revalidate` are
+     rejected in remote-eval mode. Sync uses a threading-based background
+     refresh worker that's harder to fit per-user payloads into safely;
+     we deliberately don't open that door. **If you need SWR semantics
+     with remote-eval, use the async client.**
 
 6. **Tracking on the force path.** Experiments evaluated server-side return
    to the SDK as force-rules with a `tracks` array. Without firing

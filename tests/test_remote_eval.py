@@ -561,6 +561,92 @@ async def test_async_forced_features_flow_through_user_context():
 
 
 @pytest.mark.asyncio
+async def test_async_cache_ttl_hard_expiry():
+    """Past cache_ttl, the cache entry is gone — next eval re-POSTs synchronously."""
+    posts = 0
+
+    async def post_handler(api_host, client_key, payload):
+        nonlocal posts
+        posts += 1
+        return DEFAULT_BODY
+
+    client = await _make_async_client(post_handler, cache_ttl=0)  # expire immediately
+    uc = UserContext(attributes={"id": "u1"})
+    await client.is_on("flag1", uc)
+    assert posts == 1
+    # cache_ttl=0 means every read is "past max_age" — every eval re-POSTs.
+    await client.is_on("flag1", uc)
+    assert posts == 2, "cache_ttl=0 should expire entries on every read"
+
+
+@pytest.mark.asyncio
+async def test_async_stale_ttl_swr_serves_cached_then_refreshes():
+    """In the [stale_ttl, cache_ttl) window: serve the cached value
+    immediately, fire a background refresh, and the cached entry's stale_at
+    bumps forward when the refresh lands."""
+    posts = 0
+    posted = asyncio.Event()
+
+    async def post_handler(api_host, client_key, payload):
+        nonlocal posts
+        posts += 1
+        posted.set()
+        return DEFAULT_BODY
+
+    # stale_ttl=0 (always stale) + cache_ttl=60 (huge window): every eval
+    # serves cached + fires a background refresh.
+    client = await _make_async_client(post_handler, cache_ttl=60, stale_ttl=0)
+    uc = UserContext(attributes={"id": "u1"})
+    await client.is_on("flag1", uc)
+    assert posts == 1, "first eval is a cache miss"
+
+    # Second eval: cache hit (returns immediately) AND schedules a bg refresh.
+    posted.clear()
+    await client.is_on("flag1", uc)
+    await posted.wait()  # deterministic — no fragile sleep
+    assert posts == 2, "stale_ttl should trigger a background SWR refetch"
+
+
+@pytest.mark.asyncio
+async def test_async_swr_dedupes_concurrent_background_refreshes():
+    """Inside the SWR window, multiple cache hits during the same inflight
+    background-refresh POST must NOT spawn duplicate refreshes."""
+    started = asyncio.Event()
+    release = asyncio.Event()
+    posts = 0
+
+    async def gated_post(api_host, client_key, payload):
+        nonlocal posts
+        posts += 1
+        started.set()
+        await release.wait()
+        return DEFAULT_BODY
+
+    # Initial POST: let it through immediately so the cache populates.
+    release.set()
+    client = await _make_async_client(gated_post, cache_ttl=60, stale_ttl=0)
+    uc = UserContext(attributes={"id": "u1"})
+    await client.is_on("flag1", uc)
+    assert posts == 1
+
+    # Now block subsequent POSTs so we can race the SWR triggers.
+    release.clear()
+    started.clear()
+
+    # First cache hit schedules a background refresh; subsequent cache hits
+    # while it's still inflight must coalesce (no duplicate POSTs).
+    await client.is_on("flag1", uc)
+    await started.wait()  # bg refresh has reached gated_post
+    await client.is_on("flag1", uc)
+    await client.is_on("flag1", uc)
+    assert posts == 2, "concurrent SWR triggers must coalesce"
+
+    # Unblock and confirm clean shutdown.
+    release.set()
+    await asyncio.sleep(0.02)
+
+
+@pytest.mark.asyncio
 async def test_async_inflight_coalescing():
     """Three concurrent evals for the same UserContext = exactly 1 POST."""
     calls = []
