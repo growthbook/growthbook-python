@@ -700,9 +700,11 @@ class GrowthBookClient:
             return False
 
     def _remote_eval_payload(self, user_context: UserContext) -> Dict[str, Any]:
-        # forcedFeatures isn't exposed on UserContext today; always [].
         return build_remote_eval_payload(
-            user_context.attributes, user_context.forced_variations, user_context.url
+            user_context.attributes,
+            user_context.forced_variations,
+            user_context.url,
+            forced_features=user_context.forced_features,
         )
 
     async def preload_remote_eval(self, user_context: UserContext) -> None:

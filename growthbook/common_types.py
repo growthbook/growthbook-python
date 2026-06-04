@@ -393,6 +393,9 @@ class UserContext:
     attributes: Dict[str, Any] = field(default_factory=dict)
     groups: Dict[str, str] = field(default_factory=dict)
     forced_variations: Dict[str, Any] = field(default_factory=dict)
+    # Caller-supplied forced feature values. Sent to the proxy in remote-eval
+    # mode (wire format: list of [key, value] tuples, matches JS SDK).
+    forced_features: Dict[str, Any] = field(default_factory=dict)
     overrides: Dict[str, Any] = field(default_factory=dict)
     sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
     skip_all_experiments: bool = False
@@ -462,15 +465,18 @@ def build_remote_eval_payload(
     attributes: Optional[Dict[str, Any]],
     forced_variations: Optional[Dict[str, Any]],
     url: Optional[str],
-    forced_features: Optional[List[Any]] = None,
+    forced_features: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Construct the POST body for /api/eval/{client_key}. Single source of
     truth for the wire shape — both sync and async clients route through here.
-    `forced_features` is a list of [key, value] tuples (matches the JS SDK's
-    Array.from(map.entries()) format)."""
+
+    `forced_features` is the caller's natural dict shape; on the wire it
+    becomes a list of `[key, value]` pairs (matches the JS SDK's
+    `Array.from(map.entries())` — JS-arrays serialize identically to either
+    Python tuples or lists, but we emit lists for in-memory parity)."""
     return {
         "attributes": attributes or {},
-        "forcedFeatures": forced_features or [],
+        "forcedFeatures": [[k, v] for k, v in (forced_features or {}).items()],
         "forcedVariations": forced_variations or {},
         "url": url or "",
     }

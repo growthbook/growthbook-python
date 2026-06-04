@@ -828,6 +828,7 @@ class GrowthBook(object):
         decryption_key: str = "",
         cache_ttl: int = 600,
         forced_variations: Optional[Dict[str, Any]] = None,
+        forced_features: Optional[Dict[str, Any]] = None,
         sticky_bucket_service: Optional[AbstractStickyBucketService] = None,
         sticky_bucket_identifier_attributes: Optional[List[str]] = None,
         savedGroups: Optional[Dict[str, Any]] = None,
@@ -889,6 +890,7 @@ class GrowthBook(object):
         self._groups = groups
         self._overrides = overrides
         self._forcedVariations = (forced_variations if forced_variations is not None else forcedVariations) if forced_variations is not None or forcedVariations else {}
+        self._forcedFeatures: Dict[str, Any] = forced_features or {}
 
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
@@ -958,9 +960,9 @@ class GrowthBook(object):
             feature_repo.http_read_timeout = http_read_timeout
 
     def _remote_eval_payload(self) -> Dict[str, Any]:
-        # forcedFeatures is not exposed on the sync class today; always [].
         return build_remote_eval_payload(
-            self._attributes, self._forcedVariations, self._url
+            self._attributes, self._forcedVariations, self._url,
+            forced_features=self._forcedFeatures,
         )
 
     def _on_feature_update(self, features_data: Dict) -> None:
@@ -1108,6 +1110,15 @@ class GrowthBook(object):
         self._forcedVariations = forced_variations or {}
         if self._user_ctx is not None:
             self._user_ctx.forced_variations = self._forcedVariations
+        if self._remoteEval and self._client_key:
+            self.load_features()
+
+    def set_forced_features(self, forced_features: Dict[str, Any]) -> None:
+        """Set forced feature values. The proxy server uses them to filter the
+        response in remote-eval mode; local evaluation does NOT consult them
+        today (matches the JS SDK behavior). Triggers a refetch when
+        remote_eval is enabled."""
+        self._forcedFeatures = forced_features or {}
         if self._remoteEval and self._client_key:
             self.load_features()
 

@@ -178,6 +178,33 @@ class TestRemoteEvalSyncRefetch:
             gb.set_forced_variations({"exp-1": 1})
             assert mock_post.call_count == 2
 
+    def test_forced_features_wire_format_and_cache_key_exclusion(self):
+        """forced_features ships as [[k, v], ...] in the POST body but is
+        deliberately excluded from the cache key (matches JS — the proxy
+        doesn't filter on it). So `set_forced_features` alone is a cache
+        hit (no new POST); the new value ships on the next actual refetch
+        triggered by an attribute/url/forced_variations change."""
+        body = {"features": {}, "savedGroups": {}}
+        with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)) as mock_post:
+            gb = GrowthBook(
+                api_host="https://proxy.example.com",
+                client_key="sdk-test",
+                attributes={"id": "u1"},
+                forced_features={"banner": "v2"},  # constructor wiring
+                remoteEval=True,
+            )
+            # 1) Constructor sends forcedFeatures on the first POST.
+            assert mock_post.call_args.args[1]["forcedFeatures"] == [["banner", "v2"]]
+            # 2) set_forced_features doesn't force a network round-trip
+            #    (forcedFeatures isn't in the cache key) — it just updates state.
+            gb.set_forced_features({"banner": "v3", "promo": True})
+            assert mock_post.call_count == 1
+            # 3) When a cache-busting setter fires, the NEW forced_features
+            #    value ships in the next POST body.
+            gb.set_attributes({"id": "u2"})
+            assert mock_post.call_count == 2
+            assert mock_post.call_args.args[1]["forcedFeatures"] == [["banner", "v3"], ["promo", True]]
+
     def test_set_url_triggers_refetch(self):
         body = {"features": {}, "savedGroups": {}}
         with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)) as mock_post:
@@ -508,6 +535,29 @@ async def test_async_cache_miss_different_user_context():
     await client.is_on("flag1", UserContext(attributes={"id": "u1"}))
     await client.is_on("flag1", UserContext(attributes={"id": "u2"}))
     assert len(calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_async_forced_features_flow_through_user_context():
+    """UserContext.forced_features serializes as [[k, v], ...] on the wire
+    and feeds into the cache key the same way other payload fields do."""
+    calls = []
+
+    async def post_handler(api_host, client_key, payload):
+        calls.append(payload)
+        return DEFAULT_BODY
+
+    client = await _make_async_client(post_handler)
+    uc = UserContext(attributes={"id": "u1"}, forced_features={"banner": "v2"})
+    await client.is_on("flag1", uc)
+    assert calls[0]["forcedFeatures"] == [["banner", "v2"]]
+
+    # NOTE: forcedFeatures is intentionally NOT part of the cache key (matches
+    # JS — the proxy doesn't filter on it). Same attrs/forced_vars/url with
+    # different forced_features → cache hit, no extra POST.
+    uc2 = UserContext(attributes={"id": "u1"}, forced_features={"banner": "v9"})
+    await client.is_on("flag1", uc2)
+    assert len(calls) == 1, "forcedFeatures should not invalidate the cache"
 
 
 @pytest.mark.asyncio
