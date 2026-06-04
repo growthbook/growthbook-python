@@ -7,7 +7,9 @@ from typing import Any, Dict, List, Optional, Union, Callable, Awaitable
 from typing import Set
 import asyncio
 import threading
+import time
 import traceback
+from collections import OrderedDict
 from datetime import datetime
 from growthbook import FeatureRepository, feature_repo
 from contextlib import asynccontextmanager
@@ -23,22 +25,35 @@ from .common_types import (
     StackContext,
     FeatureResult,
     FeatureRefreshStrategy,
-    Experiment
+    Experiment,
+    build_remote_eval_payload,
+    features_from_dict,
+    validate_remote_eval_options,
 )
 
 logger = logging.getLogger("growthbook.growthbook_client")
 
 class SingletonMeta(type):
-    """Thread-safe implementation of Singleton pattern"""
-    _instances: Dict[type, Any] = {}
+    """One instance per (class, api_host, client_key). Two GrowthBookClients
+    talking to different proxies — or one CDN-mode and one remote-eval-mode
+    client in the same process — used to silently share a single repo with the
+    first caller's config: wrong host, wrong client_key, wrong `_remote_eval`
+    flag (so SSE invalidation took the CDN path on the remote-eval client).
+
+    Keying on the constructor's identity args fixes that. The first two
+    positional args of `EnhancedFeatureRepository.__init__` are `(api_host,
+    client_key)`; we extract them here and fall back to kwargs for safety."""
+    _instances: Dict[Any, Any] = {}
     _lock = threading.Lock()
 
     def __call__(cls, *args, **kwargs):
+        api_host = args[0] if len(args) > 0 else kwargs.get("api_host", "")
+        client_key = args[1] if len(args) > 1 else kwargs.get("client_key", "")
+        key = (cls, api_host, client_key)
         with cls._lock:
-            if cls not in cls._instances:
-                instance = super().__call__(*args, **kwargs)
-                cls._instances[cls] = instance
-        return cls._instances[cls]
+            if key not in cls._instances:
+                cls._instances[key] = super().__call__(*args, **kwargs)
+        return cls._instances[key]
 
 class BackoffStrategy:
     """Exponential backoff with jitter for failed requests"""
@@ -108,12 +123,21 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                  decryption_key: str = "",
                  cache_ttl: int = 60,
                  http_connect_timeout: Optional[int] = None,
-                 http_read_timeout: Optional[int] = None):
+                 http_read_timeout: Optional[int] = None,
+                 remote_eval_cache_size: int = 1000,
+                 remote_eval: bool = False):
         FeatureRepository.__init__(self)
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
         self._cache_ttl = cache_ttl
+        # Whether this repo serves a remote-eval client. Drives SSE handling:
+        # remote-eval invalidation is a cache flush, NOT a CDN re-fetch.
+        # Stored as an explicit flag rather than inferred from cache contents
+        # because `_remote_eval_cache` is empty until the first user is
+        # evaluated — inferring from emptiness would silently route SSE events
+        # down the CDN path on a fresh client.
+        self._remote_eval = remote_eval
         self._refresh_lock = threading.Lock()
         self._refresh_task: Optional[asyncio.Task] = None
         self._stop_event = asyncio.Event()
@@ -124,6 +148,164 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._refresh_in_progress = asyncio.Lock()
         self.http_connect_timeout = http_connect_timeout
         self.http_read_timeout = http_read_timeout
+
+        # Remote-eval per-user response cache (LRU-bounded, distinct from
+        # the GET-path self.cache to keep eviction strategies clean).
+        # Entries are (response, stale_at) where stale_at = time.monotonic() +
+        # effective_stale_ttl at write time. The max_age boundary is derived
+        # JS-style: an entry is valid iff `stale_at > now - cache_ttl +
+        # effective_stale_ttl` (algebraically: write_time > now - cache_ttl).
+        # Storing a single timestamp mirrors `packages/sdk-js/src/feature-repository.ts`.
+        #
+        # No lock guards this dict: the critical sections in fetch_remote_eval
+        # are pure dict ops with no `await` between them, and asyncio
+        # coroutines only yield at await points — so the operations are
+        # already atomic from asyncio's perspective.
+        self._remote_eval_cache: "OrderedDict[str, tuple[Dict[str, Any], float]]" = OrderedDict()
+        self._remote_eval_cache_max = remote_eval_cache_size
+        # Inflight coalescing AND SWR-dedup: a key in this dict means a POST
+        # for that cache key is already in flight, so concurrent foreground
+        # callers and background-SWR refresh tasks both observe and skip.
+        self._remote_eval_inflight: Dict[str, "asyncio.Future[Optional[Dict[str, Any]]]"] = {}
+        # Fire-and-forget SWR refresh tasks. Tracked so `stop_refresh()` can
+        # cancel them on shutdown — otherwise they may try to write to a
+        # closed aiohttp session / event loop and emit
+        # "Task was destroyed but it is pending" / "Event loop is closed".
+        self._swr_tasks: Set["asyncio.Task[Any]"] = set()
+
+    async def fetch_remote_eval(
+        self,
+        api_host: str,
+        client_key: str,
+        payload: Dict[str, Any],
+        cache_key_attributes: Optional[List[str]] = None,
+        cache_ttl: int = 60,
+        stale_ttl: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """POST to /api/eval/{client_key} with JS-SDK-style cache lifecycle.
+
+        Age windows for the per-payload cache (matches
+        `packages/sdk-js/src/feature-repository.ts`):
+            age < stale_ttl              → serve cached, no refresh
+            stale_ttl <= age < cache_ttl → serve cached + fire-and-forget bg refresh
+            age >= cache_ttl             → cache miss, await network
+
+        With `stale_ttl=None` the SWR window collapses — entries are served
+        until cache_ttl and then refetched synchronously.
+
+        Concurrent foreground callers AND background SWR refreshes coalesce
+        on a single inflight POST per cache key.
+        """
+        cache_key = self._compute_cache_key(api_host, client_key, True, payload, cache_key_attributes)
+        effective_stale_ttl = stale_ttl if stale_ttl is not None else cache_ttl
+        now = time.monotonic()
+
+        cached = self._remote_eval_cache.get(cache_key)
+        if cached is not None:
+            response, stale_at = cached
+            # JS-style max_age check: write_time > now - cache_ttl, i.e.
+            # stale_at > now - cache_ttl + effective_stale_ttl.
+            if stale_at > now - cache_ttl + effective_stale_ttl:
+                self._remote_eval_cache.move_to_end(cache_key)
+                # SWR: past stale_ttl, under cache_ttl — schedule a
+                # background refetch unless one's already in flight.
+                if (
+                    stale_ttl is not None
+                    and stale_at <= now
+                    and cache_key not in self._remote_eval_inflight
+                ):
+                    task = asyncio.create_task(self._post_and_cache(
+                        api_host, client_key, payload, cache_key, effective_stale_ttl
+                    ))
+                    # Track so stop_refresh() can cancel pending SWR work
+                    # before the loop / aiohttp session closes.
+                    self._swr_tasks.add(task)
+                    task.add_done_callback(self._swr_tasks.discard)
+                return response
+            # Past max_age — evict and fall through to a synchronous refetch.
+            self._remote_eval_cache.pop(cache_key, None)
+
+        # Foreground POST (or join an existing inflight one).
+        existing = self._remote_eval_inflight.get(cache_key)
+        if existing is not None:
+            return await existing
+        return await self._post_and_cache(
+            api_host, client_key, payload, cache_key, effective_stale_ttl
+        )
+
+    async def _post_and_cache(
+        self,
+        api_host: str,
+        client_key: str,
+        payload: Dict[str, Any],
+        cache_key: str,
+        effective_stale_ttl: int,
+    ) -> Optional[Dict[str, Any]]:
+        """POST + cache-write helper shared by foreground misses and background
+        SWR refreshes. Registers `cache_key` in the inflight map for the POST's
+        duration so duplicate POSTs are coalesced. Bumps `stale_at` on every
+        successful write — even an unchanged payload refreshes freshness
+        (matches JS SDK)."""
+        # Re-check inflight: a concurrent caller might have raced us.
+        existing = self._remote_eval_inflight.get(cache_key)
+        if existing is not None:
+            return await existing
+
+        inflight: "asyncio.Future[Optional[Dict[str, Any]]]" = asyncio.Future()
+        self._remote_eval_inflight[cache_key] = inflight
+        try:
+            response = await self._fetch_and_decode_post_async(api_host, client_key, payload)
+        except BaseException as e:
+            # `except Exception` would miss `asyncio.CancelledError` (Python 3.8+
+            # derives it from BaseException). Without cleanup on cancellation
+            # the inflight map leaks the cache_key forever and any waiters
+            # blocked on `await existing` hang indefinitely.
+            self._remote_eval_inflight.pop(cache_key, None)
+            if not inflight.done():
+                if isinstance(e, asyncio.CancelledError):
+                    # Cancel the inflight Future instead of `set_exception(e)`.
+                    # Both propagate CancelledError to any concurrent waiters,
+                    # but a cancelled Future never triggers the
+                    # "Future exception was never retrieved" warning when
+                    # garbage-collected without an observer — `set_exception`
+                    # does, producing stderr noise on every cancellation.
+                    inflight.cancel()
+                else:
+                    inflight.set_exception(e)
+            raise
+
+        # If `flush_remote_eval_cache()` ran while we were awaiting the POST,
+        # the cache_key is no longer in `_remote_eval_inflight` — the response
+        # we just got is from BEFORE the invalidation signal, so writing it to
+        # the cache would silently re-populate stale data the proxy just told
+        # us to drop. Still resolve waiters with the response (they observed
+        # the pre-flush request and have a right to its answer), but skip the
+        # cache write so future eval calls trigger a fresh POST.
+        was_flushed = self._remote_eval_inflight.pop(cache_key, None) is None
+        if response is not None and not was_flushed:
+            stale_at = time.monotonic() + effective_stale_ttl
+            self._remote_eval_cache[cache_key] = (response, stale_at)
+            self._remote_eval_cache.move_to_end(cache_key)
+            # `len > 0` guard prevents popitem() raising KeyError when an
+            # operator misconfigures `remote_eval_cache_size` to a negative
+            # value (the while-loop would otherwise keep trying to evict
+            # past the already-empty dict).
+            while self._remote_eval_cache and len(self._remote_eval_cache) > self._remote_eval_cache_max:
+                self._remote_eval_cache.popitem(last=False)
+        if not inflight.done():
+            inflight.set_result(response)
+        return response
+
+    def flush_remote_eval_cache(self) -> None:
+        """Drop all cached remote-eval responses. Called when the proxy
+        emits a features-updated SSE event.
+
+        Also clears the inflight map so any POSTs in flight at this moment
+        know (via the `was_flushed` check in `_post_and_cache`) that their
+        result predates the proxy's invalidation signal and must NOT be
+        written back to the cache."""
+        self._remote_eval_cache.clear()
+        self._remote_eval_inflight.clear()
 
     @asynccontextmanager
     async def refresh_operation(self):
@@ -195,12 +377,26 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         try:
             event_type = event_data.get("type")
             if event_type == "features-updated":
+                # In remote-eval mode the proxy emits this event without a
+                # payload; the right response is to flush our per-user cache so
+                # subsequent evals re-POST lazily. We do NOT proactively re-POST
+                # for every cached user (could be millions in a busy service).
+                if self._remote_eval:
+                    self.flush_remote_eval_cache()
+                    return
                 response = await self.load_features_async(
                     self._api_host, self._client_key, self._decryption_key, self._cache_ttl
                 )
                 if response is not None:
                     await self._handle_feature_update(response)
             elif event_type == "features":
+                # Remote-eval mode shouldn't receive inline payloads (they
+                # wouldn't be user-filtered), but if one arrives defensively
+                # flush the per-user cache instead of caching a bogus payload.
+                if self._remote_eval:
+                    self.flush_remote_eval_cache()
+                    return
+
                 data = event_data.get("data", "{}")
                 if isinstance(data, str):
                     data = json.loads(data)
@@ -326,6 +522,16 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         except Exception:
             # Best-effort cleanup; task cancellation below will proceed.
             logger.exception("Error stopping SSE auto-refresh")
+        # Cancel any pending SWR (stale-while-revalidate) background refresh
+        # tasks before the event loop / aiohttp session closes.
+        for task in list(self._swr_tasks):
+            task.cancel()
+        if self._swr_tasks:
+            try:
+                await asyncio.gather(*self._swr_tasks, return_exceptions=True)
+            except Exception:
+                logger.exception("Error draining SWR background tasks")
+            self._swr_tasks.clear()
         if self._refresh_task:
             # Cancel the task
             self._refresh_task.cancel()
@@ -348,24 +554,53 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         await self.stop_refresh()
     
     async def load_features_async(
-        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 60
+        self,
+        api_host: str,
+        client_key: str,
+        decryption_key: str = "",
+        ttl: int = 60,
+        remote_eval: bool = False,
+        payload: Optional[Dict[str, Any]] = None,
+        cache_key_attributes: Optional[List[str]] = None,
+        force_refresh: bool = False,
     ) -> Optional[Dict]:
         # Use stored values when called internally
         if api_host == self._api_host and client_key == self._client_key:
             decryption_key = self._decryption_key
             ttl = self._cache_ttl
-        return await super().load_features_async(api_host, client_key, decryption_key, ttl)
+        return await super().load_features_async(
+            api_host, client_key, decryption_key, ttl,
+            remote_eval=remote_eval, payload=payload,
+            cache_key_attributes=cache_key_attributes,
+            force_refresh=force_refresh,
+        )
 
 class GrowthBookClient:
     def __init__(
         self,
         options: Optional[Union[Dict[str, Any], Options]] = None
-    ):  
+    ):
         self.options = (
             options if isinstance(options, Options)
             else Options(**options) if options
             else Options()
         )
+
+        if self.options.remote_eval:
+            validate_remote_eval_options(
+                self.options.client_key,
+                self.options.decryption_key,
+                self.options.sticky_bucket_service,
+                self.options.api_host,
+            )
+            if self.options.refresh_strategy == FeatureRefreshStrategy.STALE_WHILE_REVALIDATE:
+                # HTTP polling has no per-user payload to send, so it would
+                # silently no-op. Sync GrowthBook raises on the equivalent
+                # stale_while_revalidate=True; keep the two clients consistent.
+                raise ValueError(
+                    "refresh_strategy=STALE_WHILE_REVALIDATE is not compatible with remote_eval; "
+                    "use SERVER_SENT_EVENTS or pass refresh_strategy=None"
+                )
         
         # Thread-safe tracking state
         self._tracked: Dict[str, bool] = {}  # Access only within async context
@@ -393,7 +628,9 @@ class GrowthBookClient:
                 self.options.decryption_key or "",
                 self.options.cache_ttl,
                 self.options.http_connect_timeout,
-                self.options.http_read_timeout
+                self.options.http_read_timeout,
+                self.options.remote_eval_cache_size,
+                self.options.remote_eval,
             )
             if self.options.client_key
             else None
@@ -519,11 +756,33 @@ class GrowthBookClient:
             return False
 
         try:
+            if self.options.remote_eval:
+                # Remote-eval mode: do NOT fetch global features (responses are
+                # per-user, so there is no meaningful "global" payload). Skip
+                # callback registration (would cross-pollute cached per-user
+                # state). Establish a default empty global context so
+                # create_evaluation_context doesn't raise; features come from
+                # fetch_remote_eval at eval time.
+                async with self._context_lock:
+                    if self._global_context is None:
+                        self._global_context = GlobalContext(
+                            options=self.options, features={}, saved_groups={}
+                        )
+                # Only SSE is meaningful in remote-eval mode (the validation
+                # guard already rejects STALE_WHILE_REVALIDATE). None means
+                # "no background refresh; rely on cache TTL".
+                if self.options.refresh_strategy == FeatureRefreshStrategy.SERVER_SENT_EVENTS:
+                    await self._features_repository.start_feature_refresh(
+                        self.options.refresh_strategy,
+                        callback=self._feature_update_callback,
+                    )
+                return True
+
             # Initial feature load
             initial_features = await self._features_repository.load_features_async(
-                self.options.api_host or "https://cdn.growthbook.io", 
-                self.options.client_key or "", 
-                self.options.decryption_key or "", 
+                self.options.api_host or "https://cdn.growthbook.io",
+                self.options.client_key or "",
+                self.options.decryption_key or "",
                 self.options.cache_ttl
             )
             if not initial_features:
@@ -532,19 +791,43 @@ class GrowthBookClient:
 
             # Create global context with initial features
             await self._feature_update_callback(initial_features)
-            
+
             # Set up callback for future updates
             self._features_repository.add_callback(self._feature_update_callback)
-            
+
             # Start feature refresh
             refresh_strategy = self.options.refresh_strategy or FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
             await self._features_repository.start_feature_refresh(refresh_strategy)
             return True
-            
+
         except Exception as e:
             logger.error(f"Initialization failed: {str(e)}", exc_info=True)
             traceback.print_exc()
             return False
+
+    def _remote_eval_payload(self, user_context: UserContext) -> Dict[str, Any]:
+        return build_remote_eval_payload(
+            user_context.attributes,
+            user_context.forced_variations,
+            user_context.url,
+            forced_features=user_context.forced_features,
+        )
+
+    async def preload_remote_eval(self, user_context: UserContext) -> None:
+        """Warm the remote-eval cache for this user context. No-op when
+        remote_eval is disabled. After this returns, subsequent eval_feature /
+        is_on / etc. calls for the same UserContext are cache hits and make no
+        network requests."""
+        if not self.options.remote_eval or not self._features_repository:
+            return
+        await self._features_repository.fetch_remote_eval(
+            self.options.api_host or "https://cdn.growthbook.io",
+            self.options.client_key or "",
+            self._remote_eval_payload(user_context),
+            self.options.cache_key_attributes,
+            cache_ttl=self.options.cache_ttl,
+            stale_ttl=self.options.stale_ttl,
+        )
 
     async def _feature_update_callback(self, features_data: Dict[str, Any]) -> None:
         """Handle feature updates and manage global context"""
@@ -553,28 +836,16 @@ class GrowthBookClient:
             return
 
         async with self._context_lock:
-            features = {}
-
-            for key, feature in features_data.get("features", {}).items():
-                if isinstance(feature, Feature):
-                    features[key] = feature
-                else:
-                    features[key] = Feature(
-                        rules=feature.get("rules", []),
-                        defaultValue=feature.get("defaultValue", None),
-                    )
+            features = features_from_dict(features_data.get("features"))
+            saved_groups = features_data.get("savedGroups", {})
 
             if self._global_context is None:
-                # Initial creation of global context
                 self._global_context = GlobalContext(
-                        options=self.options,
-                        features=features,
-                        saved_groups=features_data.get("savedGroups", {})
+                    options=self.options, features=features, saved_groups=saved_groups
                 )
             else:
-                # Update existing global context
                 self._global_context.features = features
-                self._global_context.saved_groups = features_data.get("savedGroups", {})
+                self._global_context.saved_groups = saved_groups
 
     async def __aenter__(self):
         await self.initialize()
@@ -587,10 +858,32 @@ class GrowthBookClient:
         """Create evaluation context for feature evaluation"""
         if self._global_context is None:
             raise RuntimeError("GrowthBook client not properly initialized")
-            
+
+        if self.options.remote_eval and self._features_repository:
+            # Per-user POST + cache: features come from the proxy filtered for
+            # this UserContext, not from self._global_context.features.
+            response = await self._features_repository.fetch_remote_eval(
+                self.options.api_host or "https://cdn.growthbook.io",
+                self.options.client_key or "",
+                self._remote_eval_payload(user_context),
+                self.options.cache_key_attributes,
+                cache_ttl=self.options.cache_ttl,
+                stale_ttl=self.options.stale_ttl,
+            ) or {}
+            global_ctx = GlobalContext(
+                options=self.options,
+                features=features_from_dict(response.get("features")),
+                saved_groups=response.get("savedGroups") or {},
+            )
+            return EvaluationContext(
+                user=user_context,
+                global_ctx=global_ctx,
+                stack=StackContext(evaluated_features=set()),
+            )
+
         # Get sticky bucket assignments if needed
         sticky_assignments = await self._refresh_sticky_buckets(user_context.attributes)
-        
+
         # update user context with sticky bucket assignments
         user_context.sticky_bucket_assignment_docs = sticky_assignments
 
@@ -600,9 +893,28 @@ class GrowthBookClient:
             stack=StackContext(evaluated_features=set())
         )
 
+    @asynccontextmanager
+    async def _eval_lock(self):
+        """Lock for the duration of an evaluation.
+
+        In CDN mode this guards against `_global_context` mutations (the
+        shared features dict) during `create_evaluation_context` +
+        `core_eval_feature`.
+
+        In remote-eval mode the EvaluationContext is built fresh per-call
+        from the per-user POST response — no shared state to guard, and
+        holding the lock across the network round-trip would serialize all
+        evaluations through one POST even for unrelated users (a real
+        throughput cliff on busy services)."""
+        if self.options.remote_eval:
+            yield
+        else:
+            async with self._context_lock:
+                yield
+
     async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult:
         """Evaluate a feature with proper async context management"""
-        async with self._context_lock:
+        async with self._eval_lock():
             context = await self.create_evaluation_context(user_context)
             result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             # Call feature usage callback if provided
@@ -615,7 +927,7 @@ class GrowthBookClient:
 
     async def is_on(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is enabled with proper async context management"""
-        async with self._context_lock:
+        async with self._eval_lock():
             context = await self.create_evaluation_context(user_context)
             result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             # Call feature usage callback if provided
@@ -625,10 +937,10 @@ class GrowthBookClient:
                 except Exception:
                     logger.exception("Error in feature usage callback")
             return result.on
-    
+
     async def is_off(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is set to off with proper async context management"""
-        async with self._context_lock:
+        async with self._eval_lock():
             context = await self.create_evaluation_context(user_context)
             result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             # Call feature usage callback if provided
@@ -638,9 +950,9 @@ class GrowthBookClient:
                 except Exception:
                     logger.exception("Error in feature usage callback")
             return result.off
-    
+
     async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext) -> Any:
-        async with self._context_lock:
+        async with self._eval_lock():
             context = await self.create_evaluation_context(user_context)
             result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
             # Call feature usage callback if provided
@@ -653,7 +965,7 @@ class GrowthBookClient:
 
     async def run(self, experiment: Experiment, user_context: UserContext) -> Result:
         """Run experiment with tracking"""
-        async with self._context_lock:
+        async with self._eval_lock():
             context = await self.create_evaluation_context(user_context)
             result = run_experiment(
                 experiment=experiment, 

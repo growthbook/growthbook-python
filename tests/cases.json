@@ -632,6 +632,30 @@
       true
     ],
     [
+      "$ne string vs missing attribute",
+      { "country": { "$ne": "de" } },
+      {},
+      true
+    ],
+    [
+      "$ne string vs explicit None attribute",
+      { "country": { "$ne": "de" } },
+      { "country": null },
+      true
+    ],
+    [
+      "$notRegex vs missing attribute",
+      { "name": { "$notRegex": "abc" } },
+      {},
+      true
+    ],
+    [
+      "$notRegexi vs missing attribute",
+      { "name": { "$notRegexi": "ABC" } },
+      {},
+      true
+    ],
+    [
       "comparing numbers and strings",
       {
         "n": {

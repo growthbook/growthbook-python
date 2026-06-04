@@ -134,7 +134,12 @@ def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups)
         try:
             return compare(attributeValue, conditionValue) != 0
         except Exception:
-            return False
+            # Incomparable values (e.g. missing attribute → None vs a string —
+            # compare() raises TypeError on the None > str comparison) are by
+            # definition NOT equal. Matches Mongo/JS/Go/Rust SDKs: $ne on a
+            # missing attribute returns True. The False default that's correct
+            # for $eq is inverted for $ne.
+            return True
     elif operator == "$lt":
         try:
             return compare(attributeValue, conditionValue) < 0
@@ -196,13 +201,16 @@ def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups)
             r = re.compile(conditionValue)
             return not bool(r.search(attributeValue))
         except Exception:
-            return False
+            # Same inverted-default trap as $ne: a missing attribute means
+            # re.search(None) raises, but the semantic answer for $notRegex
+            # is "the missing value doesn't match the regex" → True.
+            return True
     elif operator == "$notRegexi":
         try:
             r = re.compile(conditionValue, re.IGNORECASE)
             return not bool(r.search(attributeValue))
         except Exception:
-            return False
+            return True
     elif operator == "$in":
         if not isinstance(conditionValue, list):
             return False
@@ -480,6 +488,52 @@ def getBucketRanges(
 
     return ranges
 
+def _fire_rule_tracks(
+    rule_tracks: List[Dict[str, Any]],
+    eval_context: EvaluationContext,
+    tracking_cb: Optional[Callable[[Experiment, Result, UserContext], None]],
+) -> None:
+    """Fire tracking_cb for each deferred experiment-tracking entry attached to
+    a remote-eval force rule. The proxy server evaluates experiments server-side
+    and emits the resulting (experiment, result) pairs here so the SDK can still
+    drive its tracking pipeline. Mirrors the JS SDK behavior in
+    packages/sdk-js/src/core.ts (`if (rule.tracks) ...`)."""
+    if not rule_tracks or not tracking_cb:
+        return
+    for entry in rule_tracks:
+        exp_data = entry.get("experiment") or {}
+        res_data = entry.get("result") or {}
+        # Experiment requires at minimum a key and variations list.
+        if "key" not in exp_data or "variations" not in exp_data:
+            logger.debug("Skipping rule.tracks entry: missing experiment key/variations")
+            continue
+        # The proxy emits Result in the JS shape: key/name/passthrough flat at
+        # the top level. Python's Result takes those via a nested `meta` dict.
+        # Re-pack if no explicit `meta` was provided.
+        meta = res_data.get("meta")
+        if meta is None:
+            flat = {k: res_data[k] for k in ("key", "name", "passthrough") if k in res_data}
+            meta = flat or None
+        try:
+            # Experiment accepts **_ignored, so passing the raw proxy dict is safe.
+            experiment = Experiment(**exp_data)
+            result = Result(
+                variationId=res_data.get("variationId", 0),
+                inExperiment=res_data.get("inExperiment", False),
+                value=res_data.get("value"),
+                hashUsed=res_data.get("hashUsed", False),
+                hashAttribute=res_data.get("hashAttribute", "id"),
+                hashValue=res_data.get("hashValue", ""),
+                featureId=res_data.get("featureId"),
+                meta=meta,  # type: ignore[arg-type]
+                bucket=res_data.get("bucket"),
+                stickyBucketUsed=res_data.get("stickyBucketUsed", False),
+            )
+            tracking_cb(experiment, result, eval_context.user)
+        except Exception:
+            logger.exception("Failed to fire rule.tracks tracking event")
+
+
 def eval_feature(
     key: str,
     evalContext: Optional[EvaluationContext] = None,
@@ -550,6 +604,11 @@ def eval_feature(
                 continue
 
             logger.debug("Force value from rule, feature %s", key)
+            # Fire deferred experiment tracking events attached by the
+            # remote-eval proxy (no-op when the rule was not produced by remote
+            # evaluation).
+            if rule.tracks:
+                _fire_rule_tracks(rule.tracks, evalContext, tracking_cb)
             return FeatureResult(rule.force, "force", ruleId=rule.id)
 
         if rule.variations is None:

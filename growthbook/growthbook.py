@@ -14,16 +14,21 @@ import warnings
 from abc import ABC, abstractmethod
 from typing import Optional, Any, Set, Tuple, List, Dict, Callable
 
-from .common_types import ( EvaluationContext, 
-    Experiment, 
-    FeatureResult, 
+from .common_types import (
+    EvaluationContext,
+    Experiment,
+    FeatureResult,
     Feature,
-    GlobalContext, 
-    Options, 
-    Result, StackContext, 
-    UserContext, 
+    GlobalContext,
+    Options,
+    Result,
+    StackContext,
+    UserContext,
     AbstractStickyBucketService,
-    FeatureRule
+    FeatureRule,
+    build_remote_eval_payload,
+    features_from_dict,
+    validate_remote_eval_options,
 )
 
 # Only require typing_extensions if using Python 3.7 or earlier
@@ -240,17 +245,34 @@ class SSEClient:
                 if decoded_line.startswith("event:"):
                     event_data['type'] = decoded_line[len("event:"):].strip()
                 elif decoded_line.startswith("data:"):
-                    event_data['data'] = event_data.get('data', '') + f"\n{decoded_line[len('data:'):].strip()}"
+                    # Per W3C EventSource spec, multiple `data:` lines in a
+                    # single event are joined with `\n` BETWEEN them, not
+                    # prepended to each one. The old logic produced
+                    # "\n<line1>\n<line2>" (leading newline), which json.loads
+                    # tolerates by luck but breaks for empty-data events
+                    # ("\n" alone) and any non-JSON consumer.
+                    line_data = decoded_line[len("data:"):].strip()
+                    if "data" in event_data:
+                        event_data["data"] += "\n" + line_data
+                    else:
+                        event_data["data"] = line_data
                 elif not decoded_line:
-                    if 'type' in event_data and 'data' in event_data:
+                    # End-of-event marker. Per the W3C EventSource spec, an
+                    # event with only a `type` (no `data:` line) is still a
+                    # valid event — the proxy emits parameter-less
+                    # `features-updated` events this way in remote-eval mode as
+                    # a cache-invalidation signal. Gating dispatch on
+                    # `'data' in event_data` would silently drop them.
+                    if 'type' in event_data:
                         try:
                             self.on_event(event_data)
                         except Exception as e:
                             logger.warning(f"Error in event handler: {e}")
                     event_data = {}
-            
-            # Process any remaining event data
-            if 'type' in event_data and 'data' in event_data:
+
+            # Process any remaining event data (stream closed without a
+            # trailing blank line).
+            if 'type' in event_data:
                 try:
                     self.on_event(event_data)
                 except Exception as e:
@@ -378,38 +400,73 @@ class FeatureRepository(object):
 
     # Loads features with an in-memory cache in front using stale-while-revalidate approach
     def load_features(
-        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 600
+        self,
+        api_host: str,
+        client_key: str,
+        decryption_key: str = "",
+        ttl: int = 600,
+        remote_eval: bool = False,
+        payload: Optional[Dict[str, Any]] = None,
+        cache_key_attributes: Optional[List[str]] = None,
+        force_refresh: bool = False,
     ) -> Optional[Dict]:
         if not client_key:
             raise ValueError("Must specify `client_key` to refresh features")
-        
-        key = api_host + "::" + client_key
 
-        cached = self.cache.get(key)
+        key = self._compute_cache_key(api_host, client_key, remote_eval, payload, cache_key_attributes)
+
+        # `force_refresh=True` bypasses the cache lookup so SSE invalidation
+        # signals (proxy `features-updated`) actually trigger a refetch
+        # instead of returning the stale entry.
+        cached = None if force_refresh else self.cache.get(key)
         if not cached:
-            res = self._fetch_features(api_host, client_key, decryption_key)
+            if remote_eval:
+                if payload is None:
+                    logger.error("Payload is required for remote-eval POST request")
+                    return None
+                # Remote-eval responses are not encrypted (server is trusted).
+                res = self._fetch_and_decode_post(api_host, client_key, payload)
+            else:
+                res = self._fetch_features(api_host, client_key, decryption_key)
             if res is not None:
                 self.cache.set(key, res, ttl)
                 logger.debug("Fetched features from API, stored in cache")
-                # Notify callbacks about fresh features
-                self._notify_feature_update_callbacks(res)
+                # Skip global callbacks in remote-eval mode: responses are
+                # per-instance/per-user, so broadcasting would cross-pollute
+                # other GrowthBook instances sharing this singleton repo.
+                if not remote_eval:
+                    self._notify_feature_update_callbacks(res)
                 return res
         return cached
-    
-    
-    async def load_features_async(
-        self, api_host: str, client_key: str, decryption_key: str = "", ttl: int = 600
-    ) -> Optional[Dict]:
-        key = api_host + "::" + client_key
 
-        cached = self.cache.get(key)
+
+    async def load_features_async(
+        self,
+        api_host: str,
+        client_key: str,
+        decryption_key: str = "",
+        ttl: int = 600,
+        remote_eval: bool = False,
+        payload: Optional[Dict[str, Any]] = None,
+        cache_key_attributes: Optional[List[str]] = None,
+        force_refresh: bool = False,
+    ) -> Optional[Dict]:
+        key = self._compute_cache_key(api_host, client_key, remote_eval, payload, cache_key_attributes)
+
+        cached = None if force_refresh else self.cache.get(key)
         if not cached:
-            res = await self._fetch_features_async(api_host, client_key, decryption_key)
+            if remote_eval:
+                if payload is None:
+                    logger.error("Payload is required for remote-eval POST request")
+                    return None
+                res = await self._fetch_and_decode_post_async(api_host, client_key, payload)
+            else:
+                res = await self._fetch_features_async(api_host, client_key, decryption_key)
             if res is not None:
                 self.cache.set(key, res, ttl)
                 logger.debug("Fetched features from API, stored in cache")
-                # Notify callbacks about fresh features
-                self._notify_feature_update_callbacks(res)
+                if not remote_eval:
+                    self._notify_feature_update_callbacks(res)
                 return res
         return cached
     
@@ -439,6 +496,58 @@ class FeatureRepository(object):
         headers['User-Agent'] = ua
             
         return headers
+
+    # Perform the POST request (separate method for easy mocking)
+    def _post(self, url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None):
+        timeout = None
+        if self.http_connect_timeout and self.http_read_timeout:
+            timeout = Timeout(connect=self.http_connect_timeout, read=self.http_read_timeout)
+        self.http = self.http or PoolManager(timeout=timeout)
+        body = json.dumps(payload).encode("utf-8")
+        return self.http.request("POST", url, body=body, headers=headers or {})
+
+    def _fetch_and_decode_post(
+        self, api_host: str, client_key: str, payload: Dict[str, Any]
+    ) -> Optional[Dict]:
+        url = self._get_remote_eval_url(api_host, client_key)
+        headers = self._get_headers(client_key)
+        headers["Content-Type"] = "application/json"
+        logger.debug(f"Remote-eval POST to {url}")
+        try:
+            r = self._post(url, payload, headers)
+            if r.status >= 400:
+                logger.warning(
+                    "Failed to fetch features (remote eval), received status code %d", r.status
+                )
+                return None
+            return json.loads(r.data.decode("utf-8"))  # type: ignore[no-any-return]
+        except Exception as e:
+            logger.warning(f"Failed to decode remote-eval response: {e}")
+            return None
+
+    async def _fetch_and_decode_post_async(
+        self, api_host: str, client_key: str, payload: Dict[str, Any]
+    ) -> Optional[Dict]:
+        url = self._get_remote_eval_url(api_host, client_key)
+        headers = self._get_headers(client_key)
+        headers["Content-Type"] = "application/json"
+        logger.debug(f"[Async] Remote-eval POST to {url}")
+        try:
+            async with aiohttp.ClientSession() as session:
+                async with session.post(url, json=payload, headers=headers) as response:
+                    if response.status >= 400:
+                        logger.warning(
+                            "Failed to fetch features (remote eval), received status code %d",
+                            response.status,
+                        )
+                        return None
+                    return await response.json()  # type: ignore[no-any-return]
+        except aiohttp.ClientError as e:
+            logger.warning(f"HTTP request failed (remote eval): {e}")
+            return None
+        except Exception as e:
+            logger.warning(f"Failed to decode remote-eval response: {e}")
+            return None
 
     def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
@@ -605,7 +714,7 @@ class FeatureRepository(object):
         data = self.decrypt_response(decoded, decryption_key)
 
         return data  # type: ignore[no-any-return]
-        
+
     async def _fetch_features_async(
         self, api_host: str, client_key: str, decryption_key: str = ""
     ) -> Optional[Dict]:
@@ -685,6 +794,36 @@ class FeatureRepository(object):
         api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
         return api_host + "/api/features/" + client_key
 
+    @staticmethod
+    def _get_remote_eval_url(api_host: str, client_key: str) -> str:
+        api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
+        return api_host + "/api/eval/" + client_key
+
+    @staticmethod
+    def _compute_cache_key(
+        api_host: str,
+        client_key: str,
+        remote_eval: bool = False,
+        payload: Optional[Dict[str, Any]] = None,
+        cache_key_attributes: Optional[List[str]] = None,
+    ) -> str:
+        base = (api_host or "") + "::" + (client_key or "")
+        if not remote_eval or not payload:
+            return base
+        attrs = payload.get("attributes") or {}
+        if cache_key_attributes is not None:
+            attrs = {k: attrs[k] for k in cache_key_attributes if k in attrs}
+        # forcedFeatures is intentionally excluded from the cache key.
+        # Matches the JS SDK: the proxy does not filter on forced features, so
+        # responses are identical across forced-feature values. See
+        # https://github.com/growthbook/growthbook/blob/main/packages/sdk-js/src/feature-repository.ts (getCacheKey)
+        sub = {
+            "ca": attrs,
+            "fv": payload.get("forcedVariations") or {},
+            "url": payload.get("url") or "",
+        }
+        return base + "||" + json.dumps(sub, sort_keys=True)
+
 
 # Singleton instance
 feature_repo = FeatureRepository()
@@ -704,6 +843,7 @@ class GrowthBook(object):
         decryption_key: str = "",
         cache_ttl: int = 600,
         forced_variations: Optional[Dict[str, Any]] = None,
+        forced_features: Optional[Dict[str, Any]] = None,
         sticky_bucket_service: Optional[AbstractStickyBucketService] = None,
         sticky_bucket_identifier_attributes: Optional[List[str]] = None,
         savedGroups: Optional[Dict[str, Any]] = None,
@@ -722,7 +862,19 @@ class GrowthBook(object):
         forcedVariations: dict = {},
         http_connect_timeout: Optional[int] = None,
         http_read_timeout: Optional[int] = None,
+        remoteEval: bool = False,
+        cacheKeyAttributes: Optional[List[str]] = None,
     ):
+        self._remoteEval = remoteEval
+        self._cacheKeyAttributes = cacheKeyAttributes
+
+        if remoteEval:
+            validate_remote_eval_options(
+                client_key, decryption_key, sticky_bucket_service, api_host
+            )
+            if stale_while_revalidate:
+                raise ValueError("stale_while_revalidate is not compatible with remote_eval")
+
         self._enabled = enabled
         self._attributes = attributes
         self._url = url
@@ -753,6 +905,7 @@ class GrowthBook(object):
         self._groups = groups
         self._overrides = overrides
         self._forcedVariations = (forced_variations if forced_variations is not None else forcedVariations) if forced_variations is not None or forcedVariations else {}
+        self._forcedFeatures: Dict[str, Any] = forced_features or {}
 
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
@@ -785,6 +938,7 @@ class GrowthBook(object):
             attributes=self._attributes,
             groups=self._groups,
             forced_variations=self._forcedVariations,
+            forced_features=self._forcedFeatures,
             overrides=self._overrides,
             sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs,
             skip_all_experiments=self._skip_all_experiments
@@ -793,8 +947,11 @@ class GrowthBook(object):
         if features:
             self.set_features(features)
 
-        # Register for automatic feature updates when cache expires
-        if self._client_key:
+        # Register for automatic feature updates when cache expires.
+        # Skip in remote-eval mode: responses are per-instance, so the global
+        # callback would cross-pollute other GrowthBook instances sharing the
+        # singleton FeatureRepository.
+        if self._client_key and not self._remoteEval:
             feature_repo.add_feature_update_callback(self._on_feature_update)
 
         self._initialize_plugins()
@@ -806,13 +963,23 @@ class GrowthBook(object):
             # Start background refresh task for stale-while-revalidate
             self.load_features()  # Initial load
             feature_repo.start_background_refresh(
-                self._api_host, self._client_key, self._decryption_key, 
+                self._api_host, self._client_key, self._decryption_key,
                 self._cache_ttl, self._stale_ttl
             )
+        elif self._remoteEval:
+            # Initial POST to /api/eval/{client_key} so features are populated
+            # before the first eval. Matches the JS SDK init() behavior.
+            self.load_features()
 
         if http_connect_timeout and http_read_timeout:
             feature_repo.http_connect_timeout = http_connect_timeout
             feature_repo.http_read_timeout = http_read_timeout
+
+    def _remote_eval_payload(self) -> Dict[str, Any]:
+        return build_remote_eval_payload(
+            self._attributes, self._forcedVariations, self._url,
+            forced_features=self._forcedFeatures,
+        )
 
     def _on_feature_update(self, features_data: Dict) -> None:
         """Callback to handle automatic feature updates from FeatureRepository"""
@@ -821,9 +988,24 @@ class GrowthBook(object):
         if features_data and "savedGroups" in features_data:
             self._saved_groups = features_data["savedGroups"]
 
-    def load_features(self) -> None:
+    def load_features(self, force_refresh: bool = False) -> None:
+        """Load features from the configured endpoint, populating the cache.
+
+        `force_refresh=True` bypasses the in-memory cache to honor a fresh
+        signal from the proxy (e.g., an SSE `features-updated` event).
+        Without it, an immediate `load_features()` after such a signal
+        would just return the stale cached payload — defeating the
+        invalidation."""
+        payload = self._remote_eval_payload() if self._remoteEval else None
         response = feature_repo.load_features(
-            self._api_host, self._client_key, self._decryption_key, self._cache_ttl
+            self._api_host,
+            self._client_key,
+            self._decryption_key,
+            self._cache_ttl,
+            remote_eval=self._remoteEval,
+            payload=payload,
+            cache_key_attributes=self._cacheKeyAttributes,
+            force_refresh=force_refresh,
         )
         if response is not None and "features" in response.keys():
             self.set_features(response["features"])
@@ -831,12 +1013,20 @@ class GrowthBook(object):
         if response is not None and "savedGroups" in response:
             self._saved_groups = response["savedGroups"]
 
-    async def load_features_async(self) -> None:
+    async def load_features_async(self, force_refresh: bool = False) -> None:
         if not self._client_key:
             raise ValueError("Must specify `client_key` to refresh features")
 
+        payload = self._remote_eval_payload() if self._remoteEval else None
         features = await feature_repo.load_features_async(
-            self._api_host, self._client_key, self._decryption_key, self._cache_ttl
+            self._api_host,
+            self._client_key,
+            self._decryption_key,
+            self._cache_ttl,
+            remote_eval=self._remoteEval,
+            payload=payload,
+            cache_key_attributes=self._cacheKeyAttributes,
+            force_refresh=force_refresh,
         )
 
         if features is not None:
@@ -861,12 +1051,23 @@ class GrowthBook(object):
             feature_repo.save_in_cache(key, data, self._cache_ttl)
 
     def _dispatch_sse_event(self, event_data):
-        event_type = event_data['type']
-        data = event_data['data']
+        event_type = event_data.get('type')
         if event_type == 'features-updated':
-            self.load_features()
+            # In remote-eval mode the proxy emits this event with no inline
+            # payload (the payload would be per-user). load_features() handles
+            # both modes. force_refresh=True is essential — without it the
+            # cache hit would return the stale payload and the invalidation
+            # signal would be silently dropped.
+            self.load_features(force_refresh=True)
         elif event_type == 'features':
-            self._features_event_handler(data)
+            if self._remoteEval:
+                # Defensive: proxy shouldn't send inline payloads to remote-eval
+                # clients, but if one arrives, ignore it (not user-filtered) and
+                # refetch via the remote-eval path. force_refresh for the same
+                # reason as above.
+                self.load_features(force_refresh=True)
+            else:
+                self._features_event_handler(event_data.get('data', '{}'))
 
 
     def startAutoRefresh(self):
@@ -928,6 +1129,35 @@ class GrowthBook(object):
     def set_attributes(self, attributes: dict) -> None:
         self._attributes = attributes
         self.refresh_sticky_buckets()
+        if self._remoteEval and self._client_key:
+            # Blocking refetch — matches JS SDK semantics. Known cost of remote
+            # eval: every set_attributes call hits the network.
+            self.load_features()
+
+    def set_forced_variations(self, forced_variations: Dict[str, Any]) -> None:
+        self._forcedVariations = forced_variations or {}
+        if self._user_ctx is not None:
+            self._user_ctx.forced_variations = self._forcedVariations
+        if self._remoteEval and self._client_key:
+            self.load_features()
+
+    def set_forced_features(self, forced_features: Dict[str, Any]) -> None:
+        """Set forced feature values. The proxy server uses them to filter the
+        response in remote-eval mode; local evaluation does NOT consult them
+        today (matches the JS SDK behavior). Triggers a refetch when
+        remote_eval is enabled."""
+        self._forcedFeatures = forced_features or {}
+        if self._user_ctx is not None:
+            self._user_ctx.forced_features = self._forcedFeatures
+        if self._remoteEval and self._client_key:
+            self.load_features()
+
+    def set_url(self, url: str) -> None:
+        self._url = url or ""
+        if self._user_ctx is not None:
+            self._user_ctx.url = self._url
+        if self._remoteEval and self._client_key:
+            self.load_features()
 
     def getAttributes(self) -> dict:
         warnings.warn("getAttributes is deprecated, use get_attributes instead", DeprecationWarning)
@@ -961,8 +1191,8 @@ class GrowthBook(object):
             logger.warning(f"Error stopping background refresh during destroy: {e}")
         
         try:
-            # Clean up feature update callback
-            if self._client_key:
+            # Clean up feature update callback (not registered in remote-eval mode)
+            if self._client_key and not self._remoteEval:
                 feature_repo.remove_feature_update_callback(self._on_feature_update)
         except Exception as e:
             logger.warning(f"Error removing feature update callback: {e}")
@@ -1008,11 +1238,11 @@ class GrowthBook(object):
                 "Add GrowthBookTrackingPlugin to enable event logging."
             )
             return
-        # set_attributes() replaces self._attributes but does not write back to
-        # _user_ctx; _get_eval_context() does that lazily before every eval.
-        # Mirror the same sync here so log_event always sees current attributes.
-        self._user_ctx.attributes = self._attributes
-        self._user_ctx.url = self._url
+        # Same sync the eval path does — otherwise the event_logger callback
+        # receives a UserContext with stale forced_variations / forced_features /
+        # overrides (this used to be a separate two-field manual sync that
+        # missed those — see _sync_user_ctx_from_instance for the rationale).
+        self._sync_user_ctx_from_instance()
         try:
             self._event_logger(event_name, properties or {}, self._user_ctx)
         except Exception as e:
@@ -1059,15 +1289,32 @@ class GrowthBook(object):
         except Exception as e:
             logger.warning(f"Failed to refresh features: {e}")
 
-    def _get_eval_context(self) -> EvaluationContext:
-        # Lazy refresh: ensure features are fresh before evaluation
-        self._ensure_fresh_features()
-        
-        # use the latest attributes for every evaluation.
+    def _sync_user_ctx_from_instance(self) -> None:
+        """Single source of truth for instance state → `_user_ctx` propagation.
+
+        Every code path that hands `_user_ctx` to a caller-facing callback
+        (`_get_eval_context`, `log_event`, anywhere else in the future) MUST
+        call this first. Otherwise direct mutations like
+        `gb._attributes["foo"] = "bar"` — or even a missed setter sync — leave
+        the user_context the callback sees in a stale, inconsistent state.
+
+        """
         self._user_ctx.attributes = self._attributes
         self._user_ctx.url = self._url
         self._user_ctx.overrides = self._overrides
-        # set the url for every evaluation. (unlikely to change)
+        self._user_ctx.forced_variations = self._forcedVariations
+        self._user_ctx.forced_features = self._forcedFeatures
+        # NOTE: sticky_bucket_assignment_docs has its own refresh flow via
+        # refresh_sticky_buckets(); intentionally NOT mirrored here. `groups`
+        # and `skip_all_experiments` have no setters today so they don't drift.
+
+    def _get_eval_context(self) -> EvaluationContext:
+        # Lazy refresh: ensure features are fresh before evaluation
+        self._ensure_fresh_features()
+
+        # Centralized sync (see _sync_user_ctx_from_instance for rationale).
+        self._sync_user_ctx_from_instance()
+        # global_ctx.options.url is not part of _user_ctx; still needs updating.
         self._global_ctx.options.url = self._url
         return EvaluationContext(
             global_ctx = self._global_ctx,
