@@ -1271,12 +1271,6 @@ class GrowthBook(object):
         `gb._attributes["foo"] = "bar"` — or even a missed setter sync — leave
         the user_context the callback sees in a stale, inconsistent state.
 
-        Historically the SDK had three different subsets of fields synced at
-        three different sites (`_get_eval_context`, `log_event`, individual
-        setters), which is exactly how `forced_variations` and `forced_features`
-        both silently drifted from their instance-level counterparts. Adding a
-        new field to `UserContext` should require ONE line here, not a hunt
-        through every site that reads `_user_ctx`.
         """
         self._user_ctx.attributes = self._attributes
         self._user_ctx.url = self._url

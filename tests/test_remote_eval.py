@@ -182,11 +182,7 @@ class TestRemoteEvalSyncRefetch:
         """Every field that has an instance-level counterpart must flow into
         _user_ctx at construction, via the setter, AND as a safety-net resync
         at eval time — so callbacks (on_feature_usage, on_experiment_viewed,
-        event_logger) always see the instance's current state.
-
-        Historically forced_variations and forced_features both silently
-        drifted from _user_ctx; centralizing the sync in
-        _sync_user_ctx_from_instance() prevents this whole class of bug."""
+        event_logger) always see the instance's current state."""
         body = DEFAULT_BODY
         seen: list = []
 
