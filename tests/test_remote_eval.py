@@ -178,41 +178,62 @@ class TestRemoteEvalSyncRefetch:
             gb.set_forced_variations({"exp-1": 1})
             assert mock_post.call_count == 2
 
-    def test_forced_features_synced_into_user_ctx_at_all_paths(self):
-        """forced_features must flow into _user_ctx the same way
-        forced_variations does — at construction, via the setter, and as a
-        safety-net resync at eval time. Otherwise callbacks (on_feature_usage,
-        on_experiment_viewed) receive a UserContext with stale forced_features."""
+    def test_user_ctx_synced_from_instance_at_eval_time(self):
+        """Every field that has an instance-level counterpart must flow into
+        _user_ctx at construction, via the setter, AND as a safety-net resync
+        at eval time — so callbacks (on_feature_usage, on_experiment_viewed,
+        event_logger) always see the instance's current state.
+
+        Historically forced_variations and forced_features both silently
+        drifted from _user_ctx; centralizing the sync in
+        _sync_user_ctx_from_instance() prevents this whole class of bug."""
         body = DEFAULT_BODY
-        seen_user_ctxs: list = []
+        seen: list = []
 
         def feature_usage_cb(key, result, user_context):
-            seen_user_ctxs.append(dict(user_context.forced_features))
+            seen.append({
+                "forced_features": dict(user_context.forced_features),
+                "forced_variations": dict(user_context.forced_variations),
+                "attributes": dict(user_context.attributes),
+                "url": user_context.url,
+            })
 
         with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)):
-            # 1) Constructor wiring → _user_ctx.forced_features is populated
+            # 1) Constructor wiring — every relevant field on _user_ctx is populated.
             gb = GrowthBook(
                 api_host="https://proxy.example.com",
                 client_key="sdk-test",
                 attributes={"id": "u1"},
                 forced_features={"a": 1},
+                forced_variations={"exp-1": 0},
+                url="/start",
                 on_feature_usage=feature_usage_cb,
                 remoteEval=True,
             )
             assert gb._user_ctx.forced_features == {"a": 1}
+            assert gb._user_ctx.forced_variations == {"exp-1": 0}
+            assert gb._user_ctx.url == "/start"
 
-            # 2) Setter syncs to _user_ctx
+            # 2) Setters keep _user_ctx in sync.
             gb.set_forced_features({"b": 2})
             assert gb._user_ctx.forced_features == {"b": 2}
+            gb.set_forced_variations({"exp-1": 1})
+            assert gb._user_ctx.forced_variations == {"exp-1": 1}
 
-            # 3) Eval-time safety net: even a direct mutation bypassing the
-            #    setter gets surfaced into the user_context the callback sees.
+            # 3) Eval-time safety net: direct mutations bypassing the setters
+            #    still get surfaced through the centralized sync helper.
             gb._forcedFeatures = {"c": 3}
+            gb._forcedVariations = {"exp-1": 2}
+            gb._attributes = {"id": "u9"}
+            gb._url = "/checkout"
             gb.eval_feature("flag1")
-            assert seen_user_ctxs[-1] == {"c": 3}, (
-                "_get_eval_context should resync forced_features so callbacks "
-                "see the instance's current state, not a stale snapshot"
-            )
+
+            assert seen[-1] == {
+                "forced_features": {"c": 3},
+                "forced_variations": {"exp-1": 2},
+                "attributes": {"id": "u9"},
+                "url": "/checkout",
+            }, "_sync_user_ctx_from_instance() must propagate ALL fields to callbacks"
 
     def test_forced_features_wire_format_and_cache_key_exclusion(self):
         """forced_features ships as [[k, v], ...] in the POST body but is

@@ -1211,11 +1211,11 @@ class GrowthBook(object):
                 "Add GrowthBookTrackingPlugin to enable event logging."
             )
             return
-        # set_attributes() replaces self._attributes but does not write back to
-        # _user_ctx; _get_eval_context() does that lazily before every eval.
-        # Mirror the same sync here so log_event always sees current attributes.
-        self._user_ctx.attributes = self._attributes
-        self._user_ctx.url = self._url
+        # Same sync the eval path does — otherwise the event_logger callback
+        # receives a UserContext with stale forced_variations / forced_features /
+        # overrides (this used to be a separate two-field manual sync that
+        # missed those — see _sync_user_ctx_from_instance for the rationale).
+        self._sync_user_ctx_from_instance()
         try:
             self._event_logger(event_name, properties or {}, self._user_ctx)
         except Exception as e:
@@ -1262,19 +1262,38 @@ class GrowthBook(object):
         except Exception as e:
             logger.warning(f"Failed to refresh features: {e}")
 
-    def _get_eval_context(self) -> EvaluationContext:
-        # Lazy refresh: ensure features are fresh before evaluation
-        self._ensure_fresh_features()
-        
-        # use the latest attributes for every evaluation.
+    def _sync_user_ctx_from_instance(self) -> None:
+        """Single source of truth for instance state → `_user_ctx` propagation.
+
+        Every code path that hands `_user_ctx` to a caller-facing callback
+        (`_get_eval_context`, `log_event`, anywhere else in the future) MUST
+        call this first. Otherwise direct mutations like
+        `gb._attributes["foo"] = "bar"` — or even a missed setter sync — leave
+        the user_context the callback sees in a stale, inconsistent state.
+
+        Historically the SDK had three different subsets of fields synced at
+        three different sites (`_get_eval_context`, `log_event`, individual
+        setters), which is exactly how `forced_variations` and `forced_features`
+        both silently drifted from their instance-level counterparts. Adding a
+        new field to `UserContext` should require ONE line here, not a hunt
+        through every site that reads `_user_ctx`.
+        """
         self._user_ctx.attributes = self._attributes
         self._user_ctx.url = self._url
         self._user_ctx.overrides = self._overrides
-        # Sync forced_features as a safety net for direct field mutations
-        # bypassing the setter — keeps callbacks like _featureUsageCallback
-        # consistent with the instance's current state.
+        self._user_ctx.forced_variations = self._forcedVariations
         self._user_ctx.forced_features = self._forcedFeatures
-        # set the url for every evaluation. (unlikely to change)
+        # NOTE: sticky_bucket_assignment_docs has its own refresh flow via
+        # refresh_sticky_buckets(); intentionally NOT mirrored here. `groups`
+        # and `skip_all_experiments` have no setters today so they don't drift.
+
+    def _get_eval_context(self) -> EvaluationContext:
+        # Lazy refresh: ensure features are fresh before evaluation
+        self._ensure_fresh_features()
+
+        # Centralized sync (see _sync_user_ctx_from_instance for rationale).
+        self._sync_user_ctx_from_instance()
+        # global_ctx.options.url is not part of _user_ctx; still needs updating.
         self._global_ctx.options.url = self._url
         return EvaluationContext(
             global_ctx = self._global_ctx,
