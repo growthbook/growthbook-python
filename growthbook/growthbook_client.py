@@ -265,12 +265,23 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                 inflight.set_exception(e)
             raise
 
-        self._remote_eval_inflight.pop(cache_key, None)
-        if response is not None:
+        # If `flush_remote_eval_cache()` ran while we were awaiting the POST,
+        # the cache_key is no longer in `_remote_eval_inflight` — the response
+        # we just got is from BEFORE the invalidation signal, so writing it to
+        # the cache would silently re-populate stale data the proxy just told
+        # us to drop. Still resolve waiters with the response (they observed
+        # the pre-flush request and have a right to its answer), but skip the
+        # cache write so future eval calls trigger a fresh POST.
+        was_flushed = self._remote_eval_inflight.pop(cache_key, None) is None
+        if response is not None and not was_flushed:
             stale_at = time.monotonic() + effective_stale_ttl
             self._remote_eval_cache[cache_key] = (response, stale_at)
             self._remote_eval_cache.move_to_end(cache_key)
-            while len(self._remote_eval_cache) > self._remote_eval_cache_max:
+            # `len > 0` guard prevents popitem() raising KeyError when an
+            # operator misconfigures `remote_eval_cache_size` to a negative
+            # value (the while-loop would otherwise keep trying to evict
+            # past the already-empty dict).
+            while self._remote_eval_cache and len(self._remote_eval_cache) > self._remote_eval_cache_max:
                 self._remote_eval_cache.popitem(last=False)
         if not inflight.done():
             inflight.set_result(response)
@@ -278,9 +289,14 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
 
     def flush_remote_eval_cache(self) -> None:
         """Drop all cached remote-eval responses. Called when the proxy
-        emits a features-updated SSE event. Sync — clearing a dict needs
-        no await."""
+        emits a features-updated SSE event.
+
+        Also clears the inflight map so any POSTs in flight at this moment
+        know (via the `was_flushed` check in `_post_and_cache`) that their
+        result predates the proxy's invalidation signal and must NOT be
+        written back to the cache."""
         self._remote_eval_cache.clear()
+        self._remote_eval_inflight.clear()
 
     @asynccontextmanager
     async def refresh_operation(self):
