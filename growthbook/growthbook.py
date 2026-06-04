@@ -923,6 +923,7 @@ class GrowthBook(object):
             attributes=self._attributes,
             groups=self._groups,
             forced_variations=self._forcedVariations,
+            forced_features=self._forcedFeatures,
             overrides=self._overrides,
             sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs,
             skip_all_experiments=self._skip_all_experiments
@@ -1119,6 +1120,8 @@ class GrowthBook(object):
         today (matches the JS SDK behavior). Triggers a refetch when
         remote_eval is enabled."""
         self._forcedFeatures = forced_features or {}
+        if self._user_ctx is not None:
+            self._user_ctx.forced_features = self._forcedFeatures
         if self._remoteEval and self._client_key:
             self.load_features()
 
@@ -1267,6 +1270,10 @@ class GrowthBook(object):
         self._user_ctx.attributes = self._attributes
         self._user_ctx.url = self._url
         self._user_ctx.overrides = self._overrides
+        # Sync forced_features as a safety net for direct field mutations
+        # bypassing the setter — keeps callbacks like _featureUsageCallback
+        # consistent with the instance's current state.
+        self._user_ctx.forced_features = self._forcedFeatures
         # set the url for every evaluation. (unlikely to change)
         self._global_ctx.options.url = self._url
         return EvaluationContext(
