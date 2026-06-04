@@ -537,6 +537,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         remote_eval: bool = False,
         payload: Optional[Dict[str, Any]] = None,
         cache_key_attributes: Optional[List[str]] = None,
+        force_refresh: bool = False,
     ) -> Optional[Dict]:
         # Use stored values when called internally
         if api_host == self._api_host and client_key == self._client_key:
@@ -546,6 +547,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             api_host, client_key, decryption_key, ttl,
             remote_eval=remote_eval, payload=payload,
             cache_key_attributes=cache_key_attributes,
+            force_refresh=force_refresh,
         )
 
 class GrowthBookClient:

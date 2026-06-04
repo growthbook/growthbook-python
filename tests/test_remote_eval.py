@@ -391,24 +391,49 @@ class TestRemoteEvalSyncSSE:
         _reset_repo()
 
     def test_dispatch_handles_event_with_no_data_field(self):
-        """_dispatch_sse_event must not raise KeyError when 'data' is absent."""
+        """_dispatch_sse_event must not raise KeyError when 'data' is absent
+        on a parameter-less features-updated event. Beyond not crashing, it
+        also triggers a force-refresh POST (covered separately below)."""
         body = DEFAULT_BODY
-        with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)) as mock_post:
+        with patch.object(FeatureRepository, "_post", return_value=_make_post_response(body)):
             gb = GrowthBook(
                 api_host="https://proxy.example.com",
                 client_key="sdk-test",
                 attributes={"id": "u1"},
                 remoteEval=True,
             )
-            initial = mock_post.call_count
-            # Simulate the proxy's parameter-less SSE event arriving directly
-            # at the dispatcher (no 'data' key in event_data).
+            # Must not raise.
             gb._dispatch_sse_event({"type": "features-updated"})
-            # The dispatcher must (a) not crash and (b) trigger a refetch.
-            # Same payload → cache hit, so no extra POST is required for (b).
-            # What we're really asserting is that no exception escaped.
-            gb.set_attributes({"id": "u2"})  # force a payload change → POST
-            assert mock_post.call_count == initial + 1
+            gb.destroy()
+
+    def test_features_updated_invalidates_cache_and_fetches_fresh_payload(self):
+        """Regression: SSE `features-updated` used to call load_features() which
+        hit the cache and returned the stale payload — the proxy's invalidation
+        signal was silently dropped. After fix, the dispatcher passes
+        force_refresh=True so the cached entry is bypassed."""
+        responses = iter([
+            _make_post_response({"features": {"flag": {"defaultValue": False}}, "savedGroups": {}}),
+            _make_post_response({"features": {"flag": {"defaultValue": True}},  "savedGroups": {}}),
+        ])
+        with patch.object(FeatureRepository, "_post", side_effect=lambda *a, **kw: next(responses)) as mock_post:
+            gb = GrowthBook(
+                api_host="https://proxy.example.com",
+                client_key="sdk-test",
+                attributes={"id": "u1"},
+                remoteEval=True,
+            )
+            assert gb.is_on("flag") is False
+            assert mock_post.call_count == 1
+
+            # Simulate proxy publishing — sends a parameter-less features-updated.
+            gb._dispatch_sse_event({"type": "features-updated"})
+
+            assert mock_post.call_count == 2, (
+                "features-updated didn't bypass the cache — POST count should have grown"
+            )
+            assert gb.is_on("flag") is True, (
+                "still serving stale cached payload after SSE invalidation"
+            )
             gb.destroy()
 
     def test_sse_parser_dispatches_parameter_less_events(self):

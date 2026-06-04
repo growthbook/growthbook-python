@@ -408,13 +408,17 @@ class FeatureRepository(object):
         remote_eval: bool = False,
         payload: Optional[Dict[str, Any]] = None,
         cache_key_attributes: Optional[List[str]] = None,
+        force_refresh: bool = False,
     ) -> Optional[Dict]:
         if not client_key:
             raise ValueError("Must specify `client_key` to refresh features")
 
         key = self._compute_cache_key(api_host, client_key, remote_eval, payload, cache_key_attributes)
 
-        cached = self.cache.get(key)
+        # `force_refresh=True` bypasses the cache lookup so SSE invalidation
+        # signals (proxy `features-updated`) actually trigger a refetch
+        # instead of returning the stale entry.
+        cached = None if force_refresh else self.cache.get(key)
         if not cached:
             if remote_eval:
                 if payload is None:
@@ -445,10 +449,11 @@ class FeatureRepository(object):
         remote_eval: bool = False,
         payload: Optional[Dict[str, Any]] = None,
         cache_key_attributes: Optional[List[str]] = None,
+        force_refresh: bool = False,
     ) -> Optional[Dict]:
         key = self._compute_cache_key(api_host, client_key, remote_eval, payload, cache_key_attributes)
 
-        cached = self.cache.get(key)
+        cached = None if force_refresh else self.cache.get(key)
         if not cached:
             if remote_eval:
                 if payload is None:
@@ -983,7 +988,14 @@ class GrowthBook(object):
         if features_data and "savedGroups" in features_data:
             self._saved_groups = features_data["savedGroups"]
 
-    def load_features(self) -> None:
+    def load_features(self, force_refresh: bool = False) -> None:
+        """Load features from the configured endpoint, populating the cache.
+
+        `force_refresh=True` bypasses the in-memory cache to honor a fresh
+        signal from the proxy (e.g., an SSE `features-updated` event).
+        Without it, an immediate `load_features()` after such a signal
+        would just return the stale cached payload — defeating the
+        invalidation."""
         payload = self._remote_eval_payload() if self._remoteEval else None
         response = feature_repo.load_features(
             self._api_host,
@@ -993,6 +1005,7 @@ class GrowthBook(object):
             remote_eval=self._remoteEval,
             payload=payload,
             cache_key_attributes=self._cacheKeyAttributes,
+            force_refresh=force_refresh,
         )
         if response is not None and "features" in response.keys():
             self.set_features(response["features"])
@@ -1000,7 +1013,7 @@ class GrowthBook(object):
         if response is not None and "savedGroups" in response:
             self._saved_groups = response["savedGroups"]
 
-    async def load_features_async(self) -> None:
+    async def load_features_async(self, force_refresh: bool = False) -> None:
         if not self._client_key:
             raise ValueError("Must specify `client_key` to refresh features")
 
@@ -1013,6 +1026,7 @@ class GrowthBook(object):
             remote_eval=self._remoteEval,
             payload=payload,
             cache_key_attributes=self._cacheKeyAttributes,
+            force_refresh=force_refresh,
         )
 
         if features is not None:
@@ -1041,14 +1055,17 @@ class GrowthBook(object):
         if event_type == 'features-updated':
             # In remote-eval mode the proxy emits this event with no inline
             # payload (the payload would be per-user). load_features() handles
-            # both modes — for remote eval it re-POSTs with the current state.
-            self.load_features()
+            # both modes. force_refresh=True is essential — without it the
+            # cache hit would return the stale payload and the invalidation
+            # signal would be silently dropped.
+            self.load_features(force_refresh=True)
         elif event_type == 'features':
             if self._remoteEval:
                 # Defensive: proxy shouldn't send inline payloads to remote-eval
                 # clients, but if one arrives, ignore it (not user-filtered) and
-                # refetch via the remote-eval path.
-                self.load_features()
+                # refetch via the remote-eval path. force_refresh for the same
+                # reason as above.
+                self.load_features(force_refresh=True)
             else:
                 self._features_event_handler(event_data.get('data', '{}'))
 
