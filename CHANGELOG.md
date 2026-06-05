@@ -1,5 +1,23 @@
 # Changelog
 
+## [3.0.0](https://github.com/growthbook/growthbook-python/compare/v2.2.2...v3.0.0) (2026-06-05)
+
+
+### ⚠ BREAKING CHANGES
+
+* Merge pull request #118 from growthbook/feat/remote-eval
+
+### Features
+
+* Merge pull request [#119](https://github.com/growthbook/growthbook-python/issues/119) from vazarkevych/fix/sticky-bucket-hash-value-resolution ([2edd6a3](https://github.com/growthbook/growthbook-python/commit/2edd6a343dd15de9f96eb36c7c4407e213941336))
+
+
+### Bug Fixes
+
+* correct sticky bucket hash attribute resolution ([2edd6a3](https://github.com/growthbook/growthbook-python/commit/2edd6a343dd15de9f96eb36c7c4407e213941336))
+* correct sticky bucket hash attribute resolution ([875316c](https://github.com/growthbook/growthbook-python/commit/875316c494e50d60a680767838c68b622f8fd402))
+* Merge pull request [#118](https://github.com/growthbook/growthbook-python/issues/118) from growthbook/feat/remote-eval ([f6b7c0a](https://github.com/growthbook/growthbook-python/commit/f6b7c0a224a021bd66eda9d6a939aad2064add35))
+
 ## [2.2.2](https://github.com/growthbook/growthbook-python/compare/v2.2.1...v2.2.2) (2026-05-11)
 
 
