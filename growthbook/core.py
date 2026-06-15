@@ -1,4 +1,5 @@
 import logging
+import math
 import re
 import json
 from functools import lru_cache
@@ -106,6 +107,15 @@ def elemMatch(condition, attributeValue, savedGroups) -> bool:
     return False
 
 def compare(val1, val2) -> int:
+    # IEEE 754: NaN is unordered with everything (including itself), so the
+    # "0 if neither > nor <" fallthrough below would wrongly report equal.
+    # Raise instead — callers' existing exception handling gives the right
+    # truth value: $eq=False, $ne=True, $lt/$lte/$gt/$gte=False.
+    if isinstance(val1, float) and math.isnan(val1):
+        raise ValueError("NaN")
+    if isinstance(val2, float) and math.isnan(val2):
+        raise ValueError("NaN")
+
     if _is_numeric(val1) and not _is_numeric(val2):
         if (val2 is None):
             val2 = 0
