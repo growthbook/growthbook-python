@@ -4899,6 +4899,57 @@
       }
     ],
     [
+      "Multiple rules with divergent conditions on same prerequisite",
+      {
+        "attributes": {
+          "id": "u1",
+          "public_user_id": "pid_eci:other"
+        },
+        "features": {
+          "probeFeature": {
+            "defaultValue": "ui_default",
+            "rules": [
+              {
+                "condition": { "public_user_id": "pid_eci:does_not_match" },
+                "force": "ui_default"
+              }
+            ]
+          },
+          "childFlag": {
+            "defaultValue": "hello",
+            "rules": [
+              {
+                "parentConditions": [
+                  {
+                    "id": "probeFeature",
+                    "condition": { "value": "ON" }
+                  }
+                ],
+                "force": "prereqon"
+              },
+              {
+                "parentConditions": [
+                  {
+                    "id": "probeFeature",
+                    "condition": { "value": { "$ne": "ON" } }
+                  }
+                ],
+                "force": "prereqoff"
+              }
+            ]
+          }
+        }
+      },
+      "childFlag",
+      {
+        "value": "prereqoff",
+        "on": true,
+        "off": false,
+        "source": "force",
+        "ruleId": ""
+      }
+    ],
+    [
       "SavedGroups correctly pulled from context for force rule",
       {
         "attributes": {
