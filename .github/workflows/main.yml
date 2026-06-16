@@ -40,8 +40,6 @@ jobs:
 
   corpus-freshness:
     # Drift check between tests/cases.json and the JS SDK's cases.json.
-    # JS is source of truth; bumping Python's specVersion without pulling
-    # in JS's new cases is how we lost track of 30 cases under 0.7.1.
     # Fails the build on any "missing" case not listed in
     # tests/scripts/corpus_skiplist.json.
     # Extras (Python's local additions) are reported but never fail.
