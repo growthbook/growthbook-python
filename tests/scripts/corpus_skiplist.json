@@ -1,0 +1,7 @@
+{
+  "_doc": "Cases that the corpus freshness check should NOT treat as drift. Used only for the `missing` direction (JS has, Python deliberately doesn't). Extras (Python has, JS doesn't) are reported but never fail CI, so they don't need entries here. Add a comment in `_reasons` per entry so future maintainers know why something is excluded.",
+  "missing": {},
+  "_reasons": {
+    "_example": "evalCondition::case name -> short reason. Populate when we deliberately omit JS cases (e.g., they test a feature Python doesn't yet support and we don't intend to backport)."
+  }
+}
