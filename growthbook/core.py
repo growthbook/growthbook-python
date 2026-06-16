@@ -55,6 +55,19 @@ def isOperatorObject(obj: Any) -> bool:
 def _is_numeric(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
+
+# ASCII-only A-Z → a-z mapping. Case-insensitive operators ($ini/$nini/$alli)
+# fold via this rather than str.lower(): Python's str.lower() is Unicode-aware
+# (Turkish "İ" → "i̇" with combining mark; German "ß" stays "ß") while JS's
+# String.prototype.toLowerCase() is naive ASCII. Locking ASCII as canonical
+# avoids 3-way divergence between Python/Rust/Go's various Unicode folds.
+_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ",
+                              "abcdefghijklmnopqrstuvwxyz")
+
+
+def _ascii_lower(s: str) -> str:
+    return s.translate(_ASCII_LOWER)
+
 def getType(attributeValue) -> str:
     if attributeValue is None:
         return "null"
@@ -88,7 +101,7 @@ def evalConditionValue(conditionValue, attributeValue, savedGroups, insensitive:
     
     # Simple equality comparison with optional case-insensitivity
     if insensitive and isinstance(conditionValue, str) and isinstance(attributeValue, str):
-        return conditionValue.lower() == attributeValue.lower()
+        return _ascii_lower(conditionValue) == _ascii_lower(attributeValue)
     
     return bool(conditionValue == attributeValue)
 
@@ -134,22 +147,26 @@ def compare(val1, val2) -> int:
         return -1
     return 0
 
+def _js_strict_equal(a, b) -> bool:
+    """JS === semantics: same JS-level type AND same value.
+
+    `compare()` coerces (string→float, None→0) which is correct for `<`/`>`
+    in JS but wrong for `===`. $eq and $ne route through here instead so
+    `{$eq: 5}` against `"5"` is False (matches JS strict), while $lt/$gt
+    keep using compare() and match JS's coercing `<`/`>` semantics.
+
+    NaN handling falls out of Python's IEEE 754-compliant `==` (NaN != NaN).
+    """
+    if getType(a) != getType(b):
+        return False
+    return a == b
+
+
 def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups) -> bool:
     if operator == "$eq":
-        try:
-            return compare(attributeValue, conditionValue) == 0
-        except Exception:
-            return False
+        return _js_strict_equal(attributeValue, conditionValue)
     elif operator == "$ne":
-        try:
-            return compare(attributeValue, conditionValue) != 0
-        except Exception:
-            # Incomparable values (e.g. missing attribute → None vs a string —
-            # compare() raises TypeError on the None > str comparison) are by
-            # definition NOT equal. Matches Mongo/JS/Go/Rust SDKs: $ne on a
-            # missing attribute returns True. The False default that's correct
-            # for $eq is inverted for $ne.
-            return True
+        return not _js_strict_equal(attributeValue, conditionValue)
     elif operator == "$lt":
         try:
             return compare(attributeValue, conditionValue) < 0
@@ -295,9 +312,9 @@ def _paddedVersionString(input: str) -> str:
 
 def isIn(conditionValue, attributeValue, insensitive: bool = False) -> bool:
     if insensitive:
-        # Helper function to case-fold values (lowercase for strings)
+        # ASCII-only case fold; see _ascii_lower for rationale.
         def case_fold(val):
-            return val.lower() if isinstance(val, str) else val
+            return _ascii_lower(val) if isinstance(val, str) else val
         
         # Do an intersection if attribute is an array (insensitive)
         if isinstance(attributeValue, list):

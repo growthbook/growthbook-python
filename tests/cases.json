@@ -3513,6 +3513,180 @@
         "tags": "hello"
       },
       false
+    ],
+    [
+      "[D1] $lt against missing attribute coerces missing to 0 (JS spec)",
+      {
+        "x": {
+          "$lt": 5
+        }
+      },
+      {},
+      true
+    ],
+    [
+      "[D2a] $gte against missing attribute returns false (JS spec)",
+      {
+        "x": {
+          "$gte": 5
+        }
+      },
+      {},
+      false
+    ],
+    [
+      "[D2b] $lte against missing attribute returns true (JS spec)",
+      {
+        "x": {
+          "$lte": 5
+        }
+      },
+      {},
+      true
+    ],
+    [
+      "[D3] $gt against missing attribute returns false (JS spec)",
+      {
+        "x": {
+          "$gt": 5
+        }
+      },
+      {},
+      false
+    ],
+    [
+      "[D5] $elemMatch tests all array elements including falsy",
+      {
+        "x": {
+          "$elemMatch": {
+            "$eq": 0
+          }
+        }
+      },
+      {
+        "x": [
+          0
+        ]
+      },
+      true
+    ],
+    [
+      "[D5] $elemMatch tests falsy false",
+      {
+        "x": {
+          "$elemMatch": {
+            "$eq": false
+          }
+        }
+      },
+      {
+        "x": [
+          false
+        ]
+      },
+      true
+    ],
+    [
+      "[D5] $elemMatch tests falsy empty string",
+      {
+        "x": {
+          "$elemMatch": {
+            "$eq": ""
+          }
+        }
+      },
+      {
+        "x": [
+          ""
+        ]
+      },
+      true
+    ],
+    [
+      "[D6a] $eq integer vs string is strict (no coercion)",
+      {
+        "x": {
+          "$eq": 5
+        }
+      },
+      {
+        "x": "5"
+      },
+      false
+    ],
+    [
+      "[D6b] equality (no operator) integer vs string is strict",
+      {
+        "x": 5
+      },
+      {
+        "x": "5"
+      },
+      false
+    ],
+    [
+      "[D6] $eq boolean vs integer is strict (different types)",
+      {
+        "x": {
+          "$eq": true
+        }
+      },
+      {
+        "x": 1
+      },
+      false
+    ],
+    [
+      "[D7] $type on empty object returns true for type 'object'",
+      {
+        "x": {
+          "$type": "object"
+        }
+      },
+      {
+        "x": {}
+      },
+      true
+    ],
+    [
+      "[D8] $regex on integer attribute returns false (not true)",
+      {
+        "x": {
+          "$regex": "^5$"
+        }
+      },
+      {
+        "x": 5
+      },
+      false
+    ],
+    [
+      "[D10] $ini ASCII case-fold only \u2014 non-ASCII chars unchanged (Turkish dotted I)",
+      {
+        "x": {
+          "$ini": [
+            "\u0130"
+          ]
+        }
+      },
+      {
+        "x": "i"
+      },
+      false
+    ],
+    [
+      "[D10] $ini ASCII case-fold only \u2014 German \u00df does not unfold to SS",
+      {
+        "x": {
+          "$ini": [
+            "STRA\u00dfE"
+          ]
+        }
+      },
+      {
+        "x": "STRASSE"
+      },
+      false
     ]
   ],
   "hash": [
@@ -5485,6 +5659,85 @@
         "on": false,
         "off": true,
         "source": "defaultValue",
+        "ruleId": ""
+      }
+    ],
+    [
+      "[D15] parentCondition gate=false fail skips rule, continues to next",
+      {
+        "attributes": {
+          "id": "u1"
+        },
+        "features": {
+          "B": {
+            "defaultValue": "off"
+          },
+          "A": {
+            "defaultValue": "hello",
+            "rules": [
+              {
+                "parentConditions": [
+                  {
+                    "id": "B",
+                    "condition": {
+                      "value": "on"
+                    },
+                    "gate": false
+                  }
+                ],
+                "force": "rule1_value"
+              },
+              {
+                "force": "fallback_rule"
+              }
+            ]
+          }
+        }
+      },
+      "A",
+      {
+        "value": "fallback_rule",
+        "on": true,
+        "off": false,
+        "source": "force",
+        "ruleId": ""
+      }
+    ],
+    [
+      "[D14] Rule combining parentConditions + force \u2014 both must pass (gate=true)",
+      {
+        "attributes": {
+          "id": "u1"
+        },
+        "features": {
+          "B": {
+            "defaultValue": "on"
+          },
+          "A": {
+            "defaultValue": "hello",
+            "rules": [
+              {
+                "parentConditions": [
+                  {
+                    "id": "B",
+                    "condition": {
+                      "value": "on"
+                    },
+                    "gate": true
+                  }
+                ],
+                "force": "combined_rule"
+              }
+            ]
+          }
+        }
+      },
+      "A",
+      {
+        "value": "combined_rule",
+        "on": true,
+        "off": false,
+        "source": "force",
         "ruleId": ""
       }
     ]
