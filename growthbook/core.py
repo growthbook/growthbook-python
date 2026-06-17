@@ -55,19 +55,6 @@ def isOperatorObject(obj: Any) -> bool:
 def _is_numeric(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
-
-# ASCII-only A-Z → a-z mapping. Case-insensitive operators ($ini/$nini/$alli)
-# fold via this rather than str.lower(): Python's str.lower() is Unicode-aware
-# (Turkish "İ" → "i̇" with combining mark; German "ß" stays "ß") while JS's
-# String.prototype.toLowerCase() is naive ASCII. Locking ASCII as canonical
-# avoids 3-way divergence between Python/Rust/Go's various Unicode folds.
-_ASCII_LOWER = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZ",
-                              "abcdefghijklmnopqrstuvwxyz")
-
-
-def _ascii_lower(s: str) -> str:
-    return s.translate(_ASCII_LOWER)
-
 def getType(attributeValue) -> str:
     if attributeValue is None:
         return "null"
@@ -101,7 +88,7 @@ def evalConditionValue(conditionValue, attributeValue, savedGroups, insensitive:
     
     # Simple equality comparison with optional case-insensitivity
     if insensitive and isinstance(conditionValue, str) and isinstance(attributeValue, str):
-        return _ascii_lower(conditionValue) == _ascii_lower(attributeValue)
+        return conditionValue.lower() == attributeValue.lower()
     
     return bool(conditionValue == attributeValue)
 
@@ -312,9 +299,13 @@ def _paddedVersionString(input: str) -> str:
 
 def isIn(conditionValue, attributeValue, insensitive: bool = False) -> bool:
     if insensitive:
-        # ASCII-only case fold; see _ascii_lower for rationale.
+        # Helper function to case-fold values (lowercase for strings).
+        # Uses Python str.lower(), which is byte-identical to JS toLowerCase()
+        # for the relevant inputs: both do Unicode-aware single-char mapping
+        # without multi-char folds (e.g., "İ".lower() == "i̇" in both;
+        # "ß".lower() == "ß" in both; "Σ".lower() == "σ" in both).
         def case_fold(val):
-            return _ascii_lower(val) if isinstance(val, str) else val
+            return val.lower() if isinstance(val, str) else val
         
         # Do an intersection if attribute is an array (insensitive)
         if isinstance(attributeValue, list):

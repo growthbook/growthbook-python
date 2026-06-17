@@ -3661,7 +3661,7 @@
       false
     ],
     [
-      "[D10] $ini ASCII case-fold only \u2014 non-ASCII chars unchanged (Turkish dotted I)",
+      "[D10] $ini Turkish dotted-I vs ASCII i \u2014 toLowerCase produces 'i\u0307' (combining mark), not 'i'",
       {
         "x": {
           "$ini": [
@@ -3675,7 +3675,7 @@
       false
     ],
     [
-      "[D10] $ini ASCII case-fold only \u2014 German \u00df does not unfold to SS",
+      "[D10] $ini German \u00df vs SS \u2014 toLowerCase does NOT fold \u00df to ss",
       {
         "x": {
           "$ini": [
@@ -3687,6 +3687,34 @@
         "x": "STRASSE"
       },
       false
+    ],
+    [
+      "[D10] $ini Greek capital sigma vs small sigma \u2014 simple Unicode fold applies",
+      {
+        "x": {
+          "$ini": [
+            "\u03a3"
+          ]
+        }
+      },
+      {
+        "x": "\u03c3"
+      },
+      true
+    ],
+    [
+      "[D10] $ini Cyrillic capital \u0410 vs small \u0430 \u2014 simple Unicode fold applies",
+      {
+        "x": {
+          "$ini": [
+            "\u0410"
+          ]
+        }
+      },
+      {
+        "x": "\u0430"
+      },
+      true
     ]
   ],
   "hash": [
