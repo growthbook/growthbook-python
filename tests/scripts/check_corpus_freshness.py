@@ -2,25 +2,28 @@
 """Check Python's tests/cases.json against the JS SDK's cases.json.
 
 The two corpora are maintained by hand; `specVersion` is a label, not a
-contract. This script makes drift visible:
+contract. This script diffs the corpora and makes drift visible.
 
-  - "missing"  — case present in JS, absent in Python. Treated as an
-                 error (fail CI) so corpus catch-up is an active decision
-                 rather than a silent omission. The only escape is the
-                 skiplist (see corpus_skiplist.json) for cases Python
-                 deliberately can't or shouldn't carry.
-  - "extra"    — case present in Python, absent in JS. Reported as
-                 informational only — Python carries documented
-                 extensions (e.g., $notRegex regression cases) plus
-                 locally-authored regressions. Extras NEVER fail CI.
+Diff categories:
+
+  - "missing" — JS has a case name Python doesn't.
+                Fails CI unless the name is in skiplist["missing"][key].
+  - "drift"   — Both sides have the case name, but the bodies differ
+                (canonical-JSON SHA1 mismatch). Fails CI unless the name
+                is in skiplist["drift"][key]. Catches the silent
+                case-body update that pure name-matching misses.
+  - "extra"   — Python has a case name JS doesn't. Reported as
+                informational only — Python carries documented
+                extensions plus locally-authored regressions. Never
+                fails CI.
 
 Source-of-truth URL is configurable via --js-source or env GB_JS_CASES_URL.
 Defaults to the JS SDK's main-branch raw URL.
 
 Exit codes:
-  0 — no drift, or all drift is in the skiplist
-  1 — at least one case missing from Python that isn't in the skiplist
-  2 — fetch / parse / IO error (treated as build infra failure, not drift)
+  0 — no actionable findings (or all on skiplist)
+  1 — at least one missing or drifted case isn't on the skiplist
+  2 — fetch / parse / IO error (treated as build infra failure)
 
 Run locally:
   python3 tests/scripts/check_corpus_freshness.py
@@ -33,6 +36,7 @@ In CI, this runs on every push as a separate step in the build workflow.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -99,65 +103,114 @@ def _load_local_cases() -> dict:
     return json.loads(LOCAL_CASES.read_text(encoding="utf-8"))
 
 
-def _load_skiplist() -> Dict[str, Set[str]]:
+def _load_skiplist() -> Dict[str, Dict[str, Set[str]]]:
     """Load skiplist. File format:
 
         {
-          "missing": {
-            "<top_level_key>": ["case name 1", "case name 2"]
-          }
+          "missing": { "<top_level_key>": ["case name", ...] },
+          "drift":   { "<top_level_key>": ["case name", ...] }
         }
 
-    `missing` entries are case names Python deliberately doesn't carry —
-    drift that won't fail CI. `extra` is reported but never fails so it's
-    not configured here. The file is optional.
+    `missing` — case names Python deliberately doesn't carry from JS.
+    `drift`   — case names where Python deliberately diverges from JS's
+                body (rare; reserved for cases that test a Python-only
+                extension behavior).
+
+    Extras (Python has, JS doesn't) are reported but never fail, so they
+    don't need a skiplist entry. The file is optional.
     """
     if not SKIPLIST.is_file():
-        return {}
+        return {"missing": {}, "drift": {}}
     try:
         data = json.loads(SKIPLIST.read_text(encoding="utf-8"))
     except json.JSONDecodeError as e:
         raise RuntimeError(f"skiplist invalid JSON: {e}") from e
-    missing = data.get("missing", {}) or {}
-    return {k: set(v) for k, v in missing.items()}
+    return {
+        "missing": {k: set(v) for k, v in (data.get("missing") or {}).items()},
+        "drift": {k: set(v) for k, v in (data.get("drift") or {}).items()},
+    }
 
 
-def _case_names(cases: list) -> List[str]:
-    """First element of each case is the human-readable name."""
-    out = []
+def _case_signatures(cases: list) -> Dict[str, str]:
+    """Return {case_name: short_hash_of_body} for every well-formed case.
+
+    Body = everything after the name (case[1:]), serialized via canonical
+    JSON (sorted keys + compact separators) so logically-equal cases hash
+    the same regardless of dict key insertion order or whitespace.
+
+    Same-named cases collapse to the *last* occurrence — that's the same
+    convention pytest_generate_tests uses when it parametrizes, so the
+    hash here mirrors what the suite would actually exercise.
+    """
+    out: Dict[str, str] = {}
     for c in cases:
-        if isinstance(c, list) and c and isinstance(c[0], str):
-            out.append(c[0])
+        if not (isinstance(c, list) and c and isinstance(c[0], str)):
+            continue
+        name = c[0]
+        body = json.dumps(c[1:], sort_keys=True, separators=(",", ":"))
+        out[name] = hashlib.sha1(body.encode("utf-8")).hexdigest()[:16]
     return out
 
 
 def _diff(
     js_cases: dict, py_cases: dict, skip: Dict[str, Set[str]]
-) -> Tuple[Dict[str, List[str]], Dict[str, List[str]], Dict[str, List[str]]]:
-    """Return (actionable_missing, skipped_missing, extras) per key."""
-    actionable: Dict[str, List[str]] = {}
-    skipped: Dict[str, List[str]] = {}
+) -> Tuple[
+    Dict[str, List[str]],  # actionable_missing
+    Dict[str, List[str]],  # skipped_missing
+    Dict[str, List[str]],  # extras
+    Dict[str, List[str]],  # actionable_drift (same name, different body)
+    Dict[str, List[str]],  # skipped_drift
+]:
+    """Diff (name, body-hash) pairs.
+
+    Returns five per-key dictionaries:
+      * actionable_missing — JS has the name, Python doesn't (fails CI)
+      * skipped_missing    — same, but the name is on the skiplist
+      * extras             — Python has the name, JS doesn't (never fails)
+      * actionable_drift   — same name, hash differs (fails CI)
+      * skipped_drift      — same name, hash differs, name on drift-skiplist
+    """
+    actionable_missing: Dict[str, List[str]] = {}
+    skipped_missing: Dict[str, List[str]] = {}
     extras: Dict[str, List[str]] = {}
+    actionable_drift: Dict[str, List[str]] = {}
+    skipped_drift: Dict[str, List[str]] = {}
+
+    missing_skip = skip.get("missing", {})
+    drift_skip = skip.get("drift", {})
 
     for key in KEYS_TO_DIFF:
         js_list = js_cases.get(key, [])
         py_list = py_cases.get(key, [])
         if not isinstance(js_list, list) or not isinstance(py_list, list):
             continue
-        js_names = _case_names(js_list)
-        py_names_set = set(_case_names(py_list))
-        js_names_set = set(js_names)
 
-        # Order missing by JS's order so the report reads naturally.
-        missing = [n for n in js_names if n not in py_names_set]
-        extra = [n for n in _case_names(py_list) if n not in js_names_set]
+        js_sigs = _case_signatures(js_list)
+        py_sigs = _case_signatures(py_list)
 
-        key_skip = skip.get(key, set())
-        actionable[key] = [n for n in missing if n not in key_skip]
-        skipped[key] = [n for n in missing if n in key_skip]
+        js_names = [c[0] for c in js_list if isinstance(c, list) and c and isinstance(c[0], str)]
+        py_names = [c[0] for c in py_list if isinstance(c, list) and c and isinstance(c[0], str)]
+
+        missing = [n for n in js_names if n not in py_sigs]
+        extra = [n for n in py_names if n not in js_sigs]
+        drift = [n for n in js_names if n in py_sigs and js_sigs[n] != py_sigs[n]]
+
+        # Preserve JS ordering, drop duplicates (signatures dict collapsed them already).
+        seen: Set[str] = set()
+        missing = [n for n in missing if not (n in seen or seen.add(n))]
+        seen.clear()
+        drift = [n for n in drift if not (n in seen or seen.add(n))]
+
+        key_missing_skip = missing_skip.get(key, set())
+        key_drift_skip = drift_skip.get(key, set())
+
+        actionable_missing[key] = [n for n in missing if n not in key_missing_skip]
+        skipped_missing[key] = [n for n in missing if n in key_missing_skip]
         extras[key] = extra
+        actionable_drift[key] = [n for n in drift if n not in key_drift_skip]
+        skipped_drift[key] = [n for n in drift if n in key_drift_skip]
 
-    return actionable, skipped, extras
+    return actionable_missing, skipped_missing, extras, actionable_drift, skipped_drift
 
 
 def _spec_versions(js_cases: dict, py_cases: dict) -> Tuple[str, str]:
@@ -170,9 +223,11 @@ def _spec_versions(js_cases: dict, py_cases: dict) -> Tuple[str, str]:
 def _format_report(
     js_spec: str,
     py_spec: str,
-    actionable: Dict[str, List[str]],
-    skipped: Dict[str, List[str]],
+    actionable_missing: Dict[str, List[str]],
+    skipped_missing: Dict[str, List[str]],
     extras: Dict[str, List[str]],
+    actionable_drift: Dict[str, List[str]],
+    skipped_drift: Dict[str, List[str]],
 ) -> str:
     lines = []
     lines.append("=== Corpus freshness check (Python vs JS SDK) ===")
@@ -185,16 +240,23 @@ def _format_report(
         )
     lines.append("")
 
-    total_actionable = sum(len(v) for v in actionable.values())
-    total_skipped = sum(len(v) for v in skipped.values())
-    total_extra = sum(len(v) for v in extras.values())
+    n_missing = sum(len(v) for v in actionable_missing.values())
+    n_skip_missing = sum(len(v) for v in skipped_missing.values())
+    n_drift = sum(len(v) for v in actionable_drift.values())
+    n_skip_drift = sum(len(v) for v in skipped_drift.values())
+    n_extra = sum(len(v) for v in extras.values())
 
-    if total_actionable == 0:
-        lines.append(f"OK: no missing cases (skipped: {total_skipped}, extras: {total_extra})")
+    n_fail = n_missing + n_drift
+    if n_fail == 0:
+        lines.append(
+            f"OK: no missing/drifted cases "
+            f"(skipped-missing: {n_skip_missing}, skipped-drift: {n_skip_drift}, extras: {n_extra})"
+        )
     else:
         lines.append(
-            f"DRIFT: {total_actionable} case(s) in JS but missing from Python "
-            f"(plus {total_skipped} on skiplist, {total_extra} Python extras)"
+            f"DRIFT: {n_missing} missing + {n_drift} body-drift "
+            f"(skipped: {n_skip_missing} missing, {n_skip_drift} drift; "
+            f"{n_extra} Python extras)"
         )
     lines.append("")
 
@@ -210,8 +272,10 @@ def _format_report(
                 lines.append(f"    - {n}")
         lines.append("")
 
-    _section("Missing in Python (FAILS CI)", actionable)
-    _section("Missing in Python but skipped via corpus_skiplist.json", skipped)
+    _section("Missing in Python (FAILS CI)", actionable_missing)
+    _section("Body-drift: same name, different case body (FAILS CI)", actionable_drift)
+    _section("Missing in Python — skipped via corpus_skiplist.json", skipped_missing)
+    _section("Body-drift — skipped via corpus_skiplist.json", skipped_drift)
     _section("Extra in Python (informational; never fails)", extras)
     return "\n".join(lines)
 
@@ -236,7 +300,9 @@ def main(argv: List[str] | None = None) -> int:
         print(f"corpus check infra error: {e}", file=sys.stderr)
         return 2
 
-    actionable, skipped, extras = _diff(js_cases, py_cases, skip)
+    actionable_missing, skipped_missing, extras, actionable_drift, skipped_drift = _diff(
+        js_cases, py_cases, skip
+    )
     js_spec, py_spec = _spec_versions(js_cases, py_cases)
 
     if args.json:
@@ -245,8 +311,10 @@ def main(argv: List[str] | None = None) -> int:
                 {
                     "js_specVersion": js_spec,
                     "py_specVersion": py_spec,
-                    "missing_actionable": actionable,
-                    "missing_skipped": skipped,
+                    "missing_actionable": actionable_missing,
+                    "missing_skipped": skipped_missing,
+                    "drift_actionable": actionable_drift,
+                    "drift_skipped": skipped_drift,
                     "extras": extras,
                 },
                 indent=2,
@@ -254,9 +322,15 @@ def main(argv: List[str] | None = None) -> int:
             )
         )
     else:
-        print(_format_report(js_spec, py_spec, actionable, skipped, extras))
+        print(
+            _format_report(
+                js_spec, py_spec, actionable_missing, skipped_missing,
+                extras, actionable_drift, skipped_drift,
+            )
+        )
 
-    return 1 if any(actionable.values()) else 0
+    fail = any(actionable_missing.values()) or any(actionable_drift.values())
+    return 1 if fail else 0
 
 
 if __name__ == "__main__":
