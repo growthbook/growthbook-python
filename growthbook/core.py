@@ -159,7 +159,7 @@ def _js_strict_equal(a, b) -> bool:
     """
     if getType(a) != getType(b):
         return False
-    return a == b
+    return bool(a == b)
 
 
 def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups) -> bool:
