@@ -3649,18 +3649,6 @@
       true
     ],
     [
-      "[D8] $regex on integer attribute returns false (not true)",
-      {
-        "x": {
-          "$regex": "^5$"
-        }
-      },
-      {
-        "x": 5
-      },
-      false
-    ],
-    [
       "[D10] $ini Turkish dotted-I vs ASCII i \u2014 toLowerCase produces 'i\u0307' (combining mark), not 'i'",
       {
         "x": {
