@@ -135,16 +135,27 @@ def compare(val1, val2) -> int:
     return 0
 
 def _js_strict_equal(a, b) -> bool:
-    """JS === semantics: same JS-level type AND same value.
+    """JS === semantics for $eq/$ne. Routed here instead of compare() so
+    $lt/$gt keep their JS-aligned coercion via compare() while $eq stays
+    strict.
 
-    `compare()` coerces (string→float, None→0) which is correct for `<`/`>`
-    in JS but wrong for `===`. $eq and $ne route through here instead so
-    `{$eq: 5}` against `"5"` is False (matches JS strict), while $lt/$gt
-    keep using compare() and match JS's coercing `<`/`>` semantics.
+    Three buckets:
 
-    NaN handling falls out of Python's IEEE 754-compliant `==` (NaN != NaN).
+    * **Different types** → False (e.g. number 5 vs string "5",
+      number 1 vs boolean true).
+    * **Container types (array, object)** → False unconditionally.
+      JS `===` is reference equality for arrays/objects, and within
+      feature evaluation the operator's two operands always come from
+      separate JSON parses — different references, never `===`. So in
+      the only context this code observes, container $eq must be False.
+    * **Primitive same type** (number, string, boolean, null) →
+      Python `a == b`. Matches `===` for ints/floats and strings;
+      NaN handled correctly because `NaN == NaN` is False in Python.
     """
-    if getType(a) != getType(b):
+    ta = getType(a)
+    if ta != getType(b):
+        return False
+    if ta == "array" or ta == "object":
         return False
     return bool(a == b)
 

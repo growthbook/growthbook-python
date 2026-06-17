@@ -3703,6 +3703,42 @@
         "x": "\u0430"
       },
       true
+    ],
+    [
+      "[D6c] $eq array literal vs equal array literal is strict-identity false (JS === for containers)",
+      {
+        "x": {
+          "$eq": [1, 2, 3]
+        }
+      },
+      {
+        "x": [1, 2, 3]
+      },
+      false
+    ],
+    [
+      "[D6c] $eq object literal vs equal object literal is strict-identity false (JS === for containers)",
+      {
+        "x": {
+          "$eq": {"a": 1, "b": 2}
+        }
+      },
+      {
+        "x": {"a": 1, "b": 2}
+      },
+      false
+    ],
+    [
+      "[D6c] $ne array literal vs equal array literal is true (negation of strict-identity)",
+      {
+        "x": {
+          "$ne": [1, 2, 3]
+        }
+      },
+      {
+        "x": [1, 2, 3]
+      },
+      true
     ]
   ],
   "hash": [
