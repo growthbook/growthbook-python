@@ -42,6 +42,7 @@ import os
 import sys
 import urllib.error
 import urllib.request
+from collections import Counter
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
@@ -131,24 +132,30 @@ def _load_skiplist() -> Dict[str, Dict[str, Set[str]]]:
     }
 
 
-def _case_signatures(cases: list) -> Dict[str, str]:
-    """Return {case_name: short_hash_of_body} for every well-formed case.
+def _case_signatures_grouped(cases: list) -> Dict[str, List[str]]:
+    """Return {case_name: [body_hash, body_hash, ...]} preserving order.
 
     Body = everything after the name (case[1:]), serialized via canonical
     JSON (sorted keys + compact separators) so logically-equal cases hash
     the same regardless of dict key insertion order or whitespace.
 
-    Same-named cases collapse to the *last* occurrence — that's the same
-    convention pytest_generate_tests uses when it parametrizes, so the
-    hash here mirrors what the suite would actually exercise.
+    Same-named cases keep every occurrence in the list because pytest's
+    `pytest_generate_tests` parametrizes the FULL case list — so all
+    duplicates run. Collapsing them to a single entry would silently hide
+    body drift in any occurrence except the last (the original bug here).
+
+    Drift detection compares per-name multisets, so the order of
+    duplicates within a name doesn't matter; only the set of body hashes
+    does.
     """
-    out: Dict[str, str] = {}
+    out: Dict[str, List[str]] = {}
     for c in cases:
         if not (isinstance(c, list) and c and isinstance(c[0], str)):
             continue
         name = c[0]
         body = json.dumps(c[1:], sort_keys=True, separators=(",", ":"))
-        out[name] = hashlib.sha1(body.encode("utf-8")).hexdigest()[:16]
+        h = hashlib.sha1(body.encode("utf-8")).hexdigest()[:16]
+        out.setdefault(name, []).append(h)
     return out
 
 
@@ -185,21 +192,35 @@ def _diff(
         if not isinstance(js_list, list) or not isinstance(py_list, list):
             continue
 
-        js_sigs = _case_signatures(js_list)
-        py_sigs = _case_signatures(py_list)
+        js_grouped = _case_signatures_grouped(js_list)
+        py_grouped = _case_signatures_grouped(py_list)
 
-        js_names = [c[0] for c in js_list if isinstance(c, list) and c and isinstance(c[0], str)]
-        py_names = [c[0] for c in py_list if isinstance(c, list) and c and isinstance(c[0], str)]
+        # Preserve JS file ordering for the missing/drift reports; iterate
+        # the original list and dedupe so each unique name appears once.
+        js_names_ordered: List[str] = []
+        seen_js: Set[str] = set()
+        for c in js_list:
+            if isinstance(c, list) and c and isinstance(c[0], str) and c[0] not in seen_js:
+                js_names_ordered.append(c[0])
+                seen_js.add(c[0])
 
-        missing = [n for n in js_names if n not in py_sigs]
-        extra = [n for n in py_names if n not in js_sigs]
-        drift = [n for n in js_names if n in py_sigs and js_sigs[n] != py_sigs[n]]
+        py_names_ordered: List[str] = []
+        seen_py: Set[str] = set()
+        for c in py_list:
+            if isinstance(c, list) and c and isinstance(c[0], str) and c[0] not in seen_py:
+                py_names_ordered.append(c[0])
+                seen_py.add(c[0])
 
-        # Preserve JS ordering, drop duplicates (signatures dict collapsed them already).
-        seen: Set[str] = set()
-        missing = [n for n in missing if not (n in seen or seen.add(n))]
-        seen.clear()
-        drift = [n for n in drift if not (n in seen or seen.add(n))]
+        missing = [n for n in js_names_ordered if n not in py_grouped]
+        extra = [n for n in py_names_ordered if n not in js_grouped]
+
+        # Drift = same name on both sides, but the multiset of body hashes
+        # differs. Catches single-occurrence drift AND drift where only
+        # ONE of several duplicates changed (the original bug).
+        drift = [
+            n for n in js_names_ordered
+            if n in py_grouped and Counter(js_grouped[n]) != Counter(py_grouped[n])
+        ]
 
         key_missing_skip = missing_skip.get(key, set())
         key_drift_skip = drift_skip.get(key, set())
