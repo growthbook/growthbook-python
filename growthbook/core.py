@@ -1,4 +1,5 @@
 import logging
+import math
 import re
 import json
 from functools import lru_cache
@@ -106,6 +107,15 @@ def elemMatch(condition, attributeValue, savedGroups) -> bool:
     return False
 
 def compare(val1, val2) -> int:
+    # IEEE 754: NaN is unordered with everything (including itself), so the
+    # "0 if neither > nor <" fallthrough below would wrongly report equal.
+    # Raise instead — callers' existing exception handling gives the right
+    # truth value: $eq=False, $ne=True, $lt/$lte/$gt/$gte=False.
+    if isinstance(val1, float) and math.isnan(val1):
+        raise ValueError("NaN")
+    if isinstance(val2, float) and math.isnan(val2):
+        raise ValueError("NaN")
+
     if _is_numeric(val1) and not _is_numeric(val2):
         if (val2 is None):
             val2 = 0
@@ -124,22 +134,37 @@ def compare(val1, val2) -> int:
         return -1
     return 0
 
+def _js_strict_equal(a, b) -> bool:
+    """JS === semantics for $eq/$ne. Routed here instead of compare() so
+    $lt/$gt keep their JS-aligned coercion via compare() while $eq stays
+    strict.
+
+    Three buckets:
+
+    * **Different types** → False (e.g. number 5 vs string "5",
+      number 1 vs boolean true).
+    * **Container types (array, object)** → False unconditionally.
+      JS `===` is reference equality for arrays/objects, and within
+      feature evaluation the operator's two operands always come from
+      separate JSON parses — different references, never `===`. So in
+      the only context this code observes, container $eq must be False.
+    * **Primitive same type** (number, string, boolean, null) →
+      Python `a == b`. Matches `===` for ints/floats and strings;
+      NaN handled correctly because `NaN == NaN` is False in Python.
+    """
+    ta = getType(a)
+    if ta != getType(b):
+        return False
+    if ta == "array" or ta == "object":
+        return False
+    return bool(a == b)
+
+
 def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups) -> bool:
     if operator == "$eq":
-        try:
-            return compare(attributeValue, conditionValue) == 0
-        except Exception:
-            return False
+        return _js_strict_equal(attributeValue, conditionValue)
     elif operator == "$ne":
-        try:
-            return compare(attributeValue, conditionValue) != 0
-        except Exception:
-            # Incomparable values (e.g. missing attribute → None vs a string —
-            # compare() raises TypeError on the None > str comparison) are by
-            # definition NOT equal. Matches Mongo/JS/Go/Rust SDKs: $ne on a
-            # missing attribute returns True. The False default that's correct
-            # for $eq is inverted for $ne.
-            return True
+        return not _js_strict_equal(attributeValue, conditionValue)
     elif operator == "$lt":
         try:
             return compare(attributeValue, conditionValue) < 0
@@ -285,7 +310,11 @@ def _paddedVersionString(input: str) -> str:
 
 def isIn(conditionValue, attributeValue, insensitive: bool = False) -> bool:
     if insensitive:
-        # Helper function to case-fold values (lowercase for strings)
+        # Helper function to case-fold values (lowercase for strings).
+        # Uses Python str.lower(), which is byte-identical to JS toLowerCase()
+        # for the relevant inputs: both do Unicode-aware single-char mapping
+        # without multi-char folds (e.g., "İ".lower() == "i̇" in both;
+        # "ß".lower() == "ß" in both; "Σ".lower() == "σ" in both).
         def case_fold(val):
             return val.lower() if isinstance(val, str) else val
         
