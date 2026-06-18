@@ -1,5 +1,16 @@
 # Changelog
 
+## [2.3.1](https://github.com/growthbook/growthbook-python/compare/v2.3.0...v2.3.1) (2026-06-18)
+
+
+### Bug Fixes
+
+* _js_strict_equal returns False for array/object operands (JS === reference identity) ([a8ff302](https://github.com/growthbook/growthbook-python/commit/a8ff302a985f123ebea77a4d624814a376632979))
+* align $eq/$ne with JS strict semantics and $ini/$nini/$alli with ASCII-only case-fold ([7f9d2d2](https://github.com/growthbook/growthbook-python/commit/7f9d2d24e6df1b863a1dc269933e4868105a1ac5))
+* cast _js_strict_equal result to bool to satisfy mypy ([b011fee](https://github.com/growthbook/growthbook-python/commit/b011fee86fadad6f3db58bdf234c9dc6fe099285))
+* raise on NaN in compare() so IEEE 754 semantics propagate ([672136a](https://github.com/growthbook/growthbook-python/commit/672136a629cb3dd191825ceb6250b890c3fab626))
+* revert phantom D10 "ASCII-only fold" — JS toLowerCase is Unicode-aware ([5f45087](https://github.com/growthbook/growthbook-python/commit/5f45087a75a68896a0efdd43107a55da1600f85f))
+
 ## [2.3.0](https://github.com/growthbook/growthbook-python/compare/v2.2.2...v2.3.0) (2026-06-05)
 
 ### Features
