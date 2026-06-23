@@ -359,6 +359,38 @@ def test_handles_weird_experiment_values():
     gb.destroy()
 
 
+def test_custom_fields_parsed_from_api_dict():
+    # The API delivers experiment Custom Fields as a flat dict.
+    exp = Experiment(
+        **{
+            "key": "my-experiment",
+            "variations": ["control", "variant"],
+            "customFields": {"cfl_abc123": "My custom field", "cfl_def456": 42},
+        }
+    )
+    assert exp.customFields == {"cfl_abc123": "My custom field", "cfl_def456": 42}
+    assert exp.to_dict()["customFields"] == {
+        "cfl_abc123": "My custom field",
+        "cfl_def456": 42,
+    }
+
+
+def test_custom_fields_default_when_absent():
+    exp = Experiment(key="my-experiment", variations=["control", "variant"])
+    assert exp.customFields == {}
+    # Empty custom fields are omitted from the serialized dict.
+    assert "customFields" not in exp.to_dict()
+
+
+def test_custom_fields_public_init():
+    exp = Experiment(
+        key="my-experiment",
+        variations=["control", "variant"],
+        customFields={"cfl_xyz": "hello"},
+    )
+    assert exp.customFields == {"cfl_xyz": "hello"}
+
+
 def test_skip_all_experiments_flag():
     """Test that skip_all_experiments flag prevents users from being put into experiments"""
     
