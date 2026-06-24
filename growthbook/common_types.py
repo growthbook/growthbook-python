@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Union, Set, Tuple
 from enum import Enum
 from abc import ABC, abstractmethod
+from urllib.parse import urlparse as _urlparse
 
 class VariationMeta(TypedDict):
     key: str
@@ -53,6 +54,7 @@ class Experiment(object):
         bucketVersion: Optional[int] = None,
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
+        **_ignored: Any,
     ) -> None:
         self.key = key
         self.variations = variations
@@ -270,6 +272,7 @@ class FeatureRule(object):
         bucketVersion: Optional[int] = None,
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
+        tracks: Optional[List[Dict[str, Any]]] = None,
         **_ignored: Any,
     ) -> None:
 
@@ -298,6 +301,9 @@ class FeatureRule(object):
         self.bucketVersion = bucketVersion or 0
         self.minBucketVersion = minBucketVersion or 0
         self.parentConditions = parentConditions
+        # Remote-eval rules carry pre-evaluated experiment tracking events on
+        # the force branch; see _fireRuleTracks in core.py.
+        self.tracks = tracks
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {}
@@ -345,6 +351,8 @@ class FeatureRule(object):
             data["minBucketVersion"] = self.minBucketVersion
         if self.parentConditions:
             data["parentConditions"] = self.parentConditions
+        if self.tracks:
+            data["tracks"] = self.tracks
 
         return data
 
@@ -385,6 +393,9 @@ class UserContext:
     attributes: Dict[str, Any] = field(default_factory=dict)
     groups: Dict[str, str] = field(default_factory=dict)
     forced_variations: Dict[str, Any] = field(default_factory=dict)
+    # Caller-supplied forced feature values. Sent to the proxy in remote-eval
+    # mode (wire format: list of [key, value] tuples, matches JS SDK).
+    forced_features: Dict[str, Any] = field(default_factory=dict)
     overrides: Dict[str, Any] = field(default_factory=dict)
     sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
     skip_all_experiments: bool = False
@@ -395,7 +406,13 @@ class Options:
     api_host: Optional[str] = "https://cdn.growthbook.io"
     client_key: Optional[str] = None
     decryption_key: Optional[str] = None
-    cache_ttl: int = 60
+    cache_ttl: int = 60  # max_age: hard expiry for cached payloads (seconds).
+    # Soft-expiry threshold (seconds). When set < cache_ttl AND remote_eval is
+    # on, the async GrowthBookClient serves stale cached payloads inside
+    # [stale_ttl, cache_ttl) and fires a fire-and-forget background refetch.
+    # None = no SWR window (hard expiry at cache_ttl). Sync GrowthBook remote_eval
+    # uses cache_ttl-only and ignores this field.
+    stale_ttl: Optional[int] = None
     enabled: bool = True
     qa_mode: bool = False
     enable_dev_mode: bool = False
@@ -409,6 +426,9 @@ class Options:
     http_connect_timeout: Optional[int] = None
     http_read_timeout: Optional[int] = None
     event_logger: Optional[Callable[..., Any]] = None
+    remote_eval: bool = False
+    cache_key_attributes: Optional[List[str]] = None
+    remote_eval_cache_size: int = 1000
 
 
 @dataclass
@@ -422,3 +442,94 @@ class EvaluationContext:
     user: UserContext
     global_ctx: GlobalContext
     stack: StackContext
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers used by both the sync GrowthBook class and the async
+# GrowthBookClient. Living here (instead of one of the client modules) keeps
+# the dependency direction one-way: clients depend on common_types, not on
+# each other.
+# ---------------------------------------------------------------------------
+
+
+def features_from_dict(features_data: Optional[Dict[str, Any]]) -> Dict[str, "Feature"]:
+    """Materialize a {key: feature_dict_or_Feature} mapping into Feature
+    objects. Pass-through if a value is already a Feature."""
+    out: Dict[str, "Feature"] = {}
+    for key, feature in (features_data or {}).items():
+        if isinstance(feature, Feature):
+            out[key] = feature
+        else:
+            out[key] = Feature(
+                rules=feature.get("rules", []),
+                defaultValue=feature.get("defaultValue", None),
+            )
+    return out
+
+
+def build_remote_eval_payload(
+    attributes: Optional[Dict[str, Any]],
+    forced_variations: Optional[Dict[str, Any]],
+    url: Optional[str],
+    forced_features: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    """Construct the POST body for /api/eval/{client_key}. Single source of
+    truth for the wire shape — both sync and async clients route through here.
+
+    `forced_features` is the caller's natural dict shape; on the wire it
+    becomes a list of `[key, value]` pairs (matches the JS SDK's
+    `Array.from(map.entries())` — JS-arrays serialize identically to either
+    Python tuples or lists, but we emit lists for in-memory parity)."""
+    return {
+        "attributes": attributes or {},
+        "forcedFeatures": [[k, v] for k, v in (forced_features or {}).items()],
+        "forcedVariations": forced_variations or {},
+        "url": url or "",
+    }
+
+
+def is_cloud_host(api_host: Optional[str]) -> bool:
+    """True if api_host points at GrowthBook Cloud (which doesn't expose
+    /api/eval). Handles schemeless inputs like "cdn.growthbook.io" — naive
+    urlparse on those returns no hostname."""
+    raw = (api_host or "").strip()
+    if not raw:
+        return False
+    parsed = _urlparse(raw if "://" in raw else "https://" + raw)
+    host = parsed.hostname or ""
+    return host == "growthbook.io" or host.endswith(".growthbook.io")
+
+
+def validate_remote_eval_options(
+    client_key: Optional[str],
+    decryption_key: Optional[str],
+    sticky_bucket_service: Any,
+    api_host: Optional[str],
+) -> None:
+    """Raise ValueError on any combination of options that's incompatible with
+    remote-eval mode. Caller is responsible for any class-specific extras
+    (e.g., the sync class's `stale_while_revalidate` flag, the async class's
+    `refresh_strategy=STALE_WHILE_REVALIDATE`)."""
+    if not client_key:
+        raise ValueError("Must specify client_key for remote eval")
+    if not api_host:
+        # Without this guard, `_get_remote_eval_url(api_host, ...)` would fall
+        # back to `https://cdn.growthbook.io` and POST `/api/eval/{key}` to
+        # Cloud, which doesn't expose that endpoint — surfacing as an opaque
+        # 404 (or SSL/connectivity error) instead of a clear config error.
+        # The sync class's `api_host` defaults to "" and the async client's
+        # Options accepts "" or None — both hit this without an explicit guard.
+        raise ValueError(
+            "Must specify api_host (pointing at a self-hosted proxy/edge) for remote eval"
+        )
+    if decryption_key:
+        raise ValueError("Encryption is not available for remote eval")
+    if sticky_bucket_service is not None:
+        raise ValueError(
+            "sticky_bucket_service is not compatible with remote_eval; "
+            "the proxy handles sticky bucketing server-side"
+        )
+    if is_cloud_host(api_host):
+        raise ValueError(
+            "Cloud host does not support remote eval; use a self-hosted proxy/edge"
+        )

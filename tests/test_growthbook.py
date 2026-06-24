@@ -110,6 +110,29 @@ def test_conditions(evalCondition_data):
     assert evalCondition(attributes, condition, savedGroups) == expected
 
 
+def test_nan_attribute_obeys_ieee_754():
+    # JSON can't represent NaN, so this can't live in cases.json. Without
+    # the explicit NaN guard in compare(), compare(NaN, NaN) returns 0
+    # because both > and < are False — wrongly reporting $eq match.
+    # IEEE 754: every comparison involving NaN is False except !=.
+    nan = float("nan")
+    cond_nan = {"x": nan}
+
+    assert evalCondition({"x": nan}, {"x": {"$eq": nan}}) is False
+    assert evalCondition({"x": nan}, {"x": {"$ne": nan}}) is True
+    assert evalCondition({"x": nan}, {"x": {"$lt": nan}}) is False
+    assert evalCondition({"x": nan}, {"x": {"$lte": nan}}) is False
+    assert evalCondition({"x": nan}, {"x": {"$gt": nan}}) is False
+    assert evalCondition({"x": nan}, {"x": {"$gte": nan}}) is False
+    # NaN attribute vs concrete number: every comparison is False.
+    assert evalCondition({"x": nan}, {"x": {"$eq": 5}}) is False
+    assert evalCondition({"x": nan}, {"x": {"$lt": 5}}) is False
+    assert evalCondition({"x": nan}, {"x": {"$gt": 5}}) is False
+    # NaN condition vs concrete attribute: same.
+    assert evalCondition({"x": 5}, {"x": {"$eq": nan}}) is False
+    assert evalCondition({"x": 5}, {"x": {"$ne": nan}}) is True
+
+
 def test_version_comparison_normalizes_unhashable_values():
     assert paddedVersionString(["1.2.3"]) == paddedVersionString("0")
     assert paddedVersionString({"version": "1.2.3"}) == paddedVersionString("0")
@@ -1503,7 +1526,9 @@ async def test_gb_passes_correct_args_to_repo():
                new=AsyncMock(return_value=None)) as mock_load:
         await gb.load_features_async()
 
-    mock_load.assert_called_once_with("https://my-host.io","sdk-xyz","secret",120)
+    mock_load.assert_called_once()
+    args, kwargs = mock_load.call_args
+    assert args[:4] == ("https://my-host.io", "sdk-xyz", "secret", 120)
 
 @pytest.mark.asyncio
 async def test_fetch_features_async_returns_decoded():

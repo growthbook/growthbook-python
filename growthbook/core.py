@@ -1,4 +1,5 @@
 import logging
+import math
 import re
 import json
 from functools import lru_cache
@@ -106,6 +107,15 @@ def elemMatch(condition, attributeValue, savedGroups) -> bool:
     return False
 
 def compare(val1, val2) -> int:
+    # IEEE 754: NaN is unordered with everything (including itself), so the
+    # "0 if neither > nor <" fallthrough below would wrongly report equal.
+    # Raise instead — callers' existing exception handling gives the right
+    # truth value: $eq=False, $ne=True, $lt/$lte/$gt/$gte=False.
+    if isinstance(val1, float) and math.isnan(val1):
+        raise ValueError("NaN")
+    if isinstance(val2, float) and math.isnan(val2):
+        raise ValueError("NaN")
+
     if _is_numeric(val1) and not _is_numeric(val2):
         if (val2 is None):
             val2 = 0
@@ -124,17 +134,37 @@ def compare(val1, val2) -> int:
         return -1
     return 0
 
+def _js_strict_equal(a, b) -> bool:
+    """JS === semantics for $eq/$ne. Routed here instead of compare() so
+    $lt/$gt keep their JS-aligned coercion via compare() while $eq stays
+    strict.
+
+    Three buckets:
+
+    * **Different types** → False (e.g. number 5 vs string "5",
+      number 1 vs boolean true).
+    * **Container types (array, object)** → False unconditionally.
+      JS `===` is reference equality for arrays/objects, and within
+      feature evaluation the operator's two operands always come from
+      separate JSON parses — different references, never `===`. So in
+      the only context this code observes, container $eq must be False.
+    * **Primitive same type** (number, string, boolean, null) →
+      Python `a == b`. Matches `===` for ints/floats and strings;
+      NaN handled correctly because `NaN == NaN` is False in Python.
+    """
+    ta = getType(a)
+    if ta != getType(b):
+        return False
+    if ta == "array" or ta == "object":
+        return False
+    return bool(a == b)
+
+
 def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups) -> bool:
     if operator == "$eq":
-        try:
-            return compare(attributeValue, conditionValue) == 0
-        except Exception:
-            return False
+        return _js_strict_equal(attributeValue, conditionValue)
     elif operator == "$ne":
-        try:
-            return compare(attributeValue, conditionValue) != 0
-        except Exception:
-            return False
+        return not _js_strict_equal(attributeValue, conditionValue)
     elif operator == "$lt":
         try:
             return compare(attributeValue, conditionValue) < 0
@@ -196,13 +226,16 @@ def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups)
             r = re.compile(conditionValue)
             return not bool(r.search(attributeValue))
         except Exception:
-            return False
+            # Same inverted-default trap as $ne: a missing attribute means
+            # re.search(None) raises, but the semantic answer for $notRegex
+            # is "the missing value doesn't match the regex" → True.
+            return True
     elif operator == "$notRegexi":
         try:
             r = re.compile(conditionValue, re.IGNORECASE)
             return not bool(r.search(attributeValue))
         except Exception:
-            return False
+            return True
     elif operator == "$in":
         if not isinstance(conditionValue, list):
             return False
@@ -277,7 +310,11 @@ def _paddedVersionString(input: str) -> str:
 
 def isIn(conditionValue, attributeValue, insensitive: bool = False) -> bool:
     if insensitive:
-        # Helper function to case-fold values (lowercase for strings)
+        # Helper function to case-fold values (lowercase for strings).
+        # Uses Python str.lower(), which is byte-identical to JS toLowerCase()
+        # for the relevant inputs: both do Unicode-aware single-char mapping
+        # without multi-char folds (e.g., "İ".lower() == "i̇" in both;
+        # "ß".lower() == "ß" in both; "Σ".lower() == "σ" in both).
         def case_fold(val):
             return val.lower() if isinstance(val, str) else val
         
@@ -316,7 +353,7 @@ def _getOrigHashValue(
     fallbackAttr: Optional[str] = None
 ) -> Tuple[str, str]:
     # attr = attr or "id" -- Fix for the flaky behavior of sticky bucket assignment
-    actual_attr: str = attr if attr is not None else ""
+    actual_attr: str = attr if attr is not None else "id"
     val = ""
 
     if actual_attr in eval_context.user.attributes:
@@ -327,7 +364,7 @@ def _getOrigHashValue(
         if fallbackAttr in eval_context.user.attributes:
             val = "" if eval_context.user.attributes[fallbackAttr] is None else eval_context.user.attributes[fallbackAttr]
 
-        if not val or val != "":
+        if val:
             actual_attr = fallbackAttr
 
     return (actual_attr, val)
@@ -480,6 +517,52 @@ def getBucketRanges(
 
     return ranges
 
+def _fire_rule_tracks(
+    rule_tracks: List[Dict[str, Any]],
+    eval_context: EvaluationContext,
+    tracking_cb: Optional[Callable[[Experiment, Result, UserContext], None]],
+) -> None:
+    """Fire tracking_cb for each deferred experiment-tracking entry attached to
+    a remote-eval force rule. The proxy server evaluates experiments server-side
+    and emits the resulting (experiment, result) pairs here so the SDK can still
+    drive its tracking pipeline. Mirrors the JS SDK behavior in
+    packages/sdk-js/src/core.ts (`if (rule.tracks) ...`)."""
+    if not rule_tracks or not tracking_cb:
+        return
+    for entry in rule_tracks:
+        exp_data = entry.get("experiment") or {}
+        res_data = entry.get("result") or {}
+        # Experiment requires at minimum a key and variations list.
+        if "key" not in exp_data or "variations" not in exp_data:
+            logger.debug("Skipping rule.tracks entry: missing experiment key/variations")
+            continue
+        # The proxy emits Result in the JS shape: key/name/passthrough flat at
+        # the top level. Python's Result takes those via a nested `meta` dict.
+        # Re-pack if no explicit `meta` was provided.
+        meta = res_data.get("meta")
+        if meta is None:
+            flat = {k: res_data[k] for k in ("key", "name", "passthrough") if k in res_data}
+            meta = flat or None
+        try:
+            # Experiment accepts **_ignored, so passing the raw proxy dict is safe.
+            experiment = Experiment(**exp_data)
+            result = Result(
+                variationId=res_data.get("variationId", 0),
+                inExperiment=res_data.get("inExperiment", False),
+                value=res_data.get("value"),
+                hashUsed=res_data.get("hashUsed", False),
+                hashAttribute=res_data.get("hashAttribute", "id"),
+                hashValue=res_data.get("hashValue", ""),
+                featureId=res_data.get("featureId"),
+                meta=meta,  # type: ignore[arg-type]
+                bucket=res_data.get("bucket"),
+                stickyBucketUsed=res_data.get("stickyBucketUsed", False),
+            )
+            tracking_cb(experiment, result, eval_context.user)
+        except Exception:
+            logger.exception("Failed to fire rule.tracks tracking event")
+
+
 def eval_feature(
     key: str,
     evalContext: Optional[EvaluationContext] = None,
@@ -550,6 +633,11 @@ def eval_feature(
                 continue
 
             logger.debug("Force value from rule, feature %s", key)
+            # Fire deferred experiment tracking events attached by the
+            # remote-eval proxy (no-op when the rule was not produced by remote
+            # evaluation).
+            if rule.tracks:
+                _fire_rule_tracks(rule.tracks, evalContext, tracking_cb)
             return FeatureResult(rule.force, "force", ruleId=rule.id)
 
         if rule.variations is None:
@@ -635,14 +723,14 @@ def _get_sticky_bucket_assignments(evalContext: EvaluationContext,
     merged: Dict[str, str] = {}
 
     # Search for docs stored for attribute(id)
-    _, hashValue = _getHashValue(attr=attr, eval_context=evalContext)
-    key = f"{attr}||{hashValue}"
+    resolved_attr, hashValue = _getHashValue(attr=attr, eval_context=evalContext)
+    key = f"{resolved_attr}||{hashValue}"
     if key in evalContext.user.sticky_bucket_assignment_docs:
         merged = evalContext.user.sticky_bucket_assignment_docs[key].get("assignments", {})
 
     # Search for docs stored for fallback attribute
     if fallback:
-        _, hashValue = _getHashValue(fallbackAttr=fallback, eval_context=evalContext)
+        _, hashValue = _getHashValue(attr=fallback, eval_context=evalContext)
         key = f"{fallback}||{hashValue}"
         if key in evalContext.user.sticky_bucket_assignment_docs:
             # Merge the fallback assignments, but don't overwrite existing ones

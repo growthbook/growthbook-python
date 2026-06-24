@@ -1,5 +1,46 @@
 # Changelog
 
+## [2.3.1](https://github.com/growthbook/growthbook-python/compare/v2.3.0...v2.3.1) (2026-06-18)
+
+
+### Fixes & Enhancements
+
+* Align condition equality with JavaScript strict equality semantics:
+  * `$eq` and direct equality no longer coerce across types, so values like `5` and `"5"` or `true` and `1` no longer match.
+  * `$ne` now returns the inverse of strict equality for these cases.
+  * Array and object operands follow JavaScript reference-identity semantics, so separately parsed but structurally equal arrays/objects do not match with `$eq`.
+  ([7f9d2d](https://github.com/growthbook/growthbook-python/commit/7f9d2d24e6df1b863a1dc269933e4868105a1ac5), [a8ff302](https://github.com/growthbook/growthbook-python/commit/a8ff302a985f123ebea77a4d624814a376632979), [b011fee](https://github.com/growthbook/growthbook-python/commit/b011fee86fadad6f3db58bdf234c9dc6fe099285))
+* Fix `NaN` comparison handling so `NaN` does not compare equal to itself and ordered comparisons involving `NaN` evaluate as false.
+  ([672136a](https://github.com/growthbook/growthbook-python/commit/672136a629cb3dd191825ceb6250b890c3fab626))
+* Preserve JavaScript-compatible Unicode lowercasing behavior for case-insensitive operators such as `$ini`, `$nini`, and `$alli`.
+  ([5f45087](https://github.com/growthbook/growthbook-python/commit/5f45087a75a68896a0efdd43107a55da1600f85f))
+
+### Tests and CI
+
+* Expanded SDK conformance coverage for condition operators, prerequisite/parent-condition cases, force-rule `hashVersion: 2`, and sticky-bucket bucket-version boundaries.
+  ([505c8e1](https://github.com/growthbook/growthbook-python/commit/505c8e1d44a0e9f51f9d4c8c98bc656ad0d965238), [a95ce02](https://github.com/growthbook/growthbook-python/commit/a95ce023a86d91c337f87aed415a57e05eb05ceb), [076eab8](https://github.com/growthbook/growthbook-python/commit/076eab860afc7016fa812f41f5d57db14382c7cd))
+* Added a corpus freshness check against the JavaScript SDK cases corpus to catch missing or drifted cases.
+  ([e428acb](https://github.com/growthbook/growthbook-python/commit/e428acba2559e8eddf3714703f03b0994b3b25220), [460f581](https://github.com/growthbook/growthbook-python/commit/460f5818c4771296d925a3a9af62d59e1435ad14), [a030b66](https://github.com/growthbook/growthbook-python/commit/a030b669a41a2cff2831f98195898dff4e00ebe3))
+
+### Compatibility note
+
+There are no API changes, but this release can change feature targeting results for customers whose conditions relied on Python’s previous coercive equality behavior.
+
+## [2.3.0](https://github.com/growthbook/growthbook-python/compare/v2.2.2...v2.3.0) (2026-06-05)
+
+### Features
+
+* Added opt-in remote evaluation support for sync and async clients including cache invalidation, concurrent request coalescing, and cancellation handling. Merge pull request [#118](https://github.com/growthbook/growthbook-python/issues/118) from growthbook/feat/remote-eval ([f6b7c0a](https://github.com/growthbook/growthbook-python/commit/f6b7c0a224a021bd66eda9d6a939aad2064add35))
+* Merge pull request [#119](https://github.com/growthbook/growthbook-python/issues/119) from vazarkevych/fix/sticky-bucket-hash-value-resolution ([2edd6a3](https://github.com/growthbook/growthbook-python/commit/2edd6a343dd15de9f96eb36c7c4407e213941336))
+
+
+### Bug Fixes
+* Fixed user context synchronization in evaluation/logging paths. ([75f1dcb](https://github.com/growthbook/growthbook-python/pull/118/changes/75f1dcb71e8cddbe0d88a51e2475a439e33318b5))
+* Fixed `$ne`, `$notRegex`, and `$notRegexi` condition behavior for incompatible inputs. ([26d549b](https://github.com/growthbook/growthbook-python/pull/118/changes/26d549b8b0c4cee6171db955f3069a5d9a6b03d4))
+* correct sticky bucket hash attribute resolution ([2edd6a3](https://github.com/growthbook/growthbook-python/commit/2edd6a343dd15de9f96eb36c7c4407e213941336))
+* correct sticky bucket hash attribute resolution ([875316c](https://github.com/growthbook/growthbook-python/commit/875316c494e50d60a680767838c68b622f8fd402))
+
+
 ## [2.2.2](https://github.com/growthbook/growthbook-python/compare/v2.2.1...v2.2.2) (2026-05-11)
 
 
