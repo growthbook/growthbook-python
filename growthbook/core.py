@@ -705,8 +705,8 @@ def eval_prereqs(parentConditions: List[dict], evalContext: EvaluationContext) -
             return "cyclic"
 
         parent_condition = parentCondition.get("condition")
-        if parent_condition is None:
-            continue  # Skip if no valid condition
+        if not isinstance(parent_condition, dict):
+            continue  # Skip if missing or malformed (non-dict) condition
             
         if not evalCondition({'value': parentRes.value}, parent_condition, evalContext.global_ctx.saved_groups):
             if parentCondition.get("gate", False):
