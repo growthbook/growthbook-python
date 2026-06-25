@@ -95,22 +95,26 @@ class CacheEntry(object):
 class InMemoryFeatureCache(AbstractFeatureCache):
     def __init__(self) -> None:
         self.cache: Dict[str, CacheEntry] = {}
+        self._lock = threading.Lock()
 
     def get(self, key: str) -> Optional[Dict]:
-        if key in self.cache:
-            entry = self.cache[key]
-            if entry.expires >= time():
-                return entry.value
+        with self._lock:
+            if key in self.cache:
+                entry = self.cache[key]
+                if entry.expires >= time():
+                    return entry.value
         return None
 
     def set(self, key: str, value: Dict, ttl: int) -> None:
-        if key in self.cache:
-            self.cache[key].update(value)
-        else:
-            self.cache[key] = CacheEntry(value, ttl)
+        with self._lock:
+            if key in self.cache:
+                self.cache[key].update(value)
+            else:
+                self.cache[key] = CacheEntry(value, ttl)
 
     def clear(self) -> None:
-        self.cache.clear()
+        with self._lock:
+            self.cache.clear()
 
 class InMemoryStickyBucketService(AbstractStickyBucketService):
     def __init__(self) -> None:
@@ -359,6 +363,7 @@ class FeatureRepository(object):
         self.http_read_timeout: Optional[int] = None
         self.sse_client: Optional[SSEClient] = None
         self._feature_update_callbacks: List[Callable[[Dict], None]] = []
+        self._callbacks_lock = threading.Lock()
         
         # Background refresh support
         self._refresh_thread: Optional[threading.Thread] = None
@@ -370,6 +375,15 @@ class FeatureRepository(object):
         self._etag_cache: OrderedDict[str, Tuple[str, Dict[str, Any]]] = OrderedDict()
         self._max_etag_entries = 100
         self._etag_lock = threading.Lock()
+        # Per-key locks coalesce concurrent cache-miss fetches: on a miss only
+        # one thread/coroutine hits the API for a given cache key, the rest wait
+        # and then read the freshly-cached value (prevents cache-miss stampede).
+        self._key_locks: Dict[str, threading.Lock] = {}
+        self._key_locks_guard = threading.Lock()
+        # Async locks are keyed by (event-loop id, cache key) so a lock bound to
+        # a finished loop is never reused on another loop (avoids cross-loop hang).
+        self._async_key_locks: Dict[Tuple[int, str], "asyncio.Lock"] = {}
+        self._async_key_locks_guard = threading.Lock()
 
     def set_cache(self, cache: AbstractFeatureCache) -> None:
         self.cache = cache
@@ -382,21 +396,45 @@ class FeatureRepository(object):
 
     def add_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
         """Add a callback to be notified when features are updated due to cache expiry"""
-        if callback not in self._feature_update_callbacks:
-            self._feature_update_callbacks.append(callback)
+        with self._callbacks_lock:
+            if callback not in self._feature_update_callbacks:
+                self._feature_update_callbacks.append(callback)
 
     def remove_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
         """Remove a feature update callback"""
-        if callback in self._feature_update_callbacks:
-            self._feature_update_callbacks.remove(callback)
+        with self._callbacks_lock:
+            if callback in self._feature_update_callbacks:
+                self._feature_update_callbacks.remove(callback)
 
     def _notify_feature_update_callbacks(self, features_data: Dict) -> None:
         """Notify all registered callbacks about feature updates"""
-        for callback in self._feature_update_callbacks:
+        with self._callbacks_lock:
+            callbacks = self._feature_update_callbacks.copy()
+        for callback in callbacks:
             try:
                 callback(features_data)
             except Exception as e:
                 logger.warning(f"Error in feature update callback: {e}")
+
+    def _lock_for(self, key: str) -> threading.Lock:
+        """Return (creating if needed) the per-key lock used to coalesce fetches."""
+        with self._key_locks_guard:
+            lock = self._key_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._key_locks[key] = lock
+            return lock
+
+    def _async_lock_for(self, key: str) -> "asyncio.Lock":
+        """Per-(loo_p, key) async lock; loop-scoped to avoid cross-loop reuse."""
+        loop_id = id(asyncio.get_running_loop())
+        composite = (loop_id, key)
+        with self._async_key_locks_guard:
+            lock = self._async_key_locks.get(composite)
+            if lock is None:
+                lock = asyncio.Lock()
+                self._async_key_locks[composite] = lock
+            return lock
 
     # Loads features with an in-memory cache in front using stale-while-revalidate approach
     def load_features(
@@ -419,26 +457,37 @@ class FeatureRepository(object):
         # signals (proxy `features-updated`) actually trigger a refetch
         # instead of returning the stale entry.
         cached = None if force_refresh else self.cache.get(key)
-        if not cached:
-            if remote_eval:
-                if payload is None:
-                    logger.error("Payload is required for remote-eval POST request")
-                    return None
-                # Remote-eval responses are not encrypted (server is trusted).
-                res = self._fetch_and_decode_post(api_host, client_key, payload)
-            else:
-                res = self._fetch_features(api_host, client_key, decryption_key)
+        if cached:
+            return cached
+
+        # Remote-eval keeps its existing path (no coalescing lock): responses are per-user,
+        # and the async client already coalesces via `_remote_eval_inflight_.
+        # Global callbacks are skipped for the same cross-pollination reason as before.
+        if remote_eval:
+            if payload is None:
+                logger.error("Payload is required for remote-eval POST request")
+                return None
+            # Remote-eval responses are not encrypted (server is trusted).
+            res = self._fetch_and_decode_post(api_host,client_key,payload)
             if res is not None:
                 self.cache.set(key, res, ttl)
                 logger.debug("Fetched features from API, stored in cache")
-                # Skip global callbacks in remote-eval mode: responses are
-                # per-instance/per-user, so broadcasting would cross-pollute
-                # other GrowthBook instances sharing this singleton repo.
-                if not remote_eval:
-                    self._notify_feature_update_callbacks(res)
                 return res
-        return cached
+            return None
 
+        # Per-key coalescing for the CDN path: on a miss only the first thread fetches:
+        # others wait on the lock and re-read the freshly value.
+        with self._lock_for(key):
+            cached = None if force_refresh else self.cache.get(key)
+            if cached:
+                return cached
+            res = self._fetch_features(api_host, client_key, decryption_key)
+            if res is not None:
+                self.cache.set(key, res, ttl)
+                logger.debug("Fetched features from API, stored in cache")
+                self._notify_feature_update_callbacks(res)
+                return res
+            return None
 
     async def load_features_async(
         self,
@@ -454,22 +503,38 @@ class FeatureRepository(object):
         key = self._compute_cache_key(api_host, client_key, remote_eval, payload, cache_key_attributes)
 
         cached = None if force_refresh else self.cache.get(key)
-        if not cached:
-            if remote_eval:
-                if payload is None:
-                    logger.error("Payload is required for remote-eval POST request")
-                    return None
-                res = await self._fetch_and_decode_post_async(api_host, client_key, payload)
-            else:
-                res = await self._fetch_features_async(api_host, client_key, decryption_key)
+        if cached:
+            return cached
+
+        # Remote-eval keeps its existing path: the async client already coalesces concurrent POSTs
+        # via `_remote_eval_inflight`, and responses are per-user, so no shared coalescing lock here.
+        if remote_eval:
+            if payload is None:
+                logger.error("Payload is required for remote-eval POST request")
+                return None
+            res = await self._fetch_and_decode_post_async(api_host, client_key, payload)
+
             if res is not None:
                 self.cache.set(key, res, ttl)
                 logger.debug("Fetched features from API, stored in cache")
-                if not remote_eval:
-                    self._notify_feature_update_callbacks(res)
                 return res
-        return cached
-    
+            return None
+
+        # Per-key coalescing for the CDN path. The lock is help across the network `await`,
+        # so concurrent coroutines for the same key wait
+        # and then re-read the freshly-cached value instead of each issuing a fetch.
+        async with self._async_lock_for(key):
+            cached = None if force_refresh else self.cache.get(key)
+            if cached:
+                return cached
+            res = await self._fetch_features_async(api_host, client_key, decryption_key)
+            if res is not None:
+                self.cache.set(key, res, ttl)
+                logger.debug("Fetched features from API, stored in cache")
+                self._notify_feature_update_callbacks(res)
+                return res
+            return None
+
     @property
     def user_agent_suffix(self) -> Optional[str]:
         return getattr(self, "_user_agent_suffix", None)
