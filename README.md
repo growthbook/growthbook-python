@@ -444,6 +444,18 @@ gb = GrowthBook(attributes = attributes)
 gb.set_attributes(attributes)
 ```
 
+`set_attributes` **replaces** all attributes. To add or change a few attributes
+without rebuilding the whole dict, use `update_attributes`, which does a shallow
+**merge** (new keys added, existing keys overwritten, untouched keys preserved):
+
+```python
+gb.set_attributes({'id': "123"})
+
+# Merge in a new attribute; 'id' is preserved
+gb.update_attributes({'plan': "pro"})
+# Attributes are now {'id': "123", 'plan': "pro"}
+```
+
 ### Tracking Experiments
 
 Any time an experiment is run to determine the value of a feature, you want to track that event in your analytics system.
