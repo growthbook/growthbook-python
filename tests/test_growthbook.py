@@ -10,8 +10,9 @@ from growthbook import (
     InMemoryStickyBucketService,
     decrypt,
     feature_repo,
-    logger,
 )
+
+from growthbook.growthbook import logger
 
 from growthbook.core import (
     getBucketRanges,
