@@ -11,9 +11,10 @@ import logging
 import warnings
 
 from abc import ABC, abstractmethod
-from typing import Optional, Any, Set, Tuple, List, Dict, Callable
+from typing import Optional, Any, Set, Tuple, List, Dict, Callable, cast
 
 from .common_types import (
+    T,
     EvaluationContext,
     Experiment,
     FeatureResult,
@@ -1263,13 +1264,13 @@ class GrowthBook(object):
     def is_off(self, key: str) -> bool:
         return self.eval_feature(key).off
 
-    def getFeatureValue(self, key: str, fallback):
+    def getFeatureValue(self, key: str, fallback: T) -> T:
         warnings.warn("getFeatureValue is deprecated, use get_feature_value instead", DeprecationWarning)
         return self.get_feature_value(key, fallback)
 
-    def get_feature_value(self, key: str, fallback):
+    def get_feature_value(self, key: str, fallback: T) -> T:
         res = self.eval_feature(key)
-        return res.value if res.value is not None else fallback
+        return cast(T, res.value) if res.value is not None else fallback
 
     def evalFeature(self, key: str) -> FeatureResult:
         warnings.warn("evalFeature is deprecated, use eval_feature instead", DeprecationWarning)

@@ -4,7 +4,7 @@ import json
 from dataclasses import dataclass, field
 import random
 import logging
-from typing import Any, Dict, List, Optional, Union, Callable, Awaitable
+from typing import Any, Dict, List, Optional, Union, Callable, Awaitable, cast
 from typing import Set
 import asyncio
 import threading
@@ -17,6 +17,7 @@ from contextlib import asynccontextmanager
 
 from .core import eval_feature as core_eval_feature, run_experiment
 from .common_types import (
+    T,
     Feature,
     GlobalContext,
     Options,
@@ -1212,9 +1213,9 @@ class GrowthBookClient:
         result = await self.eval_feature(key, user_context)
         return result.off
 
-    async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext) -> Any:
+    async def get_feature_value(self, key: str, fallback: T, user_context: UserContext) -> T:
         result = await self.eval_feature(key, user_context)
-        return result.value if result.value is not None else fallback
+        return cast(T, result.value) if result.value is not None else fallback
 
     async def run(self, experiment: Experiment, user_context: UserContext) -> Result:
         """Run experiment with tracking. Lock-free, same as eval_feature."""

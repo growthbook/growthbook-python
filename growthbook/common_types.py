@@ -1,10 +1,15 @@
 #!/usr/bin/env python
 
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypedDict, Union, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypedDict, TypeVar, Union, Set, Tuple
 from enum import Enum
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse as _urlparse
+
+# Generic feature/experiment value type. Deliberately unbounded: a JSONValue
+# bound would reject TypedDict/dataclass-shaped fallbacks (see JS SDK issue #1729,
+# where the equivalent bound was shipped and then reverted).
+T = TypeVar("T")
 
 class VariationMeta(TypedDict):
     key: str
