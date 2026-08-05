@@ -28,13 +28,14 @@ if TYPE_CHECKING:
 # where the equivalent bound was shipped and then reverted).
 T = TypeVar("T")
 
-class VariationMeta(TypedDict):
+# Wire shapes: real payloads routinely omit keys, hence total=False.
+class VariationMeta(TypedDict, total=False):
     key: str
     name: str
     passthrough: bool
 
 
-class Filter(TypedDict):
+class Filter(TypedDict, total=False):
     seed: str
     ranges: List[Tuple[float, float]]
     hashVersion: int
@@ -377,12 +378,16 @@ class FeatureRule(object):
         return data
 
 class AbstractStickyBucketService(ABC):
+    # Assignment docs are Dict[str, Any] with a fixed shape:
+    #   {"attributeName": str, "attributeValue": str, "assignments": Dict[str, str]}
+    # Kept as plain dicts (not TypedDict) so third-party implementations
+    # annotated with Dict stay compatible under type checking.
     @abstractmethod
-    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict[str, Any]]:
         pass
 
     @abstractmethod
-    def save_assignments(self, doc: Dict) -> None:
+    def save_assignments(self, doc: Dict[str, Any]) -> None:
         pass
 
     def get_key(self, attributeName: str, attributeValue: str) -> str:
@@ -390,8 +395,8 @@ class AbstractStickyBucketService(ABC):
 
     # By default, just loop through all attributes and call get_assignments
     # Override this method in subclasses to perform a multi-query instead
-    def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
-        docs = {}
+    def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
+        docs: Dict[str, Dict[str, Any]] = {}
         for attributeName, attributeValue in attributes.items():
             doc = self.get_assignments(attributeName, attributeValue)
             if doc:
@@ -527,7 +532,7 @@ class Options:
 @dataclass
 class GlobalContext:
     options: Options
-    features: Dict[str, Any] = field(default_factory=dict)
+    features: Dict[str, "Feature"] = field(default_factory=dict)
     saved_groups: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass

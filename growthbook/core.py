@@ -6,7 +6,7 @@ import json
 from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
-from typing import Callable, Optional, Any, Set, Tuple, List, Dict
+from typing import Callable, Optional, Any, Set, Tuple, List, Dict, cast
 from .common_types import EvaluationContext, FeatureResult, Experiment, Filter, Result, UserContext, VariationMeta
 
 
@@ -540,9 +540,9 @@ def _fire_rule_tracks(
         # The proxy emits Result in the JS shape: key/name/passthrough flat at
         # the top level. Python's Result takes those via a nested `meta` dict.
         # Re-pack if no explicit `meta` was provided.
-        meta = res_data.get("meta")
+        meta: Optional[VariationMeta] = res_data.get("meta")
         if meta is None:
-            flat = {k: res_data[k] for k in ("key", "name", "passthrough") if k in res_data}
+            flat = cast(VariationMeta, {k: res_data[k] for k in ("key", "name", "passthrough") if k in res_data})
             meta = flat or None
         try:
             # Experiment accepts **_ignored, so passing the raw proxy dict is safe.
@@ -555,7 +555,7 @@ def _fire_rule_tracks(
                 hashAttribute=res_data.get("hashAttribute", "id"),
                 hashValue=res_data.get("hashValue", ""),
                 featureId=res_data.get("featureId"),
-                meta=meta,  # type: ignore[arg-type]
+                meta=meta,
                 bucket=res_data.get("bucket"),
                 stickyBucketUsed=res_data.get("stickyBucketUsed", False),
             )
@@ -1044,7 +1044,12 @@ def run_experiment(experiment: Experiment,
     logger.debug("Assigned variation %d in experiment %s", assigned, experiment.key)
     return result
 
-def _generate_sticky_bucket_assignment_doc(attribute_name: str, attribute_value: str, assignments: dict, evalContext: EvaluationContext):
+def _generate_sticky_bucket_assignment_doc(
+    attribute_name: str,
+    attribute_value: str,
+    assignments: Dict[str, str],
+    evalContext: EvaluationContext,
+) -> Dict[str, Any]:
     key = attribute_name + "||" + attribute_value
     existing_assignments = evalContext.user.sticky_bucket_assignment_docs.get(key, {}).get("assignments", {})
 

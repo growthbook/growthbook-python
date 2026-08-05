@@ -533,7 +533,8 @@ class FeatureRepository(object):
                     "Failed to fetch features (remote eval), received status code %d", r.status
                 )
                 return None
-            return json.loads(r.data.decode("utf-8"))  # type: ignore[no-any-return]
+            decoded: Dict[str, Any] = json.loads(r.data.decode("utf-8"))
+            return decoded
         except Exception as e:
             logger.warning(f"Failed to decode remote-eval response: {e}")
             return None
@@ -554,7 +555,8 @@ class FeatureRepository(object):
                             response.status,
                         )
                         return None
-                    return await response.json()  # type: ignore[no-any-return]
+                    decoded: Dict[str, Any] = await response.json()
+                    return decoded
         except aiohttp.ClientError as e:
             logger.warning(f"HTTP request failed (remote eval): {e}")
             return None
@@ -599,8 +601,8 @@ class FeatureRepository(object):
                 )
                 return None
             
-            decoded = json.loads(r.data.decode("utf-8"))
-            
+            decoded: Dict[str, Any] = json.loads(r.data.decode("utf-8"))
+
             # Store the new ETag if present
             response_etag = r.headers.get('ETag')
             if response_etag:
@@ -618,11 +620,11 @@ class FeatureRepository(object):
             else:
                 logger.debug("No ETag header in response")
             
-            return decoded  # type: ignore[no-any-return]
+            return decoded
         except Exception as e:
             logger.error(f"Failed to decode feature JSON from GrowthBook API: {e}")
             return None
-        
+
     async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
         url = self._get_features_url(api_host, client_key)
         headers = self._get_headers(client_key=client_key)
@@ -658,8 +660,8 @@ class FeatureRepository(object):
                         logger.warning("Failed to fetch features, received status code %d", response.status)
                         return None
                     
-                    decoded = await response.json()
-                    
+                    decoded: Dict[str, Any] = await response.json()
+
                     # Store the new ETag if present
                     response_etag = response.headers.get('ETag')
                     if response_etag:
@@ -677,7 +679,7 @@ class FeatureRepository(object):
                     else:
                         logger.debug("[Async] No ETag header in response")
                     
-                    return decoded  # type: ignore[no-any-return]
+                    return decoded
         except aiohttp.ClientError as e:
             logger.warning(f"HTTP request failed: {e}")
             return None
