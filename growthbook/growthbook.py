@@ -487,7 +487,7 @@ class FeatureRepository(object):
         self.http = self.http or PoolManager(timeout=timeout)
         return self.http.request("GET", url, headers=headers or {})
     
-    def _get_headers(self, client_key: str, existing_headers: Dict[str, str] = None) -> Dict[str, str]:
+    def _get_headers(self, client_key: str, existing_headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         headers = existing_headers or {}
         headers['Accept-Encoding'] = "gzip, deflate"
         

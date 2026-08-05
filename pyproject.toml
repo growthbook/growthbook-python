@@ -6,6 +6,7 @@ testpaths = ["tests"]
 pythonpath = "."
 
 [tool.mypy]
+files = ["growthbook"]
 python_version = "3.9"
 warn_return_any = true
 warn_unused_configs = true
