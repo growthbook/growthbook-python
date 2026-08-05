@@ -11,10 +11,16 @@ import logging
 import warnings
 
 from abc import ABC, abstractmethod
-from typing import Optional, Any, Set, Tuple, List, Dict, Callable, cast
+from typing import TYPE_CHECKING, Optional, Any, Set, Tuple, List, Dict, Callable, cast
+
+if TYPE_CHECKING:
+    from .plugins.base import PluginLike
 
 from .common_types import (
     T,
+    EventLogger,
+    FeatureUsageCallback,
+    TrackingCallback,
     EvaluationContext,
     Experiment,
     FeatureResult,
@@ -831,8 +837,8 @@ class GrowthBook(object):
         url: str = "",
         features: dict = {},
         qa_mode: bool = False,
-        on_experiment_viewed=None,
-        on_feature_usage=None,
+        on_experiment_viewed: Optional[TrackingCallback] = None,
+        on_feature_usage: Optional[FeatureUsageCallback] = None,
         api_host: str = "",
         client_key: str = "",
         decryption_key: str = "",
@@ -846,10 +852,10 @@ class GrowthBook(object):
         streaming_connection_timeout: int = 30,
         stale_while_revalidate: bool = False,
         stale_ttl: int = 300,  # 5 minutes default
-        plugins: Optional[List[Any]] = None,
+        plugins: Optional[List["PluginLike"]] = None,
         skip_all_experiments: bool = False,
         # Deprecated args
-        trackingCallback=None,
+        trackingCallback: Optional[TrackingCallback] = None,
         qaMode: bool = False,
         user: dict = {},
         groups: dict = {},
@@ -893,8 +899,8 @@ class GrowthBook(object):
         self._sticky_bucket_attributes: Optional[dict] = None
 
         self._qaMode = qa_mode or qaMode
-        self._trackingCallback = on_experiment_viewed or trackingCallback
-        self._featureUsageCallback = on_feature_usage
+        self._trackingCallback: Optional[TrackingCallback] = on_experiment_viewed or trackingCallback
+        self._featureUsageCallback: Optional[FeatureUsageCallback] = on_feature_usage
         self._skip_all_experiments = skip_all_experiments
 
         self._streaming = streaming
@@ -911,13 +917,13 @@ class GrowthBook(object):
 
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
-        self._subscriptions: Set[Any] = set()
+        self._subscriptions: Set[Callable[[Experiment, Result], None]] = set()
         self._is_updating_features = False
-        self._event_logger: Optional[Any] = None
+        self._event_logger: Optional[EventLogger] = None
 
         # support plugins
-        self._plugins: List[Any] = plugins if plugins is not None else []
-        self._initialized_plugins: List[Any] = []
+        self._plugins: List["PluginLike"] = plugins if plugins is not None else []
+        self._initialized_plugins: List["PluginLike"] = []
 
         self._global_ctx = GlobalContext(
             options=Options(
@@ -1216,7 +1222,7 @@ class GrowthBook(object):
         except Exception as e:
             logger.warning(f"Error clearing internal state: {e}")
 
-    def set_event_logger(self, fn) -> None:
+    def set_event_logger(self, fn: EventLogger) -> None:
         """Register a callable that will be invoked by log_event.
 
         The callable receives (event_name: str, properties: dict, user_context: UserContext).
@@ -1384,7 +1390,7 @@ class GrowthBook(object):
         self._fireSubscriptions(experiment, result)
         return result
 
-    def subscribe(self, callback):
+    def subscribe(self, callback: Callable[[Experiment, Result], None]) -> Callable[[], None]:
         self._subscriptions.add(callback)
         return lambda: self._subscriptions.remove(callback)
 
@@ -1461,7 +1467,8 @@ class GrowthBook(object):
                     self._initialized_plugins.append(plugin)
                     logger.debug(f"Initialized callable plugin: {plugin.__name__}")
                 else:
-                    logger.warning(f"Plugin {plugin} is neither callable nor has initialize method")
+                    # Statically unreachable under PluginLike, kept for untyped callers.
+                    logger.warning(f"Plugin {plugin} is neither callable nor has initialize method")  # type: ignore[unreachable]
             except Exception as e:
                 logger.error(f"Failed to initialize plugin {plugin}: {e}")
 

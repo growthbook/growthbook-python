@@ -7,9 +7,12 @@ This plugin extracts attributes from HTTP request context using a framework-agno
 import logging
 import uuid
 import time
-from typing import Dict, Any, Optional, Callable, Union
+from typing import TYPE_CHECKING, Dict, Any, Optional, Callable, Union
 from urllib.parse import urlparse
 from .base import GrowthBookPlugin
+
+if TYPE_CHECKING:
+    from .base import GrowthBookInstance
 
 logger = logging.getLogger("growthbook.plugins.request_context")
 
@@ -79,7 +82,7 @@ class RequestContextPlugin(GrowthBookPlugin):
         self.extract_user_agent = extract_user_agent
         self._extracted_attributes: Dict[str, Any] = {}
         
-    def initialize(self, gb_instance) -> None:
+    def initialize(self, gb_instance: "GrowthBookInstance") -> None:
         """Initialize plugin - extract attributes from request context."""
         try:
             self._set_initialized(gb_instance)

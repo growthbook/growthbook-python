@@ -1,10 +1,27 @@
 #!/usr/bin/env python
 
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, TypedDict, TypeVar, Union, Set, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    List,
+    Optional,
+    Protocol,
+    TypedDict,
+    TypeVar,
+    Union,
+    Set,
+    Tuple,
+)
 from enum import Enum
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse as _urlparse
+
+if TYPE_CHECKING:
+    from .plugins.base import PluginLike
 
 # Generic feature/experiment value type. Deliberately unbounded: a JSONValue
 # bound would reject TypedDict/dataclass-shaped fallbacks (see JS SDK issue #1729,
@@ -430,6 +447,44 @@ class UserContext:
     sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
     skip_all_experiments: bool = False
 
+
+class TrackingCallback(Protocol):
+    """Callback invoked when a user is assigned to an experiment variation.
+
+    The parameter names are part of the contract: the sync GrowthBook client
+    invokes this callback with keyword arguments (experiment=..., result=...,
+    user_context=...), so implementations must use these exact names.
+    """
+
+    def __call__(
+        self,
+        experiment: Experiment,
+        result: Result,
+        user_context: Optional[UserContext],
+    ) -> None: ...
+
+
+# Invoked positionally: (feature_key, feature_result, user_context).
+FeatureUsageCallback = Callable[[str, "FeatureResult", UserContext], None]
+
+# Invoked positionally: (event_name, properties, user_context). The async
+# client awaits a returned coroutine, so async implementations are allowed.
+EventLogger = Callable[
+    [str, Dict[str, Any], Optional[UserContext]], Union[None, Awaitable[None]]
+]
+
+# Async-client callback contracts (Options is consumed by GrowthBookClient):
+# the async client schedules returned awaitables on the running loop, so
+# implementations may be sync (return None) or async (return a coroutine).
+# The sync GrowthBook client accepts the sync-only contracts above.
+AsyncTrackingCallback = Callable[
+    [Experiment, Result, Optional[UserContext]], Union[None, Awaitable[None]]
+]
+AsyncFeatureUsageCallback = Callable[
+    [str, "FeatureResult", UserContext], Union[None, Awaitable[None]]
+]
+
+
 @dataclass
 class Options:
     url: Optional[str] = None
@@ -450,15 +505,12 @@ class Options:
     refresh_strategy: Optional[FeatureRefreshStrategy] = FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
     sticky_bucket_service: Optional[Union[AbstractStickyBucketService, AbstractAsyncStickyBucketService]] = None
     sticky_bucket_identifier_attributes: Optional[List[str]] = None
-    # Callbacks may be sync (return None) or async (return an awaitable).
-    # The async GrowthBookClient schedules returned awaitables on the loop;
-    # the sync GrowthBook class supports sync callbacks only.
-    on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], Union[None, Awaitable[None]]]] = None
-    on_feature_usage: Optional[Callable[[str, 'FeatureResult', UserContext], Union[None, Awaitable[None]]]] = None
-    tracking_plugins: Optional[List[Any]] = None
+    on_experiment_viewed: Optional[AsyncTrackingCallback] = None
+    on_feature_usage: Optional[AsyncFeatureUsageCallback] = None
+    tracking_plugins: Optional[List["PluginLike"]] = None
     http_connect_timeout: Optional[int] = None
     http_read_timeout: Optional[int] = None
-    event_logger: Optional[Callable[..., Any]] = None
+    event_logger: Optional[EventLogger] = None
     remote_eval: bool = False
     cache_key_attributes: Optional[List[str]] = None
     remote_eval_cache_size: int = 1000

@@ -4,8 +4,11 @@ import json
 from dataclasses import dataclass, field
 import random
 import logging
-from typing import Any, Dict, List, Optional, Union, Callable, Awaitable, cast
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Callable, Awaitable, cast
 from typing import Set
+
+if TYPE_CHECKING:
+    from .plugins.base import PluginLike
 import asyncio
 import threading
 import time
@@ -18,6 +21,7 @@ from contextlib import asynccontextmanager
 from .core import eval_feature as core_eval_feature, run_experiment
 from .common_types import (
     T,
+    EventLogger,
     Feature,
     GlobalContext,
     Options,
@@ -653,8 +657,8 @@ class GrowthBookClient:
         self._callback_tasks: Set["asyncio.Future[Any]"] = set()
         
         # Plugin support
-        self._tracking_plugins: List[Any] = self.options.tracking_plugins or []
-        self._initialized_plugins: List[Any] = []
+        self._tracking_plugins: List["PluginLike"] = self.options.tracking_plugins or []
+        self._initialized_plugins: List["PluginLike"] = []
 
         self._features_repository = (
             EnhancedFeatureRepository(
@@ -774,7 +778,7 @@ class GrowthBookClient:
                 logger.exception("Error in subscription callback")
 
 
-    def set_event_logger(self, fn) -> None:
+    def set_event_logger(self, fn: EventLogger) -> None:
         """Register a callable that will be invoked by log_event.
 
         The callable receives (event_name: str, properties: dict, user_context: UserContext).
@@ -1283,7 +1287,8 @@ class GrowthBookClient:
                     self._initialized_plugins.append(plugin)
                     logger.debug(f"Initialized callable plugin: {plugin.__name__}")
                 else:
-                    logger.warning(f"Plugin {plugin} is neither callable nor has initialize method")
+                    # Statically unreachable under PluginLike, kept for untyped callers.
+                    logger.warning(f"Plugin {plugin} is neither callable nor has initialize method")  # type: ignore[unreachable]
             except Exception as e:
                 logger.error(f"Failed to initialize plugin {plugin}: {e}")
 

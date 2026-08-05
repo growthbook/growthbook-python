@@ -7,6 +7,8 @@ from .base import GrowthBookPlugin
 
 if TYPE_CHECKING:
     import requests
+
+    from .base import GrowthBookInstance
 else:
     try:
         import requests  # type: ignore
@@ -135,7 +137,7 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
     # Plugin lifecycle
     # ------------------------------------------------------------------
 
-    def initialize(self, gb_instance) -> None:
+    def initialize(self, gb_instance: "GrowthBookInstance") -> None:
         """Initialize plugin with a GrowthBook instance."""
         try:
             self._client_key = getattr(gb_instance, "_client_key", "") or ""
