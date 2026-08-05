@@ -39,6 +39,45 @@ mypy your_code.py
 
 The SDK includes a `py.typed` marker file and is compliant with [PEP 561](https://www.python.org/dev/peps/pep-0561/).
 
+### Built-in type inference
+
+Feature evaluation infers types from the fallback value you provide, and
+experiments infer their result type from the variations — no extra setup:
+
+```python
+# Inferred as `str` from the fallback ("blue")
+color = gb.get_feature_value("button-color", "blue")
+
+# result.value is inferred as `str` from the variations
+result = gb.run(Experiment(key="my-test", variations=["blue", "green"]))
+```
+
+### Strict typing (generated feature keys)
+
+For compile-time checking of feature *keys* and per-key value types — the
+equivalent of the JS SDK's `GrowthBook<AppFeatures>` — generate a typed client
+from your features JSON (the SDK endpoint payload, e.g.
+`https://cdn.growthbook.io/api/features/<client_key>`):
+
+```bash
+python -m growthbook.codegen --input features.json --output growthbook_features.py
+```
+
+Then use the generated subclasses anywhere you'd use the plain clients. They
+add zero runtime behavior — all checking happens in mypy/pyright/your IDE:
+
+```python
+from growthbook_features import TypedGrowthBook  # or TypedGrowthBookClient (async)
+
+gb = TypedGrowthBook(api_host="...", client_key="...")
+
+gb.is_on("dark_mode")                        # OK
+gb.is_on("dark_mod")                         # checker error: typo in feature key
+gb.get_feature_value("max_items", "10")      # checker error: fallback must be int
+```
+
+Regenerate the file whenever your feature list changes (e.g. as a CI step).
+
 ## Quick Usage
 
 ```python

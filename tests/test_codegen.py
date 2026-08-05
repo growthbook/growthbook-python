@@ -1,0 +1,85 @@
+"""Tests for the typed-client generator (growthbook.codegen)."""
+
+import importlib.util
+import json
+import os
+import sys
+
+import pytest
+
+from growthbook import GrowthBook
+from growthbook.codegen import extract_feature_types, generate, python_type_for
+
+FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "codegen")
+
+
+def _load_fixture():
+    with open(os.path.join(FIXTURE_DIR, "sample_features.json"), encoding="utf-8") as f:
+        return json.load(f)
+
+
+class TestPythonTypeFor:
+    @pytest.mark.parametrize(
+        "value,expected",
+        [
+            (True, "bool"),
+            (False, "bool"),
+            (1, "int"),
+            (2.5, "float"),
+            ("x", "str"),
+            ([1, 2], "List[Any]"),
+            ({"a": 1}, "Dict[str, Any]"),
+            (None, "Any"),
+        ],
+    )
+    def test_mapping(self, value, expected):
+        assert python_type_for(value) == expected
+
+
+class TestExtractFeatureTypes:
+    def test_endpoint_payload(self):
+        payload = {"features": {"b": {"defaultValue": 1}, "a": {"defaultValue": "x"}}}
+        # sorted for deterministic output
+        assert list(extract_feature_types(payload)) == ["a", "b"]
+
+    def test_bare_map(self):
+        assert extract_feature_types({"f": {"defaultValue": True}}) == {"f": "bool"}
+
+    def test_missing_default_value(self):
+        assert extract_feature_types({"f": {}}) == {"f": "Any"}
+
+    def test_non_object_input(self):
+        with pytest.raises(ValueError):
+            extract_feature_types({"features": []})
+
+
+class TestGenerate:
+    def test_matches_golden_file(self):
+        with open(os.path.join(FIXTURE_DIR, "expected_output.py"), encoding="utf-8") as f:
+            expected = f.read()
+        assert generate(_load_fixture()) == expected
+
+    def test_empty_features_rejected(self):
+        with pytest.raises(ValueError):
+            generate({"features": {}})
+
+    def test_generated_module_is_runtime_noop(self, tmp_path):
+        """The generated subclasses must behave exactly like the base clients."""
+        path = tmp_path / "growthbook_features.py"
+        path.write_text(generate(_load_fixture()), encoding="utf-8")
+
+        spec = importlib.util.spec_from_file_location("growthbook_features", path)
+        module = importlib.util.module_from_spec(spec)
+        sys.modules["growthbook_features"] = spec.loader.exec_module(module) or module
+        try:
+            tgb = module.TypedGrowthBook(
+                features={"banner_text": {"defaultValue": "hello"}}
+            )
+            assert isinstance(tgb, GrowthBook)
+            assert tgb.get_feature_value("banner_text", "fallback") == "hello"
+            assert tgb.get_feature_value("unknown_key", "fallback") == "fallback"
+            # No typed methods may exist at runtime — everything is inherited.
+            assert "get_feature_value" not in module.TypedGrowthBook.__dict__
+            assert "is_on" not in module.TypedGrowthBook.__dict__
+        finally:
+            del sys.modules["growthbook_features"]
