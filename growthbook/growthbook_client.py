@@ -4,7 +4,8 @@ import json
 from dataclasses import dataclass, field
 import random
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union, Callable, Awaitable, cast
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Union, Callable, Awaitable, cast
 from typing import Set
 
 if TYPE_CHECKING:
@@ -53,7 +54,7 @@ class SingletonMeta(type):
     _instances: Dict[Any, Any] = {}
     _lock = threading.Lock()
 
-    def __call__(cls, *args, **kwargs):
+    def __call__(cls, *args: Any, **kwargs: Any) -> Any:
         api_host = args[0] if len(args) > 0 else kwargs.get("api_host", "")
         client_key = args[1] if len(args) > 1 else kwargs.get("client_key", "")
         key = (cls, api_host, client_key)
@@ -70,7 +71,7 @@ class BackoffStrategy:
         max_delay: float = 60.0, 
         multiplier: float = 2.0,
         jitter: float = 0.1
-    ):
+    ) -> None:
         self.initial_delay = initial_delay
         self.max_delay = max_delay
         self.multiplier = multiplier
@@ -97,12 +98,12 @@ class BackoffStrategy:
 
 class WeakRefWrapper:
     """A wrapper class to allow weak references for otherwise non-weak-referenceable objects."""
-    def __init__(self, obj):
+    def __init__(self, obj: Any) -> None:
         self.obj = obj
 
 class FeatureCache:
     """Thread-safe feature cache"""
-    def __init__(self):
+    def __init__(self) -> None:
         self._cache: Dict[str, Dict[str, Any]] = {
             'features': {},
             'savedGroups': {}
@@ -132,7 +133,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                  http_connect_timeout: Optional[int] = None,
                  http_read_timeout: Optional[int] = None,
                  remote_eval_cache_size: int = 1000,
-                 remote_eval: bool = False):
+                 remote_eval: bool = False) -> None:
         FeatureRepository.__init__(self)
         self._api_host = api_host
         self._client_key = client_key
@@ -315,7 +316,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._remote_eval_inflight.clear()
 
     @asynccontextmanager
-    async def refresh_operation(self):
+    async def refresh_operation(self) -> AsyncIterator[bool]:
         """Context manager for feature refresh with proper cleanup"""
         if self._refresh_in_progress.locked():
             yield False
@@ -413,6 +414,9 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                 ):
                     logger.debug("Decrypting SSE payload...")
                     data = self.decrypt_response(data, self._decryption_key)
+                    if data is None:
+                        logger.warning("Failed to decrypt SSE payload, skipping update")
+                        return
                     logger.debug(f"🟢 Decrypted. Features keys: {list(data.get('features', {}).keys())}")
 
                 await self._handle_feature_update(data)
@@ -511,7 +515,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
 
         self._refresh_task = asyncio.create_task(refresh_loop())
 
-    async def start_feature_refresh(self, strategy: FeatureRefreshStrategy, callback=None):
+    async def start_feature_refresh(self, strategy: FeatureRefreshStrategy, callback: Optional[Callable[..., Any]] = None) -> None:
         """Initialize feature refresh based on strategy"""
         self._refresh_callback = callback
         
@@ -560,10 +564,15 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                 self._backoff.reset()
         self._stop_event.clear()
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "EnhancedFeatureRepository":
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(
+        self,
+        exc_type: Optional[type],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
         await self.stop_refresh()
     
     async def load_features_async(
@@ -592,7 +601,7 @@ class GrowthBookClient:
     def __init__(
         self,
         options: Optional[Union[Dict[str, Any], Options]] = None
-    ):
+    ) -> None:
         self.options = (
             options if isinstance(options, Options)
             else Options(**options) if options
@@ -761,7 +770,7 @@ class GrowthBookClient:
         """Thread-safe subscription management"""
         with self._subscriptions_lock:
             self._subscriptions.add(callback)
-            def unsubscribe():
+            def unsubscribe() -> None:
                 with self._subscriptions_lock:
                     self._subscriptions.discard(callback)
             return unsubscribe
@@ -816,7 +825,7 @@ class GrowthBookClient:
         except Exception as e:
             logger.exception("Error in event logger: %s", e)
 
-    async def set_features(self, features: dict) -> None:
+    async def set_features(self, features: Dict[str, Any]) -> None:
         await self._feature_update_callback({"features": features})
         
     
@@ -1132,11 +1141,16 @@ class GrowthBookClient:
                 options=self.options, features=features, saved_groups=saved_groups
             )
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "GrowthBookClient":
         await self.initialize()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(
+        self,
+        exc_type: Optional[type],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
         await self.close()
 
     async def create_evaluation_context(self, user_context: UserContext) -> EvaluationContext:

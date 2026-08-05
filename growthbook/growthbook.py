@@ -48,6 +48,10 @@ from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from urllib3 import PoolManager, Timeout
 
+if TYPE_CHECKING:
+    # Only present in urllib3 2.x; the runtime dependency allows 1.x too.
+    from urllib3.response import BaseHTTPResponse
+
 from .core import _getHashValue, eval_feature as core_eval_feature, run_experiment
 
 logger = logging.getLogger("growthbook")
@@ -88,7 +92,7 @@ class CacheEntry(object):
         self.ttl = ttl
         self.expires = time() + ttl
 
-    def update(self, value: Dict):
+    def update(self, value: Dict) -> None:
         self.value = value
         self.expires = time() + self.ttl
 
@@ -128,7 +132,15 @@ class InMemoryStickyBucketService(AbstractStickyBucketService):
 
 
 class SSEClient:
-    def __init__(self, api_host, client_key, on_event, reconnect_delay=5, headers=None, timeout=30):
+    def __init__(
+        self,
+        api_host: str,
+        client_key: str,
+        on_event: Callable[[Dict[str, Any]], None],
+        reconnect_delay: int = 5,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: int = 30,
+    ) -> None:
         self.api_host = api_host
         self.client_key = client_key
 
@@ -136,9 +148,9 @@ class SSEClient:
         self.reconnect_delay = reconnect_delay
         self.timeout = timeout
 
-        self._sse_session = None
-        self._sse_thread = None
-        self._loop = None
+        self._sse_session: Optional[aiohttp.ClientSession] = None
+        self._sse_thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         self.is_running = False
 
@@ -151,7 +163,7 @@ class SSEClient:
         if headers:
             self.headers.update(headers)
 
-    def connect(self):
+    def connect(self) -> None:
         if self.is_running:
             logger.debug("Streaming session is already running.")
             return
@@ -161,7 +173,7 @@ class SSEClient:
         self._sse_thread.start()
         atexit.register(self.disconnect)
 
-    def disconnect(self, timeout=10):
+    def disconnect(self, timeout: float = 10) -> None:
         """Gracefully disconnect with timeout"""
         logger.debug("Initiating SSE client disconnect")
         self.is_running = False
@@ -194,7 +206,7 @@ class SSEClient:
         api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
         return f"{api_host}/sub/{client_key}"
 
-    async def _init_session(self):
+    async def _init_session(self) -> None:
         url = self._get_sse_url(self.api_host, self.client_key)
         
         try:
@@ -233,8 +245,8 @@ class SSEClient:
             # Ensure session is closed on any exit
             await self._close_session()
 
-    async def _process_response(self, response):
-        event_data = {}
+    async def _process_response(self, response: aiohttp.ClientResponse) -> None:
+        event_data: Dict[str, Any] = {}
         try:
             async for line in response.content:
                 # Check for cancellation before processing each line
@@ -285,7 +297,7 @@ class SSEClient:
             logger.warning(f"Error processing SSE response: {e}")
             raise
 
-    async def _wait_for_reconnect(self):
+    async def _wait_for_reconnect(self) -> None:
         logger.info(f"Attempting to reconnect streaming in {self.reconnect_delay} seconds")
         try:
             await asyncio.sleep(self.reconnect_delay)
@@ -293,12 +305,12 @@ class SSEClient:
             logger.debug("Reconnect wait cancelled")
             raise
 
-    async def _close_session(self):
+    async def _close_session(self) -> None:
         if self._sse_session:
             await self._sse_session.close()
             logger.debug("Streaming session closed.")
 
-    def _run_sse_channel(self):
+    def _run_sse_channel(self) -> None:
         self._loop = asyncio.new_event_loop()
         
         try:
@@ -309,7 +321,7 @@ class SSEClient:
             self._loop.run_until_complete(self._loop.shutdown_asyncgens())
             self._loop.close()
 
-    async def _stop_session(self, timeout=10):
+    async def _stop_session(self, timeout: float = 10) -> None:
         """Stop the SSE session and cancel all tasks with timeout"""
         logger.debug("Stopping SSE session")
         
@@ -375,10 +387,10 @@ class FeatureRepository(object):
     def set_cache(self, cache: AbstractFeatureCache) -> None:
         self.cache = cache
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         self.cache.clear()
 
-    def save_in_cache(self, key: str, res, ttl: int = 600):
+    def save_in_cache(self, key: str, res: Dict, ttl: int = 600) -> None:
         self.cache.set(key, res, ttl)
 
     def add_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
@@ -480,7 +492,7 @@ class FeatureRepository(object):
         self._user_agent_suffix = value
 
     # Perform the GET request (separate method for easy mocking)
-    def _get(self, url: str, headers: Optional[Dict[str, str]] = None):
+    def _get(self, url: str, headers: Optional[Dict[str, str]] = None) -> "BaseHTTPResponse":
         timeout = None
         if self.http_connect_timeout and self.http_read_timeout:
             timeout = Timeout(connect=self.http_connect_timeout, read=self.http_read_timeout)
@@ -499,7 +511,7 @@ class FeatureRepository(object):
         return headers
 
     # Perform the POST request (separate method for easy mocking)
-    def _post(self, url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None):
+    def _post(self, url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> "BaseHTTPResponse":
         timeout = None
         if self.http_connect_timeout and self.http_read_timeout:
             timeout = Timeout(connect=self.http_connect_timeout, read=self.http_read_timeout)
@@ -673,7 +685,7 @@ class FeatureRepository(object):
             logger.error(f"Failed to decode feature JSON from GrowthBook API: {e}")
             return None
         
-    def decrypt_response(self, data, decryption_key: str):
+    def decrypt_response(self, data: Dict[str, Any], decryption_key: str) -> Optional[Dict[str, Any]]:
         if "encryptedFeatures" in data:
             if not decryption_key:
                 raise ValueError("Must specify decryption_key")
@@ -714,7 +726,7 @@ class FeatureRepository(object):
 
         data = self.decrypt_response(decoded, decryption_key)
 
-        return data  # type: ignore[no-any-return]
+        return data
 
     async def _fetch_features_async(
         self, api_host: str, client_key: str, decryption_key: str = ""
@@ -725,16 +737,22 @@ class FeatureRepository(object):
 
         data = self.decrypt_response(decoded, decryption_key)
 
-        return data  # type: ignore[no-any-return]
+        return data
 
 
-    def startAutoRefresh(self, api_host, client_key, cb, streaming_timeout=30):
+    def startAutoRefresh(
+        self,
+        api_host: str,
+        client_key: str,
+        cb: Callable[[Dict[str, Any]], None],
+        streaming_timeout: int = 30,
+    ) -> None:
         if not client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
         self.sse_client = self.sse_client or SSEClient(api_host=api_host, client_key=client_key, on_event=cb, timeout=streaming_timeout)
         self.sse_client.connect()
 
-    def stopAutoRefresh(self, timeout=10):
+    def stopAutoRefresh(self, timeout: float = 10) -> None:
         """Stop auto refresh with timeout"""
         if self.sse_client:
             self.sse_client.disconnect(timeout=timeout)
@@ -833,9 +851,9 @@ class GrowthBook(object):
     def __init__(
         self,
         enabled: bool = True,
-        attributes: dict = {},
+        attributes: Optional[Dict[str, Any]] = None,
         url: str = "",
-        features: dict = {},
+        features: Optional[Dict[str, Any]] = None,
         qa_mode: bool = False,
         on_experiment_viewed: Optional[TrackingCallback] = None,
         on_feature_usage: Optional[FeatureUsageCallback] = None,
@@ -857,15 +875,15 @@ class GrowthBook(object):
         # Deprecated args
         trackingCallback: Optional[TrackingCallback] = None,
         qaMode: bool = False,
-        user: dict = {},
-        groups: dict = {},
-        overrides: dict = {},
-        forcedVariations: dict = {},
+        user: Optional[Dict[str, Any]] = None,
+        groups: Optional[Dict[str, Any]] = None,
+        overrides: Optional[Dict[str, Any]] = None,
+        forcedVariations: Optional[Dict[str, Any]] = None,
         http_connect_timeout: Optional[int] = None,
         http_read_timeout: Optional[int] = None,
         remoteEval: bool = False,
         cacheKeyAttributes: Optional[List[str]] = None,
-    ):
+    ) -> None:
         self._remoteEval = remoteEval
         self._cacheKeyAttributes = cacheKeyAttributes
 
@@ -884,7 +902,7 @@ class GrowthBook(object):
                 raise ValueError("stale_while_revalidate is not compatible with remote_eval")
 
         self._enabled = enabled
-        self._attributes = attributes
+        self._attributes = attributes if attributes is not None else {}
         self._url = url
         self._features: Dict[str, Feature] = {}
         self._saved_groups = savedGroups if savedGroups is not None else {}
@@ -909,10 +927,10 @@ class GrowthBook(object):
         self._stale_ttl = stale_ttl
 
         # Deprecated args
-        self._user = user
-        self._groups = groups
-        self._overrides = overrides
-        self._forcedVariations = (forced_variations if forced_variations is not None else forcedVariations) if forced_variations is not None or forcedVariations else {}
+        self._user = user if user is not None else {}
+        self._groups = groups if groups is not None else {}
+        self._overrides = overrides if overrides is not None else {}
+        self._forcedVariations = forced_variations if forced_variations is not None else (forcedVariations if forcedVariations is not None else {})
         self._forcedFeatures: Dict[str, Any] = forced_features or {}
 
         self._tracked: Dict[str, Any] = {}
@@ -1043,7 +1061,7 @@ class GrowthBook(object):
             if "savedGroups" in features:
                 self._saved_groups = features["savedGroups"]
 
-    def _features_event_handler(self, features):
+    def _features_event_handler(self, features: str) -> None:
         decoded = json.loads(features)
         if not decoded:
             return None
@@ -1058,7 +1076,7 @@ class GrowthBook(object):
                 self._saved_groups = data["savedGroups"]
             feature_repo.save_in_cache(key, data, self._cache_ttl)
 
-    def _dispatch_sse_event(self, event_data):
+    def _dispatch_sse_event(self, event_data: Dict[str, Any]) -> None:
         event_type = event_data.get('type')
         if event_type == 'features-updated':
             # In remote-eval mode the proxy emits this event with no inline
@@ -1078,7 +1096,7 @@ class GrowthBook(object):
                 self._features_event_handler(event_data.get('data', '{}'))
 
 
-    def startAutoRefresh(self):
+    def startAutoRefresh(self) -> None:
         if not self._client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
        
@@ -1089,7 +1107,7 @@ class GrowthBook(object):
             streaming_timeout=self._streaming_timeout
         )
 
-    def stopAutoRefresh(self, timeout=10):
+    def stopAutoRefresh(self, timeout: float = 10) -> None:
         """Stop auto refresh with timeout"""
         try:
             if hasattr(feature_repo, 'sse_client') and feature_repo.sse_client:
@@ -1099,11 +1117,11 @@ class GrowthBook(object):
         except Exception as e:
             logger.warning(f"Error stopping auto refresh: {e}")
 
-    def setFeatures(self, features: dict) -> None:
+    def setFeatures(self, features: Dict[str, Any]) -> None:
         warnings.warn("setFeatures is deprecated, use set_features instead", DeprecationWarning)
         return self.set_features(features)
 
-    def set_features(self, features: dict) -> None:
+    def set_features(self, features: Dict[str, Any]) -> None:
         # Prevent infinite recursion during feature updates
         self._is_updating_features = True
         try:
@@ -1130,11 +1148,11 @@ class GrowthBook(object):
     def get_features(self) -> Dict[str, Feature]:
         return self._features
 
-    def setAttributes(self, attributes: dict) -> None:
+    def setAttributes(self, attributes: Dict[str, Any]) -> None:
         warnings.warn("setAttributes is deprecated, use set_attributes instead", DeprecationWarning)
         return self.set_attributes(attributes)
 
-    def set_attributes(self, attributes: dict) -> None:
+    def set_attributes(self, attributes: Dict[str, Any]) -> None:
         self._attributes = attributes
         self.refresh_sticky_buckets()
         if self._remoteEval and self._client_key:
@@ -1167,14 +1185,14 @@ class GrowthBook(object):
         if self._remoteEval and self._client_key:
             self.load_features()
 
-    def getAttributes(self) -> dict:
+    def getAttributes(self) -> Dict[str, Any]:
         warnings.warn("getAttributes is deprecated, use get_attributes instead", DeprecationWarning)
         return self.get_attributes()
 
-    def get_attributes(self) -> dict:
+    def get_attributes(self) -> Dict[str, Any]:
         return self._attributes
 
-    def destroy(self, timeout=10) -> None:
+    def destroy(self, timeout: float = 10) -> None:
         """Gracefully destroy the GrowthBook instance"""
         logger.debug("Starting GrowthBook destroy process")
         
@@ -1355,14 +1373,14 @@ class GrowthBook(object):
                 pass
         return result
 
-    def getAllResults(self):
+    def getAllResults(self) -> Dict[str, Dict[str, Any]]:
         warnings.warn("getAllResults is deprecated, use get_all_results instead", DeprecationWarning)
         return self.get_all_results()
 
-    def get_all_results(self):
+    def get_all_results(self) -> Dict[str, Dict[str, Any]]:
         return self._assigned.copy()
 
-    def _fireSubscriptions(self, experiment: Experiment, result: Result):
+    def _fireSubscriptions(self, experiment: Experiment, result: Result) -> None:
         if experiment is not None:
             prev = self._assigned.get(experiment.key, None)
             if (
