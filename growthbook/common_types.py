@@ -7,7 +7,9 @@ from typing import (
     Awaitable,
     Callable,
     Dict,
+    Generic,
     List,
+    NoReturn,
     Optional,
     Protocol,
     TypedDict,
@@ -28,6 +30,12 @@ if TYPE_CHECKING:
 # where the equivalent bound was shipped and then reverted).
 T = TypeVar("T")
 
+# The shape of a JSON-serializable value, mirroring the JS SDK's JSONValue.
+# Used to annotate payload data; NOT used as a TypeVar bound (see note on T).
+# bool precedes int because bool is an int subclass; int and float together
+# cover the JS `number`.
+JSONValue = Union[None, bool, int, float, str, List["JSONValue"], Dict[str, "JSONValue"]]
+
 # Wire shapes: real payloads routinely omit keys, hence total=False.
 class VariationMeta(TypedDict, total=False):
     key: str
@@ -41,11 +49,11 @@ class Filter(TypedDict, total=False):
     hashVersion: int
     attribute: str
 
-class Experiment(object):
+class Experiment(Generic[T]):
     def __init__(
         self,
         key: str,
-        variations: List[Any],
+        variations: List[T],
         weights: Optional[List[float]] = None,
         active: bool = True,
         status: str = "running",
@@ -70,7 +78,10 @@ class Experiment(object):
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
         customFields: Optional[Dict[str, Any]] = None,
-        **_ignored: Any,
+        # NoReturn makes literal unknown kwargs a checker error (like TS excess
+        # property checks) while **dict payload splats (typed Any) still pass;
+        # at runtime unknown payload keys are swallowed as before.
+        **_ignored: NoReturn,
     ) -> None:
         self.key = key
         self.variations = variations
@@ -163,12 +174,12 @@ class Experiment(object):
             self.force = force
 
 
-class Result(object):
+class Result(Generic[T]):
     def __init__(
         self,
         variationId: int,
         inExperiment: bool,
-        value: Any,
+        value: T,
         hashUsed: bool,
         hashAttribute: str,
         hashValue: str,
@@ -221,13 +232,13 @@ class Result(object):
 
         return obj
 
-class FeatureResult(object):
+class FeatureResult(Generic[T]):
     def __init__(
         self,
-        value: Any,
+        value: Optional[T],
         source: str,
-        experiment: Optional[Experiment] = None,
-        experimentResult: Optional[Result] = None,
+        experiment: Optional[Experiment[T]] = None,
+        experimentResult: Optional[Result[T]] = None,
         ruleId: Optional[str] = None,
     ) -> None:
         self.value = value
@@ -254,7 +265,7 @@ class FeatureResult(object):
         return data
 
 class Feature(object):
-    def __init__(self, defaultValue: Any = None, rules: Optional[List[Any]] = None) -> None:
+    def __init__(self, defaultValue: Any = None, rules: Optional[List[Union["FeatureRule", Dict[str, Any]]]] = None) -> None:
         if rules is None:
             rules = []
         self.defaultValue = defaultValue
@@ -294,7 +305,8 @@ class FeatureRule(object):
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
         tracks: Optional[List[Dict[str, Any]]] = None,
-        **_ignored: Any,
+        # See Experiment.__init__: checker-strict, runtime-permissive.
+        **_ignored: NoReturn,
     ) -> None:
 
         if disableStickyBucketing:

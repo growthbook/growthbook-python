@@ -1,12 +1,16 @@
 from .common_types import (
     AbstractStickyBucketService,
+    EventLogger,
     Experiment,
     Feature,
     FeatureResult,
     FeatureRule,
     FeatureRefreshStrategy,
+    FeatureUsageCallback,
+    JSONValue,
     Options,
     Result,
+    TrackingCallback,
     UserContext,
 )
 
@@ -54,6 +58,11 @@ __all__ = [
     "Feature",
     "FeatureResult",
     "FeatureRule",
+    # Typing helpers
+    "JSONValue",
+    "TrackingCallback",
+    "FeatureUsageCallback",
+    "EventLogger",
     # Feature loading / caching
     "FeatureRepository",
     "EnhancedFeatureRepository",

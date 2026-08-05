@@ -1235,7 +1235,7 @@ class GrowthBookClient:
         result = await self.eval_feature(key, user_context)
         return cast(T, result.value) if result.value is not None else fallback
 
-    async def run(self, experiment: Experiment, user_context: UserContext) -> Result:
+    async def run(self, experiment: Experiment[T], user_context: UserContext) -> Result[T]:
         """Run experiment with tracking. Lock-free, same as eval_feature."""
         context = await self.create_evaluation_context(user_context)
         result = run_experiment(

@@ -1400,9 +1400,9 @@ class GrowthBook(object):
                     except Exception:
                         pass
 
-    def run(self, experiment: Experiment) -> Result:
+    def run(self, experiment: Experiment[T]) -> Result[T]:
         # result = self._run(experiment)
-        result = run_experiment(experiment=experiment, 
+        result = run_experiment(experiment=experiment,
                                 evalContext=self._get_eval_context(),
                                 tracking_cb=self._track
                                 )
