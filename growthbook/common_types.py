@@ -1,15 +1,7 @@
 #!/usr/bin/env python
 
-import sys
-from token import OP
-# Only require typing_extensions if using Python 3.7 or earlier
-if sys.version_info >= (3, 8):
-    from typing import TypedDict
-else:
-    from typing_extensions import TypedDict
-
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, TypedDict, Union, Set, Tuple
 from enum import Enum
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse as _urlparse

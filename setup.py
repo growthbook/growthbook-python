@@ -32,7 +32,7 @@ setup(
     name='growthbook',
     author="GrowthBook",
     author_email='hello@growthbook.io',
-    python_requires='>=3.7',
+    python_requires='>=3.9',
     version=get_version(),  # Read version from __init__.py
     classifiers=[
         'Development Status :: 4 - Beta',
@@ -40,12 +40,11 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Natural Language :: English',
         'Programming Language :: Python :: 3',
-        'Programming Language :: Python :: 3.7',
-        'Programming Language :: Python :: 3.8',
         'Programming Language :: Python :: 3.9',
         'Programming Language :: Python :: 3.10',
         'Programming Language :: Python :: 3.11',
         'Programming Language :: Python :: 3.12',
+        'Programming Language :: Python :: 3.13',
         'Typing :: Typed',
     ],
     description="Powerful Feature flagging and A/B testing for Python apps",

@@ -5,7 +5,6 @@ feature flagging and A/B testing platform.
 More info at https://www.growthbook.io
 """
 import atexit
-import sys
 import json
 import threading
 import logging
@@ -31,12 +30,6 @@ from .common_types import (
     features_from_dict,
     validate_remote_eval_options,
 )
-
-# Only require typing_extensions if using Python 3.7 or earlier
-if sys.version_info >= (3, 8):
-    from typing import TypedDict
-else:
-    from typing_extensions import TypedDict
 
 from base64 import b64decode
 from time import time
