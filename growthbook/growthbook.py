@@ -75,11 +75,11 @@ def decrypt(encrypted_str: str, key_str: str) -> str:
 
 class AbstractFeatureCache(ABC):
     @abstractmethod
-    def get(self, key: str) -> Optional[Dict]:
+    def get(self, key: str) -> Optional[Dict[str, Any]]:
         pass
 
     @abstractmethod
-    def set(self, key: str, value: Dict, ttl: int) -> None:
+    def set(self, key: str, value: Dict[str, Any], ttl: int) -> None:
         pass
 
     def clear(self) -> None:
@@ -87,12 +87,12 @@ class AbstractFeatureCache(ABC):
 
 
 class CacheEntry(object):
-    def __init__(self, value: Dict, ttl: int) -> None:
+    def __init__(self, value: Dict[str, Any], ttl: int) -> None:
         self.value = value
         self.ttl = ttl
         self.expires = time() + ttl
 
-    def update(self, value: Dict) -> None:
+    def update(self, value: Dict[str, Any]) -> None:
         self.value = value
         self.expires = time() + self.ttl
 
@@ -101,14 +101,14 @@ class InMemoryFeatureCache(AbstractFeatureCache):
     def __init__(self) -> None:
         self.cache: Dict[str, CacheEntry] = {}
 
-    def get(self, key: str) -> Optional[Dict]:
+    def get(self, key: str) -> Optional[Dict[str, Any]]:
         if key in self.cache:
             entry = self.cache[key]
             if entry.expires >= time():
                 return entry.value
         return None
 
-    def set(self, key: str, value: Dict, ttl: int) -> None:
+    def set(self, key: str, value: Dict[str, Any], ttl: int) -> None:
         if key in self.cache:
             self.cache[key].update(value)
         else:
@@ -119,12 +119,12 @@ class InMemoryFeatureCache(AbstractFeatureCache):
 
 class InMemoryStickyBucketService(AbstractStickyBucketService):
     def __init__(self) -> None:
-        self.docs: Dict[str, Dict] = {}
+        self.docs: Dict[str, Dict[str, Any]] = {}
 
-    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict[str, Any]]:
         return self.docs.get(self.get_key(attributeName, attributeValue), None)
 
-    def save_assignments(self, doc: Dict) -> None:
+    def save_assignments(self, doc: Dict[str, Any]) -> None:
         self.docs[self.get_key(doc["attributeName"], doc["attributeValue"])] = doc
 
     def destroy(self) -> None:
@@ -371,7 +371,7 @@ class FeatureRepository(object):
         self.http_connect_timeout: Optional[int] = None
         self.http_read_timeout: Optional[int] = None
         self.sse_client: Optional[SSEClient] = None
-        self._feature_update_callbacks: List[Callable[[Dict], None]] = []
+        self._feature_update_callbacks: List[Callable[[Dict[str, Any]], None]] = []
         
         # Background refresh support
         self._refresh_thread: Optional[threading.Thread] = None
@@ -390,20 +390,20 @@ class FeatureRepository(object):
     def clear_cache(self) -> None:
         self.cache.clear()
 
-    def save_in_cache(self, key: str, res: Dict, ttl: int = 600) -> None:
+    def save_in_cache(self, key: str, res: Dict[str, Any], ttl: int = 600) -> None:
         self.cache.set(key, res, ttl)
 
-    def add_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
+    def add_feature_update_callback(self, callback: Callable[[Dict[str, Any]], None]) -> None:
         """Add a callback to be notified when features are updated due to cache expiry"""
         if callback not in self._feature_update_callbacks:
             self._feature_update_callbacks.append(callback)
 
-    def remove_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
+    def remove_feature_update_callback(self, callback: Callable[[Dict[str, Any]], None]) -> None:
         """Remove a feature update callback"""
         if callback in self._feature_update_callbacks:
             self._feature_update_callbacks.remove(callback)
 
-    def _notify_feature_update_callbacks(self, features_data: Dict) -> None:
+    def _notify_feature_update_callbacks(self, features_data: Dict[str, Any]) -> None:
         """Notify all registered callbacks about feature updates"""
         for callback in self._feature_update_callbacks:
             try:
@@ -422,7 +422,7 @@ class FeatureRepository(object):
         payload: Optional[Dict[str, Any]] = None,
         cache_key_attributes: Optional[List[str]] = None,
         force_refresh: bool = False,
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         if not client_key:
             raise ValueError("Must specify `client_key` to refresh features")
 
@@ -463,7 +463,7 @@ class FeatureRepository(object):
         payload: Optional[Dict[str, Any]] = None,
         cache_key_attributes: Optional[List[str]] = None,
         force_refresh: bool = False,
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         key = self._compute_cache_key(api_host, client_key, remote_eval, payload, cache_key_attributes)
 
         cached = None if force_refresh else self.cache.get(key)
@@ -521,7 +521,7 @@ class FeatureRepository(object):
 
     def _fetch_and_decode_post(
         self, api_host: str, client_key: str, payload: Dict[str, Any]
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         url = self._get_remote_eval_url(api_host, client_key)
         headers = self._get_headers(client_key)
         headers["Content-Type"] = "application/json"
@@ -541,7 +541,7 @@ class FeatureRepository(object):
 
     async def _fetch_and_decode_post_async(
         self, api_host: str, client_key: str, payload: Dict[str, Any]
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         url = self._get_remote_eval_url(api_host, client_key)
         headers = self._get_headers(client_key)
         headers["Content-Type"] = "application/json"
@@ -564,7 +564,7 @@ class FeatureRepository(object):
             logger.warning(f"Failed to decode remote-eval response: {e}")
             return None
 
-    def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
+    def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict[str, Any]]:
         url = self._get_features_url(api_host, client_key)
         headers = self._get_headers(client_key)
         logger.debug(f"Fetching features from {url} with headers {headers}")
@@ -625,7 +625,7 @@ class FeatureRepository(object):
             logger.error(f"Failed to decode feature JSON from GrowthBook API: {e}")
             return None
 
-    async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
+    async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict[str, Any]]:
         url = self._get_features_url(api_host, client_key)
         headers = self._get_headers(client_key=client_key)
         logger.debug(f"[Async] Fetching features from {url} with headers {headers}")
@@ -721,7 +721,7 @@ class FeatureRepository(object):
     # Fetch features from the GrowthBook API
     def _fetch_features(
         self, api_host: str, client_key: str, decryption_key: str = ""
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         decoded = self._fetch_and_decode(api_host, client_key)
         if not decoded:
             return None
@@ -732,7 +732,7 @@ class FeatureRepository(object):
 
     async def _fetch_features_async(
         self, api_host: str, client_key: str, decryption_key: str = ""
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         decoded = await self._fetch_and_decode_async(api_host, client_key)
         if not decoded:
             return None
@@ -914,9 +914,9 @@ class GrowthBook(object):
         self._cache_ttl = cache_ttl
         self.sticky_bucket_identifier_attributes = sticky_bucket_identifier_attributes
         self.sticky_bucket_service = sticky_bucket_service
-        self._sticky_bucket_assignment_docs: dict = {}
+        self._sticky_bucket_assignment_docs: Dict[str, Any] = {}
         self._using_derived_sticky_bucket_attributes = not sticky_bucket_identifier_attributes
-        self._sticky_bucket_attributes: Optional[dict] = None
+        self._sticky_bucket_attributes: Optional[Dict[str, Any]] = None
 
         self._qaMode = qa_mode or qaMode
         self._trackingCallback: Optional[TrackingCallback] = on_experiment_viewed or trackingCallback
@@ -937,7 +937,7 @@ class GrowthBook(object):
 
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
-        self._subscriptions: Set[Callable[[Experiment, Result], None]] = set()
+        self._subscriptions: Set[Callable[[Experiment[Any], Result[Any]], None]] = set()
         self._is_updating_features = False
         self._event_logger: Optional[EventLogger] = None
 
@@ -1009,7 +1009,7 @@ class GrowthBook(object):
             forced_features=self._forcedFeatures,
         )
 
-    def _on_feature_update(self, features_data: Dict) -> None:
+    def _on_feature_update(self, features_data: Dict[str, Any]) -> None:
         """Callback to handle automatic feature updates from FeatureRepository"""
         if features_data and "features" in features_data:
             self.set_features(features_data["features"])
@@ -1298,7 +1298,7 @@ class GrowthBook(object):
         res = self.eval_feature(key)
         return cast(T, res.value) if res.value is not None else fallback
 
-    def evalFeature(self, key: str) -> FeatureResult:
+    def evalFeature(self, key: str) -> FeatureResult[Any]:
         warnings.warn("evalFeature is deprecated, use eval_feature instead", DeprecationWarning)
         return self.eval_feature(key)
     
@@ -1361,7 +1361,7 @@ class GrowthBook(object):
         self._ensure_fresh_features()
         return self._build_eval_context()
 
-    def eval_feature(self, key: str) -> FeatureResult:
+    def eval_feature(self, key: str) -> FeatureResult[Any]:
         result = core_eval_feature(key=key, 
                                    evalContext=self._get_eval_context(), 
                                    callback_subscription=self._fireSubscriptions,
@@ -1382,7 +1382,7 @@ class GrowthBook(object):
     def get_all_results(self) -> Dict[str, Dict[str, Any]]:
         return self._assigned.copy()
 
-    def _fireSubscriptions(self, experiment: Experiment, result: Result) -> None:
+    def _fireSubscriptions(self, experiment: Experiment[Any], result: Result[Any]) -> None:
         if experiment is not None:
             prev = self._assigned.get(experiment.key, None)
             if (
@@ -1410,11 +1410,11 @@ class GrowthBook(object):
         self._fireSubscriptions(experiment, result)
         return result
 
-    def subscribe(self, callback: Callable[[Experiment, Result], None]) -> Callable[[], None]:
+    def subscribe(self, callback: Callable[[Experiment[Any], Result[Any]], None]) -> Callable[[], None]:
         self._subscriptions.add(callback)
         return lambda: self._subscriptions.remove(callback)
 
-    def _track(self, experiment: Experiment, result: Result, user_context: UserContext) -> None:
+    def _track(self, experiment: Experiment[Any], result: Result[Any], user_context: UserContext) -> None:
         if not self._trackingCallback:
             return None
         key = (
@@ -1440,7 +1440,7 @@ class GrowthBook(object):
                         attributes.add(rule.fallbackAttribute)
         return list(attributes)
 
-    def _get_sticky_bucket_attributes(self) -> dict:
+    def _get_sticky_bucket_attributes(self) -> Dict[str, Any]:
         attributes: Dict[str, str] = {}
         if self._using_derived_sticky_bucket_attributes:
             self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes()

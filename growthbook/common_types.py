@@ -475,14 +475,14 @@ class TrackingCallback(Protocol):
 
     def __call__(
         self,
-        experiment: Experiment,
-        result: Result,
+        experiment: Experiment[Any],
+        result: Result[Any],
         user_context: Optional[UserContext],
     ) -> None: ...
 
 
 # Invoked positionally: (feature_key, feature_result, user_context).
-FeatureUsageCallback = Callable[[str, "FeatureResult", UserContext], None]
+FeatureUsageCallback = Callable[[str, "FeatureResult[Any]", UserContext], None]
 
 # Invoked positionally: (event_name, properties, user_context). The async
 # client awaits a returned coroutine, so async implementations are allowed.

@@ -147,7 +147,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         # down the CDN path on a fresh client.
         self._remote_eval = remote_eval
         self._refresh_lock = threading.Lock()
-        self._refresh_task: Optional[asyncio.Task] = None
+        self._refresh_task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
         self._backoff = BackoffStrategy()
         self._feature_cache = FeatureCache()
@@ -585,7 +585,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         payload: Optional[Dict[str, Any]] = None,
         cache_key_attributes: Optional[List[str]] = None,
         force_refresh: bool = False,
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         # Use stored values when called internally
         if api_host == self._api_host and client_key == self._client_key:
             decryption_key = self._decryption_key
@@ -629,7 +629,7 @@ class GrowthBookClient:
         self._tracked_lock = threading.Lock()
         
         # Thread-safe subscription management
-        self._subscriptions: Set[Callable[[Experiment, Result], Union[None, Awaitable[None]]]] = set()
+        self._subscriptions: Set[Callable[[Experiment[Any], Result[Any]], Union[None, Awaitable[None]]]] = set()
         self._subscriptions_lock = threading.Lock()
 
         # Per-attributes-key inflight sticky bucket fetches. Concurrent evals
@@ -732,7 +732,7 @@ class GrowthBookClient:
                 fut.add_done_callback(_fire_on_error)
             self._spawn_tracked(fut, self._callback_tasks, f"Error in {what} callback")
 
-    def _track(self, experiment: Experiment, result: Result, user_context: UserContext) -> None:
+    def _track(self, experiment: Experiment[Any], result: Result[Any], user_context: UserContext) -> None:
         """Thread-safe tracking implementation"""
         if not self.options.on_experiment_viewed:
             return
@@ -766,7 +766,7 @@ class GrowthBookClient:
         with self._tracked_lock:
             self._tracked.pop(key, None)
 
-    def subscribe(self, callback: Callable[[Experiment, Result], Union[None, Awaitable[None]]]) -> Callable[[], None]:
+    def subscribe(self, callback: Callable[[Experiment[Any], Result[Any]], Union[None, Awaitable[None]]]) -> Callable[[], None]:
         """Thread-safe subscription management"""
         with self._subscriptions_lock:
             self._subscriptions.add(callback)
@@ -775,7 +775,7 @@ class GrowthBookClient:
                     self._subscriptions.discard(callback)
             return unsubscribe
 
-    def _fire_subscriptions(self, experiment: Experiment, result: Result) -> None:
+    def _fire_subscriptions(self, experiment: Experiment[Any], result: Result[Any]) -> None:
         """Thread-safe subscription notifications"""
         with self._subscriptions_lock:
             subscriptions = self._subscriptions.copy()
@@ -1203,7 +1203,7 @@ class GrowthBookClient:
             ),
         )
 
-    async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult:
+    async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult[Any]:
         """Evaluate a feature. Lock-free: the evaluation context captures an
         immutable feature snapshot, so concurrent evaluations never contend
         with each other or with feature updates."""

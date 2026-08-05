@@ -60,11 +60,11 @@ class RequestContextPlugin(GrowthBookPlugin):
     
     def __init__(
         self,
-        request_extractor: Optional[Callable] = None,
+        request_extractor: Optional[Callable[[], Any]] = None,
         client_side_attributes: Optional[ClientSideAttributes] = None,
         extract_utm: bool = True,
         extract_user_agent: bool = True,
-        **options
+        **options: Any
     ):
         """
         Initialize request context plugin.
@@ -174,7 +174,7 @@ class RequestContextPlugin(GrowthBookPlugin):
         
         return None
     
-    def _normalize_request_object(self, request_obj) -> Dict[str, Any]:
+    def _normalize_request_object(self, request_obj: Any) -> Dict[str, Any]:
         """Convert various request objects to normalized dict."""
         normalized = {}
         
@@ -315,7 +315,7 @@ def clear_request_context() -> None:
 
 
 # Convenience functions
-def request_context_plugin(**options) -> RequestContextPlugin:
+def request_context_plugin(**options: Any) -> RequestContextPlugin:
     """
     Create a request context plugin.
     
@@ -346,7 +346,7 @@ def request_context_plugin(**options) -> RequestContextPlugin:
     return RequestContextPlugin(**options)
 
 
-def client_side_attributes(**kwargs) -> ClientSideAttributes:
+def client_side_attributes(**kwargs: Any) -> ClientSideAttributes:
     """
     Create client-side attributes.
     
