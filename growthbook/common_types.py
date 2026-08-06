@@ -22,6 +22,8 @@ from enum import Enum
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse as _urlparse
 
+from typing_extensions import Required
+
 if TYPE_CHECKING:
     from .plugins.base import PluginLike
 
@@ -45,7 +47,8 @@ class VariationMeta(TypedDict, total=False):
 
 class Filter(TypedDict, total=False):
     seed: str
-    ranges: List[Tuple[float, float]]
+    # A filter without ranges is meaningless; the eval loop indexes it directly.
+    ranges: Required[List[Tuple[float, float]]]
     hashVersion: int
     attribute: str
 

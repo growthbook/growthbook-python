@@ -7,11 +7,12 @@ This plugin extracts attributes from HTTP request context using a framework-agno
 import logging
 import uuid
 import time
-from typing import TYPE_CHECKING, Dict, Any, Optional, Callable, Union
+from typing import TYPE_CHECKING, Dict, Any, Optional, Callable, Union, cast
 from urllib.parse import urlparse
 from .base import GrowthBookPlugin
 
 if TYPE_CHECKING:
+    from ..growthbook import GrowthBook
     from .base import GrowthBookInstance
 
 logger = logging.getLogger("growthbook.plugins.request_context")
@@ -93,10 +94,12 @@ class RequestContextPlugin(GrowthBookPlugin):
             if request_attributes:
                 # Check client type and merge attributes accordingly
                 if hasattr(gb_instance, 'get_attributes') and hasattr(gb_instance, 'set_attributes'):
-                    # Legacy GrowthBook client
-                    current_attributes = gb_instance.get_attributes()
+                    # Legacy GrowthBook client (the hasattr checks above are the
+                    # runtime narrowing; the cast mirrors them for checkers)
+                    legacy_gb = cast("GrowthBook", gb_instance)
+                    current_attributes = legacy_gb.get_attributes()
                     merged_attributes = {**request_attributes, **current_attributes}
-                    gb_instance.set_attributes(merged_attributes)
+                    legacy_gb.set_attributes(merged_attributes)
                     self.logger.info(f"Extracted {len(request_attributes)} request attributes for legacy client")
                     
                 elif hasattr(gb_instance, 'options'):
