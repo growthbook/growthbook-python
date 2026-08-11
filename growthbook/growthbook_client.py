@@ -681,13 +681,16 @@ class GrowthBookClient:
 
         fut.add_done_callback(_done)
 
-    def _run_user_callback(self, callback: Callable, args: tuple, what: str) -> None:
+    def _run_user_callback(self, callback: Callable, args: tuple, what: str,
+                           on_error: Optional[Callable[[], None]] = None) -> None:
         """Invoke a user callback that may be sync or async.
 
         Called from synchronous eval paths, so a returned awaitable cannot be
         awaited here; it is scheduled fire-and-forget on the running loop
         (drained in close()). Sync exceptions propagate to the caller's
-        existing try/except."""
+        existing try/except. `on_error` fires if the SCHEDULED coroutine
+        fails or cannot be scheduled — sync failures don't need it because
+        they propagate."""
         result = callback(*args)
         if inspect.isawaitable(result):
             try:
@@ -696,12 +699,16 @@ class GrowthBookClient:
                 if asyncio.iscoroutine(result):
                     result.close()
                 logger.error("Async %s callback requires a running event loop; dropped", what)
+                if on_error:
+                    on_error()
                 return
-            self._spawn_tracked(
-                asyncio.ensure_future(result),
-                self._callback_tasks,
-                f"Error in {what} callback",
-            )
+            fut = asyncio.ensure_future(result)
+            if on_error is not None:
+                def _fire_on_error(f: "asyncio.Future[Any]") -> None:
+                    if not f.cancelled() and f.exception():
+                        on_error()
+                fut.add_done_callback(_fire_on_error)
+            self._spawn_tracked(fut, self._callback_tasks, f"Error in {what} callback")
 
     def _track(self, experiment: Experiment, result: Result, user_context: UserContext) -> None:
         """Thread-safe tracking implementation"""
@@ -723,10 +730,19 @@ class GrowthBookClient:
                         self.options.on_experiment_viewed,
                         (experiment, result, user_context),
                         "tracking",
+                        # An async tracking callback is deduped at schedule
+                        # time; if it later fails, un-mark so the impression
+                        # is retried on the next eval — same retry semantics
+                        # as a sync callback that raises.
+                        on_error=lambda: self._untrack(key),
                     )
                     self._tracked[key] = True
                 except Exception:
                     logger.exception("Error in tracking callback")
+
+    def _untrack(self, key: str) -> None:
+        with self._tracked_lock:
+            self._tracked.pop(key, None)
 
     def subscribe(self, callback: Callable[[Experiment, Result], Union[None, Awaitable[None]]]) -> Callable[[], None]:
         """Thread-safe subscription management"""

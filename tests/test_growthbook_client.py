@@ -1162,6 +1162,52 @@ async def test_async_user_callbacks_are_scheduled_and_drained():
         assert "manual-exp" in subs
 
 
+@pytest.mark.asyncio
+async def test_failed_async_tracking_callback_is_retried():
+    """An async on_experiment_viewed that fails must be un-deduped so the
+    impression fires again on the next eval (parity with sync callbacks,
+    whose exceptions also leave the event unmarked)."""
+    calls = []
+
+    async def flaky_tracker(experiment, result, user_context):
+        calls.append(experiment.key)
+        if len(calls) == 1:
+            raise RuntimeError("collector down")
+
+    EnhancedFeatureRepository._instances = {}
+    opts = Options(
+        api_host="https://localhost.growthbook.io",
+        client_key="test-key",
+        on_experiment_viewed=flaky_tracker,
+    )
+
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=STICKY_WRITE_FEATURES), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+        async with GrowthBookClient(opts) as client:
+            user = UserContext(attributes={"id": "user-1"})
+
+            await client.eval_feature("exp-feature", user)
+            while client._callback_tasks:  # let the failing callback settle
+                await asyncio.gather(*list(client._callback_tasks), return_exceptions=True)
+            assert calls == ["exp"]
+
+            # First attempt failed -> retried on the next eval
+            await client.eval_feature("exp-feature", user)
+            while client._callback_tasks:
+                await asyncio.gather(*list(client._callback_tasks), return_exceptions=True)
+            assert calls == ["exp", "exp"]
+
+            # Second attempt succeeded -> now deduped
+            await client.eval_feature("exp-feature", user)
+            while client._callback_tasks:
+                await asyncio.gather(*list(client._callback_tasks), return_exceptions=True)
+            assert calls == ["exp", "exp"]
+
+
 async def getTrackingMock(client: GrowthBookClient):
     """Helper function to mock tracking for tests"""
     calls = []
