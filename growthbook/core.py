@@ -1,3 +1,4 @@
+import inspect
 import logging
 import math
 import re
@@ -1018,7 +1019,21 @@ def run_experiment(experiment: Experiment,
             if not evalContext.user.sticky_bucket_assignment_docs:
                 evalContext.user.sticky_bucket_assignment_docs = {}
             evalContext.user.sticky_bucket_assignment_docs[data.get('key')] = doc
-            evalContext.global_ctx.options.sticky_bucket_service.save_assignments(doc)
+            if evalContext.save_sticky_bucket_doc:
+                # Client-provided persistence hook (the async client schedules
+                # the write off the event loop, fire-and-forget).
+                evalContext.save_sticky_bucket_doc(doc)
+            else:
+                result_ = evalContext.global_ctx.options.sticky_bucket_service.save_assignments(doc)
+                if inspect.iscoroutine(result_):
+                    # Async service without client wiring: never awaited here
+                    # (this code is synchronous). Close it to avoid a
+                    # RuntimeWarning and surface the misconfiguration.
+                    result_.close()
+                    logger.error(
+                        "Async sticky bucket service requires GrowthBookClient; "
+                        "assignment doc was not persisted"
+                    )
 
     # 14. Fire the tracking callback if set
     if tracking_cb:

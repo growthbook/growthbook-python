@@ -469,6 +469,10 @@ class EvaluationContext:
     user: UserContext
     global_ctx: GlobalContext
     stack: StackContext
+    # When set, core calls this instead of sticky_bucket_service.save_assignments
+    # directly, letting the async client schedule persistence off the event loop.
+    # None (the default) preserves the sync client's direct-call behavior.
+    save_sticky_bucket_doc: Optional[Callable[[Dict], None]] = None
 
 
 # ---------------------------------------------------------------------------

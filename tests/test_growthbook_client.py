@@ -717,7 +717,7 @@ def base_client_setup():
     return _setup
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("service_flavor", ["sync"])
+@pytest.mark.parametrize("service_flavor", ["sync", "async"])
 async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup, service_flavor):
     """Test sticky bucket functionality in GrowthBookClient.
 
@@ -769,13 +769,16 @@ async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup, service
             async with GrowthBookClient(Options(**client_opts)) as client:
                 # Evaluate feature
                 result = await client.eval_feature(key, UserContext(**user_attrs))
-                
+
                 # Verify experiment result
                 if not result.experimentResult:
                     assert None == expected_result
                 else:
                     assert result.experimentResult.to_dict() == expected_result
-  
+
+                # Persistence is fire-and-forget; settle before asserting
+                await client.flush_sticky_bucket_saves()
+
                 # Verify sticky bucket assignments - check each expected doc individually
                 for doc_key, expected_doc in expected_docs.items():
                     assert service.docs[doc_key] == expected_doc
@@ -877,6 +880,118 @@ async def test_sticky_bucket_cache_invalidated_on_attribute_change():
             assert service.get_all_calls == 1  # cache hit
             await client.eval_feature("read-feature", UserContext(attributes={"id": "user-2"}))
             assert service.get_all_calls == 2  # attribute change -> refetch
+
+
+# Experiment forcing variation1 (weights [0, 1]) so a sticky bucket
+# assignment doc is written deterministically on first evaluation.
+STICKY_WRITE_FEATURES = {
+    "features": {
+        "exp-feature": {
+            "defaultValue": 0,
+            "rules": [{
+                "key": "exp",
+                "variations": [0, 1],
+                "weights": [0, 1],
+                "meta": [{"key": "control"}, {"key": "variation1"}],
+            }]
+        }
+    },
+    "savedGroups": {}
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service_flavor", ["sync", "async"])
+async def test_sticky_bucket_write_fire_and_forget(service_flavor):
+    """The in-memory assignment doc must be visible immediately after eval
+    (read-your-writes), while service persistence completes in the background
+    and is observable after flush_sticky_bucket_saves()."""
+    if service_flavor == "sync":
+        class SlowSaveSyncService(CountingStickyBucketService):
+            def save_assignments(self, doc):
+                time.sleep(0.1)
+                super().save_assignments(doc)
+        service = SlowSaveSyncService()
+    else:
+        service = AsyncInMemoryStickyBucketService(latency=0.1)
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_WRITE_FEATURES)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            user = UserContext(attributes={"id": "user-1"})
+            result = await client.eval_feature("exp-feature", user)
+            assert result.value == 1
+
+            # Read-your-writes: in-memory doc updated synchronously during eval
+            assert "id||user-1" in user.sticky_bucket_assignment_docs
+
+            # Persistence is in flight (0.1s latency), not yet in the service
+            assert "id||user-1" not in service.docs
+
+            await client.flush_sticky_bucket_saves()
+            assert service.docs["id||user-1"]["assignments"] == {"exp__0": "variation1"}
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_slow_sync_save_does_not_block_loop():
+    """A slow SYNC save_assignments must not block the event loop: eval
+    returns immediately and a heartbeat keeps ticking while the write
+    completes in the executor."""
+
+    class SlowSaveService(CountingStickyBucketService):
+        def save_assignments(self, doc):
+            time.sleep(0.3)
+            super().save_assignments(doc)
+
+    service = SlowSaveService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_WRITE_FEATURES)
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            await client.eval_feature("exp-feature", UserContext(attributes={"id": "user-1"}))
+            hb = asyncio.ensure_future(heartbeat())
+            try:
+                await client.flush_sticky_bucket_saves()
+            finally:
+                hb.cancel()
+
+    assert "id||user-1" in service.docs
+    assert ticks >= 3  # loop stayed responsive during the 0.3s blocking write
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_save_failure_is_logged_not_raised(caplog):
+    """A failing save must never propagate into eval; it is logged and the
+    task set is drained."""
+
+    class FailingAsyncService(AsyncInMemoryStickyBucketService):
+        async def save_assignments(self, doc):
+            self.save_calls += 1
+            raise RuntimeError("backend down")
+
+    service = FailingAsyncService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_WRITE_FEATURES)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            result = await client.eval_feature("exp-feature", UserContext(attributes={"id": "user-1"}))
+            assert result.value == 1  # eval unaffected
+            await client.flush_sticky_bucket_saves()
+            assert client._sticky_save_tasks == set()
+
+    assert service.save_calls == 1
+    assert any("Sticky bucket save failed" in r.message for r in caplog.records)
 
 
 async def getTrackingMock(client: GrowthBookClient):

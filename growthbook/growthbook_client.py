@@ -617,6 +617,10 @@ class GrowthBookClient:
             'assignments': {}
         }
         self._sticky_bucket_lock = asyncio.Lock()
+        # Strong refs to in-flight fire-and-forget save_assignments futures;
+        # bare create_task results are only weakly held by the loop and can be
+        # garbage-collected mid-write. Drained in close()/flush.
+        self._sticky_save_tasks: Set["asyncio.Future[Any]"] = set()
         
         # Plugin support
         self._tracking_plugins: List[Any] = self.options.tracking_plugins or []
@@ -754,6 +758,54 @@ class GrowthBookClient:
             self._sticky_bucket_cache['attributes'] = attributes.copy()
             self._sticky_bucket_cache['assignments'] = assignments
             return assignments
+
+    def _schedule_sticky_bucket_save(self, doc: Dict) -> None:
+        """Fire-and-forget persistence of a sticky bucket assignment doc,
+        mirroring the JS SDK: the in-memory doc is already updated
+        synchronously by core (read-your-writes), so the service write can
+        complete in the background without blocking the event loop.
+
+        Called synchronously from core's run_experiment via
+        EvaluationContext.save_sticky_bucket_doc.
+        """
+        service = self.options.sticky_bucket_service
+        if not service:
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (hand-rolled context outside the public API):
+            # persist inline if the service is sync, otherwise drop with a log.
+            if isinstance(service, AbstractAsyncStickyBucketService):
+                logger.error(
+                    "Cannot persist sticky bucket doc: async service but no "
+                    "running event loop"
+                )
+            else:
+                service.save_assignments(doc)
+            return
+
+        if isinstance(service, AbstractAsyncStickyBucketService):
+            fut: "asyncio.Future[Any]" = loop.create_task(service.save_assignments(doc))
+        else:
+            fut = loop.run_in_executor(None, service.save_assignments, doc)
+        self._sticky_save_tasks.add(fut)
+        fut.add_done_callback(self._on_sticky_save_done)
+
+    def _on_sticky_save_done(self, fut: "asyncio.Future[Any]") -> None:
+        self._sticky_save_tasks.discard(fut)
+        if not fut.cancelled() and fut.exception():
+            logger.error("Sticky bucket save failed", exc_info=fut.exception())
+
+    async def flush_sticky_bucket_saves(self) -> None:
+        """Wait for all in-flight sticky bucket saves to complete.
+
+        Useful in short-lived environments (e.g. serverless) where the event
+        loop may be torn down before background writes finish. close() calls
+        this automatically. Failures are logged, never raised.
+        """
+        while self._sticky_save_tasks:
+            await asyncio.gather(*list(self._sticky_save_tasks), return_exceptions=True)
 
     async def initialize(self) -> bool:
         """Initialize client with features and start refresh"""
@@ -900,7 +952,11 @@ class GrowthBookClient:
         return EvaluationContext(
             user=user_context,
             global_ctx=self._global_context,
-            stack=StackContext(evaluated_features=set())
+            stack=StackContext(evaluated_features=set()),
+            save_sticky_bucket_doc=(
+                self._schedule_sticky_bucket_save
+                if self.options.sticky_bucket_service else None
+            ),
         )
 
     @asynccontextmanager
@@ -988,6 +1044,10 @@ class GrowthBookClient:
         
     async def close(self) -> None:
         """Clean shutdown with proper cleanup"""
+        # Let in-flight sticky bucket writes finish (sub-ms typically);
+        # cancelling them would lose assignments.
+        await self.flush_sticky_bucket_saves()
+
         if self._features_repository:
             await self._features_repository.stop_refresh()
 
