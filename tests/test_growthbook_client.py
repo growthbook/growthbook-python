@@ -1016,6 +1016,51 @@ async def test_sticky_bucket_unchanged_assignment_not_resaved():
             assert service.save_calls == 1  # unchanged -> no new save
 
 
+@pytest.mark.asyncio
+async def test_async_user_callbacks_are_scheduled_and_drained():
+    """Coroutine-function callbacks (on_experiment_viewed, on_feature_usage,
+    subscriptions) must be scheduled on the loop instead of silently dropped,
+    and drained by close()."""
+    viewed, usage, subs = [], [], []
+
+    async def on_viewed(experiment, result, user_context):
+        viewed.append(experiment.key)
+
+    async def on_usage(key, result, user_context):
+        usage.append(key)
+
+    async def on_sub(experiment, result):
+        subs.append(experiment.key)
+
+    EnhancedFeatureRepository._instances = {}
+    opts = Options(
+        api_host="https://localhost.growthbook.io",
+        client_key="test-key",
+        on_experiment_viewed=on_viewed,
+        on_feature_usage=on_usage,
+    )
+
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=STICKY_WRITE_FEATURES), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+        async with GrowthBookClient(opts) as client:
+            client.subscribe(on_sub)
+            result = await client.eval_feature("exp-feature", UserContext(attributes={"id": "user-1"}))
+            assert result.value == 1
+            await client.run(
+                Experiment(key="manual-exp", variations=[0, 1], weights=[0, 1]),
+                UserContext(attributes={"id": "user-1"}),
+            )
+        # close() has drained all scheduled callback coroutines
+        assert "exp" in viewed  # experiment key of the feature rule
+        assert "manual-exp" in viewed
+        assert usage == ["exp-feature"]
+        assert "manual-exp" in subs
+
+
 async def getTrackingMock(client: GrowthBookClient):
     """Helper function to mock tracking for tests"""
     calls = []

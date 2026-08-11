@@ -627,6 +627,9 @@ class GrowthBookClient:
         # bare create_task results are only weakly held by the loop and can be
         # garbage-collected mid-write. Drained in close()/flush.
         self._sticky_save_tasks: Set["asyncio.Future[Any]"] = set()
+        # Strong refs to scheduled async user callbacks (tracking, feature
+        # usage, subscriptions). Drained in close().
+        self._callback_tasks: Set["asyncio.Future[Any]"] = set()
         
         # Plugin support
         self._tracking_plugins: List[Any] = self.options.tracking_plugins or []
@@ -654,6 +657,39 @@ class GrowthBookClient:
         self._initialize_plugins()
 
 
+    def _spawn_tracked(self, fut: "asyncio.Future[Any]", task_set: Set["asyncio.Future[Any]"], error_msg: str) -> None:
+        """Keep a strong ref to a fire-and-forget future until it completes;
+        log (never raise) its exception."""
+        task_set.add(fut)
+
+        def _done(f: "asyncio.Future[Any]") -> None:
+            task_set.discard(f)
+            if not f.cancelled() and f.exception():
+                logger.error(error_msg, exc_info=f.exception())
+
+        fut.add_done_callback(_done)
+
+    def _run_user_callback(self, callback: Callable, args: tuple, what: str) -> None:
+        """Invoke a user callback that may be sync or async.
+
+        Called from synchronous eval paths, so a returned coroutine cannot be
+        awaited here; it is scheduled fire-and-forget on the running loop
+        (drained in close()). Sync exceptions propagate to the caller's
+        existing try/except."""
+        result = callback(*args)
+        if asyncio.iscoroutine(result):
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                result.close()
+                logger.error("Async %s callback requires a running event loop; dropped", what)
+                return
+            self._spawn_tracked(
+                loop.create_task(result),
+                self._callback_tasks,
+                f"Error in {what} callback",
+            )
+
     def _track(self, experiment: Experiment, result: Result, user_context: UserContext) -> None:
         """Thread-safe tracking implementation"""
         if not self.options.on_experiment_viewed:
@@ -670,7 +706,11 @@ class GrowthBookClient:
         with self._tracked_lock:
             if not self._tracked.get(key):
                 try:
-                    self.options.on_experiment_viewed(experiment, result, user_context)
+                    self._run_user_callback(
+                        self.options.on_experiment_viewed,
+                        (experiment, result, user_context),
+                        "tracking",
+                    )
                     self._tracked[key] = True
                 except Exception:
                     logger.exception("Error in tracking callback")
@@ -691,7 +731,7 @@ class GrowthBookClient:
 
         for callback in subscriptions:
             try:
-                callback(experiment, result)
+                self._run_user_callback(callback, (experiment, result), "subscription")
             except Exception:
                 logger.exception("Error in subscription callback")
 
@@ -795,13 +835,7 @@ class GrowthBookClient:
             fut: "asyncio.Future[Any]" = loop.create_task(service.save_assignments(doc))
         else:
             fut = loop.run_in_executor(None, service.save_assignments, doc)
-        self._sticky_save_tasks.add(fut)
-        fut.add_done_callback(self._on_sticky_save_done)
-
-    def _on_sticky_save_done(self, fut: "asyncio.Future[Any]") -> None:
-        self._sticky_save_tasks.discard(fut)
-        if not fut.cancelled() and fut.exception():
-            logger.error("Sticky bucket save failed", exc_info=fut.exception())
+        self._spawn_tracked(fut, self._sticky_save_tasks, "Sticky bucket save failed")
 
     async def flush_sticky_bucket_saves(self) -> None:
         """Wait for all in-flight sticky bucket saves to complete.
@@ -992,7 +1026,11 @@ class GrowthBookClient:
             # Call feature usage callback if provided
             if self.options.on_feature_usage:
                 try:
-                    self.options.on_feature_usage(key, result, user_context)
+                    self._run_user_callback(
+                        self.options.on_feature_usage,
+                        (key, result, user_context),
+                        "feature usage",
+                    )
                 except Exception:
                     logger.exception("Error in feature usage callback")
             return result
@@ -1029,6 +1067,11 @@ class GrowthBookClient:
         # Let in-flight sticky bucket writes finish (sub-ms typically);
         # cancelling them would lose assignments.
         await self.flush_sticky_bucket_saves()
+
+        # Drain any scheduled async user callbacks (tracking, feature usage,
+        # subscriptions); failures are logged by their done-callbacks.
+        while self._callback_tasks:
+            await asyncio.gather(*list(self._callback_tasks), return_exceptions=True)
 
         if self._features_repository:
             await self._features_repository.stop_refresh()
