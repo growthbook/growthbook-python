@@ -25,6 +25,7 @@ from .common_types import (
     StackContext,
     FeatureResult,
     FeatureRefreshStrategy,
+    AbstractAsyncStickyBucketService,
     Experiment,
     build_remote_eval_payload,
     features_from_dict,
@@ -615,7 +616,7 @@ class GrowthBookClient:
             'attributes': {},
             'assignments': {}
         }
-        self._sticky_bucket_cache_lock = False
+        self._sticky_bucket_lock = asyncio.Lock()
         
         # Plugin support
         self._tracking_plugins: List[Any] = self.options.tracking_plugins or []
@@ -728,26 +729,31 @@ class GrowthBookClient:
         
     
     async def _refresh_sticky_buckets(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
-        """Refresh sticky bucket assignments only if attributes have changed"""
-        if not self.options.sticky_bucket_service:
+        """Refresh sticky bucket assignments only if attributes have changed.
+
+        Never blocks the event loop: async services are awaited natively, sync
+        services are offloaded to the default executor. The lock also coalesces
+        concurrent refreshes for identical attributes — waiters hit the cache
+        check after the first fetch completes.
+        """
+        service = self.options.sticky_bucket_service
+        if not service:
             return {}
 
-        # Use compare-and-swap pattern
-        while not self._sticky_bucket_cache_lock:
+        async with self._sticky_bucket_lock:
             if attributes == self._sticky_bucket_cache['attributes']:
                 return self._sticky_bucket_cache['assignments']
-            
-            self._sticky_bucket_cache_lock = True
-            try:
-                assignments = self.options.sticky_bucket_service.get_all_assignments(attributes)
-                self._sticky_bucket_cache['attributes'] = attributes.copy()
-                self._sticky_bucket_cache['assignments'] = assignments
-                return assignments
-            finally:
-                self._sticky_bucket_cache_lock = False
-        
-        # Fallback return for edge case where loop condition is never satisfied
-        return {}
+
+            if isinstance(service, AbstractAsyncStickyBucketService):
+                assignments = await service.get_all_assignments(attributes)
+            else:
+                loop = asyncio.get_running_loop()
+                assignments = await loop.run_in_executor(
+                    None, service.get_all_assignments, attributes
+                )
+            self._sticky_bucket_cache['attributes'] = attributes.copy()
+            self._sticky_bucket_cache['assignments'] = assignments
+            return assignments
 
     async def initialize(self) -> bool:
         """Initialize client with features and start refresh"""
@@ -884,7 +890,11 @@ class GrowthBookClient:
         # Get sticky bucket assignments if needed
         sticky_assignments = await self._refresh_sticky_buckets(user_context.attributes)
 
-        # update user context with sticky bucket assignments
+        # Intentionally the SHARED cached dict, not a copy: core mutates it in
+        # place when an experiment assigns a new sticky bucket, which is what
+        # gives read-your-writes semantics while persistence happens
+        # asynchronously (same mechanism as the JS SDK's
+        # stickyBucketAssignmentDocs).
         user_context.sticky_bucket_assignment_docs = sticky_assignments
 
         return EvaluationContext(

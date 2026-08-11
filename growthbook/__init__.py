@@ -1,5 +1,7 @@
 from .growthbook import *
 
+from .common_types import AbstractAsyncStickyBucketService
+
 from .growthbook_client import (
     GrowthBookClient,
     EnhancedFeatureRepository,

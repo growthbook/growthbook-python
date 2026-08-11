@@ -378,8 +378,35 @@ class AbstractStickyBucketService(ABC):
                 docs[self.get_key(attributeName, attributeValue)] = doc
         return docs
 
+
+class AbstractAsyncStickyBucketService(ABC):
+    """Async twin of AbstractStickyBucketService for network-backed stores
+    (Redis, DynamoDB, ...). Only usable with the async GrowthBookClient;
+    the sync GrowthBook class rejects it at construction."""
+
+    @abstractmethod
+    async def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+        pass
+
+    @abstractmethod
+    async def save_assignments(self, doc: Dict) -> None:
+        pass
+
+    def get_key(self, attributeName: str, attributeValue: str) -> str:
+        return f"{attributeName}||{attributeValue}"
+
+    # By default, just loop through all attributes and call get_assignments
+    # Override this method in subclasses to perform a multi-query instead
+    async def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
+        docs = {}
+        for attributeName, attributeValue in attributes.items():
+            doc = await self.get_assignments(attributeName, attributeValue)
+            if doc:
+                docs[self.get_key(attributeName, attributeValue)] = doc
+        return docs
+
 @dataclass
-class StackContext: 
+class StackContext:
     id: Optional[str] = None
     evaluated_features: Set[str] = field(default_factory=set)
 
@@ -418,7 +445,7 @@ class Options:
     enable_dev_mode: bool = False
     # forced_variations: Dict[str, Any] = field(default_factory=dict)
     refresh_strategy: Optional[FeatureRefreshStrategy] = FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
-    sticky_bucket_service: Optional[AbstractStickyBucketService] = None
+    sticky_bucket_service: Optional[Union[AbstractStickyBucketService, AbstractAsyncStickyBucketService]] = None
     sticky_bucket_identifier_attributes: Optional[List[str]] = None
     on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], None]] = None
     on_feature_usage: Optional[Callable[[str, 'FeatureResult', UserContext], None]] = None

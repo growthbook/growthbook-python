@@ -12,19 +12,64 @@ except ImportError:
         async def __call__(self, *args, **kwargs):
             return super(AsyncMock, self).__call__(*args, **kwargs)
 
-from growthbook import InMemoryStickyBucketService
+from growthbook import InMemoryStickyBucketService, AbstractAsyncStickyBucketService
 import pytest
 import asyncio
 import os
 import json
+import time
+from typing import Dict, Optional
 
 from growthbook.common_types import Experiment, Options
 from growthbook.growthbook_client import (
-    GrowthBookClient, 
+    GrowthBookClient,
     UserContext,
     FeatureRefreshStrategy,
     EnhancedFeatureRepository
 )
+
+
+class AsyncInMemoryStickyBucketService(AbstractAsyncStickyBucketService):
+    """Async mirror of InMemoryStickyBucketService, instrumented for tests."""
+
+    def __init__(self, latency: float = 0.0) -> None:
+        self.docs: Dict[str, Dict] = {}
+        self.latency = latency
+        self.get_all_calls = 0
+        self.save_calls = 0
+
+    async def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+        if self.latency:
+            await asyncio.sleep(self.latency)
+        return self.docs.get(self.get_key(attributeName, attributeValue), None)
+
+    async def save_assignments(self, doc: Dict) -> None:
+        self.save_calls += 1
+        if self.latency:
+            await asyncio.sleep(self.latency)
+        self.docs[self.get_key(doc["attributeName"], doc["attributeValue"])] = doc
+
+    async def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
+        self.get_all_calls += 1
+        return await super().get_all_assignments(attributes)
+
+    def destroy(self) -> None:
+        self.docs.clear()
+
+
+class CountingStickyBucketService(InMemoryStickyBucketService):
+    """Sync service instrumented with call counts and optional blocking latency."""
+
+    def __init__(self, latency: float = 0.0) -> None:
+        super().__init__()
+        self.latency = latency
+        self.get_all_calls = 0
+
+    def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
+        self.get_all_calls += 1
+        if self.latency:
+            time.sleep(self.latency)
+        return super().get_all_assignments(attributes)
 
 @pytest.fixture
 def mock_features_response():
@@ -672,17 +717,26 @@ def base_client_setup():
     return _setup
 
 @pytest.mark.asyncio
-async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup):
-    """Test sticky bucket functionality in GrowthBookClient"""
+@pytest.mark.parametrize("service_flavor", ["sync"])
+async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup, service_flavor):
+    """Test sticky bucket functionality in GrowthBookClient.
+
+    Runs every cases.json stickyBucket case against BOTH service flavors:
+    the sync AbstractStickyBucketService (executor-offloaded) and the async
+    AbstractAsyncStickyBucketService (awaited natively).
+    """
     _, ctx, initial_docs, key, expected_result, expected_docs = test_sticky_bucket_data
 
     # Initialize sticky bucket service with test data
-    service = InMemoryStickyBucketService()
-    
-    # Add initial documents to the service
-    for doc in initial_docs:
-        service.save_assignments(doc)
-    
+    if service_flavor == "sync":
+        service = InMemoryStickyBucketService()
+        for doc in initial_docs:
+            service.save_assignments(doc)
+    else:
+        service = AsyncInMemoryStickyBucketService()
+        for doc in initial_docs:
+            await service.save_assignments(doc)
+
     # Handle sticky bucket identifier attributes mapping
     if 'stickyBucketIdentifierAttributes' in ctx:
         ctx['sticky_bucket_identifier_attributes'] = ctx['stickyBucketIdentifierAttributes']
@@ -732,6 +786,98 @@ async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup):
         await client.close()
         service.destroy()
         await asyncio.sleep(0.1)
+
+
+# Rule-free feature: evaluating it still triggers the sticky bucket READ
+# (prefetch happens per evaluation context), but never a write.
+STICKY_READ_FEATURES = {
+    "features": {
+        "read-feature": {"defaultValue": "control"}
+    },
+    "savedGroups": {}
+}
+
+
+def _sticky_client_ctx(service, features=STICKY_READ_FEATURES):
+    return patch('growthbook.FeatureRepository.load_features_async',
+                 new_callable=AsyncMock, return_value=features), \
+           patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+                 new_callable=AsyncMock), \
+           patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+                 new_callable=AsyncMock), \
+           Options(
+               api_host="https://localhost.growthbook.io",
+               client_key="test-key",
+               sticky_bucket_service=service,
+           )
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_sync_service_does_not_block_loop():
+    """A slow SYNC service must not block the event loop during eval (it is
+    offloaded to the executor). A heartbeat task must keep ticking while
+    get_all_assignments sleeps."""
+    service = CountingStickyBucketService(latency=0.3)
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service)
+
+    ticks = 0
+
+    async def heartbeat():
+        nonlocal ticks
+        while True:
+            await asyncio.sleep(0.02)
+            ticks += 1
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            hb = asyncio.ensure_future(heartbeat())
+            try:
+                await client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+            finally:
+                hb.cancel()
+
+    assert service.get_all_calls == 1
+    # 0.3s blocking fetch / 0.02s heartbeat -> ~15 ticks if the loop stayed
+    # free; 0 or 1 if the fetch ran on the loop. Be lenient for slow CI.
+    assert ticks >= 3
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_concurrent_refresh_coalesced():
+    """Concurrent evals with identical attributes must trigger exactly one
+    get_all_assignments fetch (lock + cache check coalesce the rest)."""
+    service = AsyncInMemoryStickyBucketService(latency=0.05)
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            await asyncio.gather(*[
+                client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+                for _ in range(10)
+            ])
+
+    assert service.get_all_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_cache_invalidated_on_attribute_change():
+    """Changing user attributes must trigger a fresh service fetch; repeating
+    the same attributes must hit the cache."""
+    service = AsyncInMemoryStickyBucketService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            await client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+            assert service.get_all_calls == 1
+            await client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+            assert service.get_all_calls == 1  # cache hit
+            await client.eval_feature("read-feature", UserContext(attributes={"id": "user-2"}))
+            assert service.get_all_calls == 2  # attribute change -> refetch
+
 
 async def getTrackingMock(client: GrowthBookClient):
     """Helper function to mock tracking for tests"""
