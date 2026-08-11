@@ -555,6 +555,19 @@ class UserContext:
     overrides: Dict[str, Any] = field(default_factory=dict)
     sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
     skip_all_experiments: bool = False
+    # Per-user experiment tracking callback, set via
+    # UserScopedGrowthBook.set_tracking_callback. When set it replaces the
+    # client-level Options.on_experiment_viewed for this user only; when None
+    # the client-level callback is used. Same contract as that option: invoked
+    # by keyword (experiment=, result=, user_context=) and may be async.
+    # Honored by GrowthBookClient; the sync GrowthBook client builds its own
+    # UserContext and always uses the client-level callback.
+    tracking_callback: Optional["AsyncTrackingCallback"] = None
+    # Per-user feature usage callback, set via
+    # UserScopedGrowthBook.set_feature_usage_callback. Same override/fallback
+    # contract as tracking_callback above, against
+    # Options.on_feature_usage.
+    feature_usage_callback: Optional["AsyncFeatureUsageCallback"] = None
 
 
 class TrackingCallback(Protocol):

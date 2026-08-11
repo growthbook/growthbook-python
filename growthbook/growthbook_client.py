@@ -23,6 +23,8 @@ from .core import _eval_feature_and_report, _hash_string, _is_hashable, reduce_p
 from .common_types import (
     T,
     AsyncEventLogger,
+    AsyncFeatureUsageCallback,
+    AsyncTrackingCallback,
     Feature,
     GlobalContext,
     Options,
@@ -622,6 +624,150 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             force_refresh=force_refresh,
         )
 
+class UserScopedGrowthBook:
+    """A per-user / per-request handle bound to one UserContext.
+
+    Every evaluation method mirrors its `GrowthBookClient` counterpart minus
+    the trailing `user_context` argument, so request-scoped code doesn't have
+    to thread the same context through every layer — a mismatched context is
+    otherwise a silent correctness bug.
+
+    Calls delegate back to the shared client, so feature refresh, experiment
+    subscriptions, the feature-usage callback and the remote-eval cache are
+    reused rather than forked. The handle itself holds no evaluation state; it
+    is cheap to create and discard per request.
+
+    **Scope one instance to one user.** The bound context is mutable — the
+    setters below write to it, and `create_evaluation_context` records sticky
+    bucket assignments on it. Sharing a single instance across concurrent
+    requests for different users reintroduces exactly the bug this class
+    exists to prevent.
+
+    Mirrors the TS SDK's `createScopedInstance` / `UserScopedGrowthBook`.
+    """
+
+    def __init__(self, client: "GrowthBookClient", user_context: UserContext) -> None:
+        self._client = client
+        self._user_context = user_context
+
+    @property
+    def user_context(self) -> UserContext:
+        """The bound context. Exposed for callers that still need to hand a
+        context to a lower layer (e.g. a plugin API)."""
+        return self._user_context
+
+    # --- Evaluation (no context argument) ---------------------------------
+    #
+    # tracking_buffer is forwarded unchanged: deferred tracking stays a
+    # per-call choice, exactly as on the client, so one request can buffer
+    # some exposures and fire others through the callback.
+
+    async def eval_feature(
+        self, key: str, *, tracking_buffer: Optional[TrackingBuffer] = None
+    ) -> FeatureResult[Any]:
+        return await self._client.eval_feature(
+            key, self._user_context, tracking_buffer=tracking_buffer
+        )
+
+    async def is_on(
+        self, key: str, *, tracking_buffer: Optional[TrackingBuffer] = None
+    ) -> bool:
+        return await self._client.is_on(
+            key, self._user_context, tracking_buffer=tracking_buffer
+        )
+
+    async def is_off(
+        self, key: str, *, tracking_buffer: Optional[TrackingBuffer] = None
+    ) -> bool:
+        return await self._client.is_off(
+            key, self._user_context, tracking_buffer=tracking_buffer
+        )
+
+    async def get_feature_value(
+        self, key: str, fallback: T, *, tracking_buffer: Optional[TrackingBuffer] = None
+    ) -> T:
+        return await self._client.get_feature_value(
+            key, fallback, self._user_context, tracking_buffer=tracking_buffer
+        )
+
+    async def run(
+        self,
+        experiment: Experiment[T],
+        *,
+        tracking_buffer: Optional[TrackingBuffer] = None,
+    ) -> Result[T]:
+        return await self._client.run(
+            experiment, self._user_context, tracking_buffer=tracking_buffer
+        )
+
+    async def log_event(
+        self,
+        event_name: str,
+        properties: Optional[Dict[str, Any]] = None,
+    ) -> None:
+        await self._client.log_event(event_name, properties, self._user_context)
+
+    async def preload_remote_eval(self) -> None:
+        """Warm the remote-eval cache for this user. No-op unless remote_eval
+        is enabled. Call it once per request to keep subsequent evaluations
+        free of network round-trips."""
+        await self._client.preload_remote_eval(self._user_context)
+
+    # --- Per-user state ---------------------------------------------------
+
+    def get_attributes(self) -> Dict[str, Any]:
+        return self._user_context.attributes
+
+    def set_attributes(self, attributes: Optional[Dict[str, Any]]) -> None:
+        """Replace this user's attributes wholesale."""
+        self._user_context.attributes = attributes or {}
+
+    def update_attributes(self, attributes: Optional[Dict[str, Any]]) -> None:
+        """Shallow-merge into this user's attributes: new keys are added,
+        existing keys overwritten, untouched keys preserved. `None` is a no-op.
+        Parity with the TS SDK's `updateAttributes`."""
+        if attributes is None:
+            return
+        self._user_context.attributes = {**self._user_context.attributes, **attributes}
+
+    def set_url(self, url: str) -> None:
+        self._user_context.url = url
+
+    def set_forced_variations(self, forced_variations: Optional[Dict[str, Any]]) -> None:
+        """Force experiment variations for this user, keyed by experiment key."""
+        self._user_context.forced_variations = forced_variations or {}
+
+    def set_forced_features(self, forced_features: Optional[Dict[str, Any]]) -> None:
+        """Set forced feature values for this user.
+
+        Note: these are only honored in remote-eval mode, where they ship to
+        the proxy in the eval payload. Local (CDN-mode) evaluation ignores
+        them — an existing SDK-wide limitation, not specific to this handle.
+        Use `set_forced_variations` to steer local evaluation."""
+        self._user_context.forced_features = forced_features or {}
+
+    def set_tracking_callback(
+        self, callback: Optional[AsyncTrackingCallback]
+    ) -> None:
+        """Override the client-level experiment tracking callback for this user.
+        Pass None to fall back to `Options.on_experiment_viewed`.
+
+        Same contract as `Options.on_experiment_viewed`: invoked by keyword, so
+        the parameters must be named experiment/result/user_context, and may be
+        async (the returned awaitable is scheduled fire-and-forget)."""
+        self._user_context.tracking_callback = callback
+
+    def set_feature_usage_callback(
+        self, callback: Optional[AsyncFeatureUsageCallback]
+    ) -> None:
+        """Override the client-level feature usage callback for this user.
+        Pass None to fall back to `Options.on_feature_usage`.
+
+        Same contract as that option: invoked positionally with
+        (key, result, user_context) and may be async."""
+        self._user_context.feature_usage_callback = callback
+
+
 class GrowthBookClient:
     def __init__(
         self,
@@ -762,8 +908,13 @@ class GrowthBookClient:
             self._spawn_tracked(fut, self._callback_tasks, f"Error in {what} callback")
 
     def _track(self, experiment: Experiment[Any], result: Result[Any], user_context: UserContext) -> None:
-        """Thread-safe tracking implementation"""
-        if not self.options.on_experiment_viewed:
+        """Thread-safe tracking implementation.
+
+        A per-user callback on the UserContext (set via
+        UserScopedGrowthBook.set_tracking_callback) takes precedence over the
+        client-level Options.on_experiment_viewed."""
+        callback = user_context.tracking_callback or self.options.on_experiment_viewed
+        if not callback:
             return
 
         # Create unique key for this tracking event
@@ -773,7 +924,7 @@ class GrowthBookClient:
             if not self._tracked.get(key):
                 try:
                     self._run_user_callback(
-                        self.options.on_experiment_viewed,
+                        callback,
                         (),
                         "tracking",
                         # An async tracking callback is deduped at schedule
@@ -859,6 +1010,20 @@ class GrowthBookClient:
                 await result
         except Exception as e:
             logger.exception("Error in event logger: %s", e)
+
+    def create_scoped_instance(
+        self, user_context: Optional[UserContext] = None
+    ) -> UserScopedGrowthBook:
+        """Create a per-user / per-request handle whose evaluation methods take
+        no context argument.
+
+        The given context is bound by reference, not copied: later changes to it
+        are visible to the handle, and the handle's setters write back to it.
+        Omit it to start from an empty context and populate via the setters.
+
+        Create one per request; see UserScopedGrowthBook for why sharing one
+        across users is unsafe."""
+        return UserScopedGrowthBook(self, user_context or UserContext())
 
     async def set_features(self, features: Dict[str, Any]) -> None:
         await self._feature_update_callback({"features": features})
@@ -1250,7 +1415,9 @@ class GrowthBookClient:
     ) -> None:
         await self.close()
 
-    def _context_callbacks(self, tracking_buffer: Optional[TrackingBuffer]) -> Dict[str, Any]:
+    def _context_callbacks(
+        self, user_context: UserContext, tracking_buffer: Optional[TrackingBuffer]
+    ) -> Dict[str, Any]:
         """Callback/buffer fields for a new EvaluationContext, shared by both
         construction branches so neither can drift and silently drop telemetry.
 
@@ -1263,8 +1430,28 @@ class GrowthBookClient:
             # Wired only when a consumer exists (contexts are per-eval, so a
             # callback installed later — e.g. by a plugin — is still picked
             # up), letting core skip dead work like rule.tracks hydration.
-            "tracking_cb": self._track if self.options.on_experiment_viewed else None,
-            "feature_usage_cb": self._feature_usage if self.options.on_feature_usage else None,
+            # The per-user callback counts as a consumer: without it here, a
+            # client with no Options.on_experiment_viewed would never call
+            # _track and the scoped callback would silently never fire.
+            # getattr, not attribute access: a caller may pass a duck-typed
+            # context (see test_async_tracking_snapshot_failure...), and these
+            # gates must not be the thing that breaks evaluation.
+            "tracking_cb": (
+                self._track
+                if (
+                    self.options.on_experiment_viewed
+                    or getattr(user_context, "tracking_callback", None)
+                )
+                else None
+            ),
+            "feature_usage_cb": (
+                self._feature_usage
+                if (
+                    self.options.on_feature_usage
+                    or getattr(user_context, "feature_usage_callback", None)
+                )
+                else None
+            ),
             "tracking_buffer": tracking_buffer,
         }
 
@@ -1314,7 +1501,7 @@ class GrowthBookClient:
                 user=user_context,
                 global_ctx=global_ctx,
                 stack=StackContext(evaluated_features=set()),
-                **self._context_callbacks(tracking_buffer),
+                **self._context_callbacks(user_context, tracking_buffer),
             )
 
         # Get sticky bucket assignments if needed. Values are formatted the way
@@ -1343,7 +1530,7 @@ class GrowthBookClient:
                 self._schedule_sticky_bucket_save
                 if self.options.sticky_bucket_service else None
             ),
-            **self._context_callbacks(tracking_buffer),
+            **self._context_callbacks(user_context, tracking_buffer),
         )
 
     async def eval_feature(
@@ -1366,11 +1553,19 @@ class GrowthBookClient:
         return _eval_feature_and_report(key, context)
 
     def _feature_usage(self, key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
-        if not self.options.on_feature_usage:
+        """A per-user callback on the UserContext (set via
+        UserScopedGrowthBook.set_feature_usage_callback) takes precedence over
+        the client-level Options.on_feature_usage — same contract as
+        _track."""
+        callback = (
+            getattr(user_context, "feature_usage_callback", None)
+            or self.options.on_feature_usage
+        )
+        if not callback:
             return
         try:
             self._run_user_callback(
-                self.options.on_feature_usage,
+                callback,
                 # Fire-time snapshot: core passes evalContext.user, which may
                 # be the caller's own context (plain CDN evals skip the
                 # boundary copy), and this callback can run deferred on the
