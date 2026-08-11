@@ -1016,8 +1016,9 @@ def run_experiment(experiment: Experiment,
         )
         doc = data.get("doc", None)
         if doc and data.get('changed', False):
-            if not evalContext.user.sticky_bucket_assignment_docs:
-                evalContext.user.sticky_bucket_assignment_docs = {}
+            # Mutate in place, never replace: the dict may be shared with the
+            # client's sticky bucket cache, and subsequent evals must see this
+            # assignment (read-your-writes while persistence is async).
             evalContext.user.sticky_bucket_assignment_docs[data.get('key')] = doc
             if evalContext.save_sticky_bucket_doc:
                 # Client-provided persistence hook (the async client schedules

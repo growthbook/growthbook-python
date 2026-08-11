@@ -994,6 +994,28 @@ async def test_sticky_bucket_save_failure_is_logged_not_raised(caplog):
     assert any("Sticky bucket save failed" in r.message for r in caplog.records)
 
 
+@pytest.mark.asyncio
+async def test_sticky_bucket_unchanged_assignment_not_resaved():
+    """Re-evaluating with an unchanged assignment must not schedule another
+    save (core's changed=False gate). Regression test: core used to replace
+    an EMPTY shared assignment-docs dict instead of mutating it in place,
+    severing the client's cache reference so every re-eval looked 'changed'
+    and re-saved."""
+    service = AsyncInMemoryStickyBucketService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_WRITE_FEATURES)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            await client.eval_feature("exp-feature", UserContext(attributes={"id": "user-1"}))
+            await client.flush_sticky_bucket_saves()
+            assert service.save_calls == 1
+
+            await client.eval_feature("exp-feature", UserContext(attributes={"id": "user-1"}))
+            await client.flush_sticky_bucket_saves()
+            assert service.save_calls == 1  # unchanged -> no new save
+
+
 async def getTrackingMock(client: GrowthBookClient):
     """Helper function to mock tracking for tests"""
     calls = []
