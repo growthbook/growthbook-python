@@ -17,8 +17,8 @@ import pytest
 import asyncio
 import os
 import json
-import time
-from typing import Dict, Optional
+import threading
+from typing import Any, Dict, Optional
 
 from growthbook.common_types import Experiment, Options
 from growthbook.growthbook_client import (
@@ -30,27 +30,34 @@ from growthbook.growthbook_client import (
 
 
 class AsyncInMemoryStickyBucketService(AbstractAsyncStickyBucketService):
-    """Async mirror of InMemoryStickyBucketService, instrumented for tests."""
+    """Async mirror of InMemoryStickyBucketService, instrumented for tests.
 
-    def __init__(self, latency: float = 0.0) -> None:
+    Optional asyncio.Event gates make concurrency tests deterministic:
+    a gated call parks until the test sets the event — no wall-clock sleeps.
+    """
+
+    def __init__(self,
+                 fetch_gate: Optional[asyncio.Event] = None,
+                 save_gate: Optional[asyncio.Event] = None) -> None:
         self.docs: Dict[str, Dict] = {}
-        self.latency = latency
+        self.fetch_gate = fetch_gate
+        self.save_gate = save_gate
         self.get_all_calls = 0
         self.save_calls = 0
 
     async def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
-        if self.latency:
-            await asyncio.sleep(self.latency)
         return self.docs.get(self.get_key(attributeName, attributeValue), None)
 
     async def save_assignments(self, doc: Dict) -> None:
         self.save_calls += 1
-        if self.latency:
-            await asyncio.sleep(self.latency)
+        if self.save_gate:
+            await self.save_gate.wait()
         self.docs[self.get_key(doc["attributeName"], doc["attributeValue"])] = doc
 
     async def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
         self.get_all_calls += 1
+        if self.fetch_gate:
+            await self.fetch_gate.wait()
         return await super().get_all_assignments(attributes)
 
     def destroy(self) -> None:
@@ -58,18 +65,36 @@ class AsyncInMemoryStickyBucketService(AbstractAsyncStickyBucketService):
 
 
 class CountingStickyBucketService(InMemoryStickyBucketService):
-    """Sync service instrumented with call counts and optional blocking latency."""
+    """Sync service instrumented with call counts and optional threading.Event
+    gates. A gated call BLOCKS its thread until the test sets the event, which
+    lets tests prove the call is not running on the event loop: if it were,
+    the loop-side code that sets the event could never run and the gate would
+    time out."""
 
-    def __init__(self, latency: float = 0.0) -> None:
+    GATE_TIMEOUT = 5  # generous upper bound; only reached on real deadlock
+
+    def __init__(self,
+                 fetch_gate: Optional[threading.Event] = None,
+                 save_gate: Optional[threading.Event] = None) -> None:
         super().__init__()
-        self.latency = latency
+        self.fetch_gate = fetch_gate
+        self.save_gate = save_gate
+        self.fetch_started = threading.Event()
         self.get_all_calls = 0
 
     def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
         self.get_all_calls += 1
-        if self.latency:
-            time.sleep(self.latency)
+        self.fetch_started.set()
+        if self.fetch_gate:
+            assert self.fetch_gate.wait(timeout=self.GATE_TIMEOUT), \
+                "fetch gate never released — event loop was blocked"
         return super().get_all_assignments(attributes)
+
+    def save_assignments(self, doc: Dict) -> None:
+        if self.save_gate:
+            assert self.save_gate.wait(timeout=self.GATE_TIMEOUT), \
+                "save gate never released — event loop was blocked"
+        super().save_assignments(doc)
 
 @pytest.fixture
 def mock_features_response():
@@ -817,49 +842,55 @@ def _sticky_client_ctx(service, features=STICKY_READ_FEATURES):
 
 @pytest.mark.asyncio
 async def test_sticky_bucket_sync_service_does_not_block_loop():
-    """A slow SYNC service must not block the event loop during eval (it is
-    offloaded to the executor). A heartbeat task must keep ticking while
-    get_all_assignments sleeps."""
-    service = CountingStickyBucketService(latency=0.3)
+    """Deterministic proof the SYNC-service fetch runs OFF the event loop:
+    the fetch blocks its thread on a gate that only a coroutine running on
+    the loop can release. If the fetch ran on the loop, the releaser
+    coroutine could never be scheduled and the gate would time out."""
+    fetch_gate = threading.Event()
+    service = CountingStickyBucketService(fetch_gate=fetch_gate)
     EnhancedFeatureRepository._instances = {}
     p1, p2, p3, opts = _sticky_client_ctx(service)
 
-    ticks = 0
-
-    async def heartbeat():
-        nonlocal ticks
-        while True:
-            await asyncio.sleep(0.02)
-            ticks += 1
+    async def releaser():
+        # Wait (on the loop) until the fetch has actually started in the
+        # executor, then release it — impossible if the loop is blocked.
+        while not service.fetch_started.is_set():
+            await asyncio.sleep(0.001)
+        fetch_gate.set()
 
     with p1, p2, p3:
         async with GrowthBookClient(opts) as client:
-            hb = asyncio.ensure_future(heartbeat())
-            try:
-                await client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
-            finally:
-                hb.cancel()
+            releaser_task = asyncio.ensure_future(releaser())
+            await client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+            await releaser_task
 
     assert service.get_all_calls == 1
-    # 0.3s blocking fetch / 0.02s heartbeat -> ~15 ticks if the loop stayed
-    # free; 0 or 1 if the fetch ran on the loop. Be lenient for slow CI.
-    assert ticks >= 3
 
 
 @pytest.mark.asyncio
 async def test_sticky_bucket_concurrent_refresh_coalesced():
     """Concurrent evals with identical attributes must trigger exactly one
-    get_all_assignments fetch (lock + cache check coalesce the rest)."""
-    service = AsyncInMemoryStickyBucketService(latency=0.05)
+    get_all_assignments fetch. The first fetch is gated so all ten evals are
+    provably in flight (queued on the refresh lock) before it completes."""
+    fetch_gate = asyncio.Event()
+    service = AsyncInMemoryStickyBucketService(fetch_gate=fetch_gate)
     EnhancedFeatureRepository._instances = {}
     p1, p2, p3, opts = _sticky_client_ctx(service)
 
     with p1, p2, p3:
         async with GrowthBookClient(opts) as client:
-            await asyncio.gather(*[
-                client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+            tasks = [
+                asyncio.ensure_future(
+                    client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+                )
                 for _ in range(10)
-            ])
+            ]
+            # Let every task advance to its await point (first holds the lock
+            # awaiting the gate, the rest park on the lock).
+            for _ in range(5):
+                await asyncio.sleep(0)
+            fetch_gate.set()
+            await asyncio.gather(*tasks)
 
     assert service.get_all_calls == 1
 
@@ -904,16 +935,16 @@ STICKY_WRITE_FEATURES = {
 @pytest.mark.parametrize("service_flavor", ["sync", "async"])
 async def test_sticky_bucket_write_fire_and_forget(service_flavor):
     """The in-memory assignment doc must be visible immediately after eval
-    (read-your-writes), while service persistence completes in the background
-    and is observable after flush_sticky_bucket_saves()."""
+    (read-your-writes) while the service write is still parked behind a gate
+    — proving eval never waits on persistence and (for the sync flavor) that
+    the blocking write runs off the event loop. Releasing the gate and
+    flushing makes the write observable."""
     if service_flavor == "sync":
-        class SlowSaveSyncService(CountingStickyBucketService):
-            def save_assignments(self, doc):
-                time.sleep(0.1)
-                super().save_assignments(doc)
-        service = SlowSaveSyncService()
+        save_gate: Any = threading.Event()
+        service: Any = CountingStickyBucketService(save_gate=save_gate)
     else:
-        service = AsyncInMemoryStickyBucketService(latency=0.1)
+        save_gate = asyncio.Event()
+        service = AsyncInMemoryStickyBucketService(save_gate=save_gate)
     EnhancedFeatureRepository._instances = {}
     p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_WRITE_FEATURES)
 
@@ -926,47 +957,12 @@ async def test_sticky_bucket_write_fire_and_forget(service_flavor):
             # Read-your-writes: in-memory doc updated synchronously during eval
             assert "id||user-1" in user.sticky_bucket_assignment_docs
 
-            # Persistence is in flight (0.1s latency), not yet in the service
+            # The write is still gated: eval returned without waiting for it
             assert "id||user-1" not in service.docs
 
+            save_gate.set()
             await client.flush_sticky_bucket_saves()
             assert service.docs["id||user-1"]["assignments"] == {"exp__0": "variation1"}
-
-
-@pytest.mark.asyncio
-async def test_sticky_bucket_slow_sync_save_does_not_block_loop():
-    """A slow SYNC save_assignments must not block the event loop: eval
-    returns immediately and a heartbeat keeps ticking while the write
-    completes in the executor."""
-
-    class SlowSaveService(CountingStickyBucketService):
-        def save_assignments(self, doc):
-            time.sleep(0.3)
-            super().save_assignments(doc)
-
-    service = SlowSaveService()
-    EnhancedFeatureRepository._instances = {}
-    p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_WRITE_FEATURES)
-
-    ticks = 0
-
-    async def heartbeat():
-        nonlocal ticks
-        while True:
-            await asyncio.sleep(0.02)
-            ticks += 1
-
-    with p1, p2, p3:
-        async with GrowthBookClient(opts) as client:
-            await client.eval_feature("exp-feature", UserContext(attributes={"id": "user-1"}))
-            hb = asyncio.ensure_future(heartbeat())
-            try:
-                await client.flush_sticky_bucket_saves()
-            finally:
-                hb.cancel()
-
-    assert "id||user-1" in service.docs
-    assert ticks >= 3  # loop stayed responsive during the 0.3s blocking write
 
 
 @pytest.mark.asyncio
