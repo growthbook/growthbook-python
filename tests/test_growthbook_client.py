@@ -913,6 +913,34 @@ async def test_sticky_bucket_cache_invalidated_on_attribute_change():
             assert service.get_all_calls == 2  # attribute change -> refetch
 
 
+@pytest.mark.asyncio
+async def test_feature_update_swaps_snapshot_without_disrupting_eval():
+    """A feature update mid-evaluation must not affect the in-flight eval
+    (it finishes against the snapshot it captured) and must be visible to
+    the next eval — lock-free consistency via immutable snapshot swap."""
+    fetch_gate = asyncio.Event()
+    service = AsyncInMemoryStickyBucketService(fetch_gate=fetch_gate)
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            inflight = asyncio.ensure_future(
+                client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+            )
+            for _ in range(5):
+                await asyncio.sleep(0)
+            # Swap features while the first eval is parked on the sticky fetch
+            await client.set_features({"read-feature": {"defaultValue": "v2"}})
+            fetch_gate.set()
+
+            result = await inflight
+            assert result.value == "control"  # finished against its captured snapshot
+
+            result2 = await client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+            assert result2.value == "v2"  # new snapshot visible to the next eval
+
+
 # Experiment forcing variation1 (weights [0, 1]) so a sticky bucket
 # assignment doc is written deterministically on first evaluation.
 STICKY_WRITE_FEATURES = {

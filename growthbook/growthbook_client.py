@@ -1047,17 +1047,17 @@ class GrowthBookClient:
             logger.warning("Warning: Received empty features data")
             return
 
-        async with self._context_lock:
+        async with self._context_lock:  # serializes concurrent updaters only
             features = features_from_dict(features_data.get("features"))
             saved_groups = features_data.get("savedGroups", {})
 
-            if self._global_context is None:
-                self._global_context = GlobalContext(
-                    options=self.options, features=features, saved_groups=saved_groups
-                )
-            else:
-                self._global_context.features = features
-                self._global_context.saved_groups = saved_groups
+            # Build a NEW immutable snapshot and swap the reference atomically
+            # (single assignment). In-flight evaluations captured the previous
+            # snapshot and finish against it; new evaluations see this one.
+            # This is what lets evaluations run without any lock.
+            self._global_context = GlobalContext(
+                options=self.options, features=features, saved_groups=saved_groups
+            )
 
     async def __aenter__(self):
         await self.initialize()
@@ -1068,7 +1068,10 @@ class GrowthBookClient:
 
     async def create_evaluation_context(self, user_context: UserContext) -> EvaluationContext:
         """Create evaluation context for feature evaluation"""
-        if self._global_context is None:
+        # Capture the snapshot once; feature updates swap the reference, so
+        # this evaluation runs against a consistent view without locking.
+        global_context = self._global_context
+        if global_context is None:
             raise RuntimeError("GrowthBook client not properly initialized")
 
         if self.options.remote_eval and self._features_repository:
@@ -1105,7 +1108,7 @@ class GrowthBookClient:
 
         return EvaluationContext(
             user=user_context,
-            global_ctx=self._global_context,
+            global_ctx=global_context,
             stack=StackContext(evaluated_features=set()),
             save_sticky_bucket_doc=(
                 self._schedule_sticky_bucket_save
@@ -1113,41 +1116,23 @@ class GrowthBookClient:
             ),
         )
 
-    @asynccontextmanager
-    async def _eval_lock(self):
-        """Lock for the duration of an evaluation.
-
-        In CDN mode this guards against `_global_context` mutations (the
-        shared features dict) during `create_evaluation_context` +
-        `core_eval_feature`.
-
-        In remote-eval mode the EvaluationContext is built fresh per-call
-        from the per-user POST response — no shared state to guard, and
-        holding the lock across the network round-trip would serialize all
-        evaluations through one POST even for unrelated users (a real
-        throughput cliff on busy services)."""
-        if self.options.remote_eval:
-            yield
-        else:
-            async with self._context_lock:
-                yield
-
     async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult:
-        """Evaluate a feature with proper async context management"""
-        async with self._eval_lock():
-            context = await self.create_evaluation_context(user_context)
-            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
-            # Call feature usage callback if provided
-            if self.options.on_feature_usage:
-                try:
-                    self._run_user_callback(
-                        self.options.on_feature_usage,
-                        (key, result, user_context),
-                        "feature usage",
-                    )
-                except Exception:
-                    logger.exception("Error in feature usage callback")
-            return result
+        """Evaluate a feature. Lock-free: the evaluation context captures an
+        immutable feature snapshot, so concurrent evaluations never contend
+        with each other or with feature updates."""
+        context = await self.create_evaluation_context(user_context)
+        result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
+        # Call feature usage callback if provided
+        if self.options.on_feature_usage:
+            try:
+                self._run_user_callback(
+                    self.options.on_feature_usage,
+                    (key, result, user_context),
+                    "feature usage",
+                )
+            except Exception:
+                logger.exception("Error in feature usage callback")
+        return result
 
     async def is_on(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is enabled with proper async context management"""
@@ -1164,17 +1149,16 @@ class GrowthBookClient:
         return result.value if result.value is not None else fallback
 
     async def run(self, experiment: Experiment, user_context: UserContext) -> Result:
-        """Run experiment with tracking"""
-        async with self._eval_lock():
-            context = await self.create_evaluation_context(user_context)
-            result = run_experiment(
-                experiment=experiment, 
-                evalContext=context,
-                tracking_cb=self._track
-            )
-            # Fire subscriptions synchronously
-            self._fire_subscriptions(experiment, result)
-            return result
+        """Run experiment with tracking. Lock-free, same as eval_feature."""
+        context = await self.create_evaluation_context(user_context)
+        result = run_experiment(
+            experiment=experiment,
+            evalContext=context,
+            tracking_cb=self._track
+        )
+        # Fire subscriptions synchronously
+        self._fire_subscriptions(experiment, result)
+        return result
         
     async def close(self) -> None:
         """Clean shutdown with proper cleanup"""
