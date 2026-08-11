@@ -999,41 +999,17 @@ class GrowthBookClient:
 
     async def is_on(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is enabled with proper async context management"""
-        async with self._eval_lock():
-            context = await self.create_evaluation_context(user_context)
-            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
-            # Call feature usage callback if provided
-            if self.options.on_feature_usage:
-                try:
-                    self.options.on_feature_usage(key, result, user_context)
-                except Exception:
-                    logger.exception("Error in feature usage callback")
-            return result.on
+        result = await self.eval_feature(key, user_context)
+        return result.on
 
     async def is_off(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is set to off with proper async context management"""
-        async with self._eval_lock():
-            context = await self.create_evaluation_context(user_context)
-            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
-            # Call feature usage callback if provided
-            if self.options.on_feature_usage:
-                try:
-                    self.options.on_feature_usage(key, result, user_context)
-                except Exception:
-                    logger.exception("Error in feature usage callback")
-            return result.off
+        result = await self.eval_feature(key, user_context)
+        return result.off
 
     async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext) -> Any:
-        async with self._eval_lock():
-            context = await self.create_evaluation_context(user_context)
-            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
-            # Call feature usage callback if provided
-            if self.options.on_feature_usage:
-                try:
-                    self.options.on_feature_usage(key, result, user_context)
-                except Exception:
-                    logger.exception("Error in feature usage callback")
-            return result.value if result.value is not None else fallback
+        result = await self.eval_feature(key, user_context)
+        return result.value if result.value is not None else fallback
 
     async def run(self, experiment: Experiment, user_context: UserContext) -> Result:
         """Run experiment with tracking"""
