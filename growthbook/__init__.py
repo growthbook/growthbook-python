@@ -38,6 +38,7 @@ from .common_types import (
 
 from .growthbook_client import (
     GrowthBookClient,
+    UserScopedGrowthBook,
     EnhancedFeatureRepository,
     FeatureCache,
     BackoffStrategy
@@ -59,6 +60,7 @@ __all__ = [
     # Core clients
     "GrowthBook",
     "GrowthBookClient",
+    "UserScopedGrowthBook",
     # Configuration / context
     "Options",
     "UserContext",
