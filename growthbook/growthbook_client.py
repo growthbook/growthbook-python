@@ -518,8 +518,14 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         """Clean shutdown of refresh tasks"""
         self._stop_event.set()
         # Ensure any SSE background thread is stopped as well.
+        # stopAutoRefresh blocks joining a thread (up to `timeout` seconds),
+        # so run it in the executor to keep the event loop free — same as the
+        # SSE lifecycle teardown above.
         try:
-            self.stopAutoRefresh(timeout=10)
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self.stopAutoRefresh(timeout=10)
+            )
         except Exception:
             # Best-effort cleanup; task cancellation below will proceed.
             logger.exception("Error stopping SSE auto-refresh")
