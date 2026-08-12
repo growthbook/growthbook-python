@@ -88,22 +88,43 @@ class TestPublicAPITyping:
         )
 
 
+SINGLE_FEATURE_PAYLOAD = {"features": {"only_one": {"defaultValue": True}}}
+
+
+def _multi_feature_payload():
+    with open(
+        os.path.join(REPO_ROOT, "tests", "codegen", "sample_features.json"),
+        encoding="utf-8",
+    ) as f:
+        return json.load(f)
+
+
 class TestGeneratedClientTyping:
     """The generated typed client's strictness, verified under mypy."""
 
     @pytest.fixture()
     def generated_dir(self, tmp_path):
-        with open(
-            os.path.join(REPO_ROOT, "tests", "codegen", "sample_features.json"),
-            encoding="utf-8",
-        ) as f:
-            payload = json.load(f)
-        (tmp_path / "growthbook_features.py").write_text(generate(payload), encoding="utf-8")
+        (tmp_path / "growthbook_features.py").write_text(
+            generate(_multi_feature_payload()), encoding="utf-8"
+        )
         return tmp_path
 
-    def test_generated_module_checks_clean(self, generated_dir):
-        errors = mypy_error_lines(str(generated_dir / "growthbook_features.py"))
-        assert errors == {}
+    @pytest.mark.parametrize("checker", CHECKERS)
+    @pytest.mark.parametrize(
+        "payload_name", ["multi_feature", "single_feature"]
+    )
+    def test_generated_module_checks_clean(self, tmp_path, checker, payload_name):
+        # A one-feature payload is the common small-project case and uses the
+        # plain-method (non-overload) code path — both must check clean.
+        payload = (
+            SINGLE_FEATURE_PAYLOAD
+            if payload_name == "single_feature"
+            else _multi_feature_payload()
+        )
+        path = tmp_path / "growthbook_features.py"
+        path.write_text(generate(payload), encoding="utf-8")
+        errors = run_checker(checker, str(path))
+        assert errors == {}, f"{checker}/{payload_name}: {errors}"
 
     def test_typed_client_strictness(self, generated_dir):
         snippet = generated_dir / "typed_usage.py"
@@ -116,6 +137,24 @@ class TestGeneratedClientTyping:
             "tgb.is_on('buton_color')  " + EXPECT_TAG + "\n"
             "tgb.get_feature_value('max_items', '12')  " + EXPECT_TAG + "\n"
             "bad: str = tgb.get_feature_value('donut_price', 1.0)  " + EXPECT_TAG + "\n",
+            encoding="utf-8",
+        )
+        errors = mypy_error_lines(str(snippet))
+        assert errors.get("typed_usage.py", set()) == tagged_lines(str(snippet))
+
+    def test_single_feature_client_strictness(self, tmp_path):
+        """The non-overload code path must enforce the same guarantees."""
+        (tmp_path / "growthbook_features.py").write_text(
+            generate(SINGLE_FEATURE_PAYLOAD), encoding="utf-8"
+        )
+        snippet = tmp_path / "typed_usage.py"
+        snippet.write_text(
+            "from growthbook_features import TypedGrowthBook\n"
+            "\n"
+            "tgb = TypedGrowthBook()\n"
+            "ok: bool = tgb.get_feature_value('only_one', True)\n"
+            "tgb.is_on('typo_key')  " + EXPECT_TAG + "\n"
+            "tgb.get_feature_value('only_one', 'wrong')  " + EXPECT_TAG + "\n",
             encoding="utf-8",
         )
         errors = mypy_error_lines(str(snippet))

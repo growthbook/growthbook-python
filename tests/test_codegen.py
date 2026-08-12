@@ -63,6 +63,20 @@ class TestGenerate:
         with pytest.raises(ValueError):
             generate({"features": {}})
 
+    def test_single_feature_uses_plain_methods_not_overloads(self):
+        """PEP 484 requires >=2 @overload declarations; a one-feature payload
+        must emit plain typed methods instead (regression: the overload form
+        made the generated module fail both checkers)."""
+        src = generate({"features": {"only_one": {"defaultValue": True}}})
+        assert "@overload" not in src
+        assert "overload" not in src.split("\n")[5]  # not imported either
+        assert "def get_feature_value(self, key: Literal['only_one'], fallback: bool) -> bool:" in src
+
+    def test_unused_typing_names_not_imported(self):
+        src = generate({"features": {"a": {"defaultValue": 1}, "b": {"defaultValue": 2}}})
+        import_line = next(line for line in src.split("\n") if line.startswith("from typing"))
+        assert "Dict" not in import_line and "List" not in import_line
+
     def test_generated_module_is_runtime_noop(self, tmp_path):
         """The generated subclasses must behave exactly like the base clients."""
         path = tmp_path / "growthbook_features.py"

@@ -4,6 +4,7 @@
     "dark_mode": {"defaultValue": false},
     "donut_price": {"defaultValue": 2.5},
     "max_items": {"defaultValue": 10},
-    "meal_overrides": {"defaultValue": {"gluten_free": true}}
+    "meal_overrides": {"defaultValue": {"gluten_free": true}},
+    "recent_tabs": {"defaultValue": ["home", "search"]}
   }
 }

@@ -8,7 +8,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Literal, overload
 from growthbook import FeatureResult, GrowthBook, GrowthBookClient, UserContext
 
 
-FeatureKey = Literal['banner_text', 'dark_mode', 'donut_price', 'max_items', 'meal_overrides']
+FeatureKey = Literal['banner_text', 'dark_mode', 'donut_price', 'max_items', 'meal_overrides', 'recent_tabs']
 
 
 class TypedGrowthBook(GrowthBook):
@@ -25,6 +25,8 @@ class TypedGrowthBook(GrowthBook):
         def get_feature_value(self, key: Literal['max_items'], fallback: int) -> int: ...
         @overload
         def get_feature_value(self, key: Literal['meal_overrides'], fallback: Dict[str, Any]) -> Dict[str, Any]: ...
+        @overload
+        def get_feature_value(self, key: Literal['recent_tabs'], fallback: List[Any]) -> List[Any]: ...
         def get_feature_value(self, key: Any, fallback: Any) -> Any:
             raise NotImplementedError
 
@@ -52,6 +54,8 @@ class TypedGrowthBookClient(GrowthBookClient):
         async def get_feature_value(self, key: Literal['max_items'], fallback: int, user_context: UserContext) -> int: ...
         @overload
         async def get_feature_value(self, key: Literal['meal_overrides'], fallback: Dict[str, Any], user_context: UserContext) -> Dict[str, Any]: ...
+        @overload
+        async def get_feature_value(self, key: Literal['recent_tabs'], fallback: List[Any], user_context: UserContext) -> List[Any]: ...
         async def get_feature_value(self, key: Any, fallback: Any, user_context: UserContext) -> Any:
             raise NotImplementedError
 
