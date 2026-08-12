@@ -2,6 +2,7 @@
 
 import json
 import os
+import warnings
 from growthbook import (
     FeatureRule,
     GrowthBook,
@@ -251,6 +252,23 @@ def test_tracking():
     assert calls[2][0] == exp2 and calls[2][1] == res5
 
     gb.destroy()
+
+
+def test_tracking_callback_arg_deprecated():
+    def track(experiment, result, user_context):
+        pass
+
+    with pytest.warns(DeprecationWarning, match="trackingCallback is deprecated"):
+        gb = GrowthBook(trackingCallback=track)
+    assert gb._trackingCallback is track
+    gb.destroy()
+
+    # The replacement argument must not warn.
+    with warnings.catch_warnings():
+        warnings.simplefilter("error", DeprecationWarning)
+        gb2 = GrowthBook(on_experiment_viewed=track)
+    assert gb2._trackingCallback is track
+    gb2.destroy()
 
 
 def test_feature_usage_callback():

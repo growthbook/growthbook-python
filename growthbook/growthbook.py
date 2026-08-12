@@ -919,6 +919,11 @@ class GrowthBook(object):
         self._sticky_bucket_attributes: Optional[Dict[str, Any]] = None
 
         self._qaMode = qa_mode or qaMode
+        if trackingCallback is not None:
+            warnings.warn(
+                "trackingCallback is deprecated, use on_experiment_viewed instead",
+                DeprecationWarning,
+            )
         self._trackingCallback: Optional[TrackingCallback] = on_experiment_viewed or trackingCallback
         self._featureUsageCallback: Optional[FeatureUsageCallback] = on_feature_usage
         self._skip_all_experiments = skip_all_experiments
