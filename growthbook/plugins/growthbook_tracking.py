@@ -183,7 +183,9 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
             def legacy_wrapper(experiment: Any, result: Any, user_context: Any = None) -> None:
                 tracking_wrapper(experiment, result, user_context)
                 if original:
-                    self._safe_execute(original, experiment, result, user_context)
+                    # The user's callback follows the TrackingCallback contract:
+                    # invoked with keyword arguments, same as both clients do.
+                    self._safe_execute(original, experiment=experiment, result=result, user_context=user_context)
 
             gb_instance._trackingCallback = legacy_wrapper
 
@@ -195,7 +197,8 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
             def async_wrapper(experiment: Any, result: Any, user_context: Any) -> None:
                 tracking_wrapper(experiment, result, user_context)
                 if original:
-                    self._safe_execute(original, experiment, result, user_context)
+                    # Same keyword contract as legacy_wrapper above.
+                    self._safe_execute(original, experiment=experiment, result=result, user_context=user_context)
 
             gb_instance.options.on_experiment_viewed = async_wrapper
 

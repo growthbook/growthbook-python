@@ -29,13 +29,22 @@ str_res = gb.run(Experiment(key="t2", variations=["a", "b"]))
 upper: str = str_res.value.upper()
 
 
-# Tracking callbacks use these exact parameter names (sync client calls by keyword).
+# Tracking callbacks use these exact parameter names (both clients call by keyword).
 def on_experiment_viewed(
     experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext]
 ) -> None: ...
 
 
 gb2 = GrowthBook(on_experiment_viewed=on_experiment_viewed)
+
+
+# Keyword-only implementations are valid too — the clients only ever call by keyword.
+def kw_only_cb(
+    *, experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext]
+) -> None: ...
+
+
+gb3 = GrowthBook(on_experiment_viewed=kw_only_cb)
 
 # Payload dict splats with unknown server keys stay valid.
 payload: Dict[str, Any] = {"key": "t", "variations": [1, 2], "unknownServerField": True}

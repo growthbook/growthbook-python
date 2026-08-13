@@ -32,6 +32,15 @@ def bad_arity_cb(experiment: Experiment[Any], result: Result[Any]) -> None: ...
 
 GrowthBook(on_experiment_viewed=bad_arity_cb)  # expect-error
 
+
+# Positional-only parameters cannot accept the keyword invocation.
+def bad_pos_only_cb(
+    experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext], /
+) -> None: ...
+
+
+GrowthBook(on_experiment_viewed=bad_pos_only_cb)  # expect-error
+
 # Typo'd keyword arguments are no longer silently swallowed by checkers.
 Experiment(key="t", variations=[1, 2], weigths=[0.5, 0.5])  # expect-error
 

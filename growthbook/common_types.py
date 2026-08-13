@@ -471,13 +471,15 @@ class UserContext:
 class TrackingCallback(Protocol):
     """Callback invoked when a user is assigned to an experiment variation.
 
-    The parameter names are part of the contract: the sync GrowthBook client
-    invokes this callback with keyword arguments (experiment=..., result=...,
-    user_context=...), so implementations must use these exact names.
+    The parameter names are part of the contract: both the sync and async
+    clients invoke this callback with keyword arguments (experiment=...,
+    result=..., user_context=...), so implementations must use these exact
+    names. Positional-only parameters cannot satisfy this contract.
     """
 
     def __call__(
         self,
+        *,
         experiment: Experiment[Any],
         result: Result[Any],
         user_context: Optional[UserContext],
@@ -497,11 +499,23 @@ EventLogger = Callable[
 # the async client schedules returned awaitables on the running loop, so
 # implementations may be sync (return None) or async (return a coroutine).
 # The sync GrowthBook client accepts the sync-only contracts above.
-AsyncTrackingCallback = Callable[
-    [Experiment, Result, Optional[UserContext]], Union[None, Awaitable[None]]
-]
+class AsyncTrackingCallback(Protocol):
+    """Tracking callback for the async client. Same keyword-invocation
+    contract as TrackingCallback (parameter names are part of the contract);
+    additionally may be async — a returned awaitable is scheduled on the
+    running loop, fire-and-forget."""
+
+    def __call__(
+        self,
+        *,
+        experiment: Experiment[Any],
+        result: Result[Any],
+        user_context: Optional[UserContext],
+    ) -> Union[None, Awaitable[None]]: ...
+
+
 AsyncFeatureUsageCallback = Callable[
-    [str, "FeatureResult", UserContext], Union[None, Awaitable[None]]
+    [str, "FeatureResult[Any]", UserContext], Union[None, Awaitable[None]]
 ]
 
 

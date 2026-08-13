@@ -89,7 +89,9 @@ attributes = {
   "customUserAttribute": "foo"
 }
 
-def on_experiment_viewed(experiment, result):
+# The parameter names matter: the SDK invokes this callback
+# with keyword arguments (experiment=, result=, user_context=)
+def on_experiment_viewed(experiment, result, user_context):
   # Use whatever event tracking system you want
   analytics.track(attributes["id"], "Experiment Viewed", {
     'experimentId': experiment.key,
@@ -373,7 +375,7 @@ The GrowthBook constructor has the following parameters:
 - **attributes** (`dict`) - Dictionary of user attributes that are used for targeting and to assign variations
 - **url** (`str`) - The URL of the current request (if applicable)
 - **qa_mode** (`boolean`) - If true, random assignment is disabled and only explicitly forced variations are used.
-- **on_experiment_viewed** (`callable`) - A function that takes `experiment` and `result` as arguments.
+- **on_experiment_viewed** (`callable`) - A function invoked with keyword arguments `experiment`, `result`, and `user_context` when a user is assigned to an experiment. Implementations must use these exact parameter names.
 - **api_host** (`str`) - The GrowthBook API host to fetch feature flags from. Defaults to `https://cdn.growthbook.io`
 - **client_key** (`str`) - The client key that will be passed to the API Host to fetch feature flags
 - **decryption_key** (`str`) - If the GrowthBook API endpoint has encryption enabled, specify the decryption key here
@@ -422,9 +424,14 @@ Any time an experiment is run to determine the value of a feature, you want to t
 You can use the `on_experiment_viewed` option to do this:
 
 ```python
-from growthbook import GrowthBook, Experiment, Result
+from typing import Any, Optional
+from growthbook import GrowthBook, Experiment, Result, UserContext
 
-def on_experiment_viewed(experiment: Experiment, result: Result):
+# The parameter names matter: the SDK invokes this callback
+# with keyword arguments (experiment=, result=, user_context=)
+def on_experiment_viewed(
+    experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext]
+) -> None:
   # Use whatever event tracking system you want
   analytics.track(attributes["id"], "Experiment Viewed", {
     'experimentId': experiment.key,

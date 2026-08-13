@@ -704,7 +704,8 @@ class GrowthBookClient:
         fut.add_done_callback(_done)
 
     def _run_user_callback(self, callback: Callable, args: tuple, what: str,
-                           on_error: Optional[Callable[[], None]] = None) -> None:
+                           on_error: Optional[Callable[[], None]] = None,
+                           kwargs: Optional[Dict[str, Any]] = None) -> None:
         """Invoke a user callback that may be sync or async.
 
         Called from synchronous eval paths, so a returned awaitable cannot be
@@ -713,7 +714,7 @@ class GrowthBookClient:
         existing try/except. `on_error` fires if the SCHEDULED coroutine
         fails or cannot be scheduled — sync failures don't need it because
         they propagate."""
-        result = callback(*args)
+        result = callback(*args, **(kwargs or {}))
         if inspect.isawaitable(result):
             try:
                 asyncio.get_running_loop()
@@ -750,13 +751,21 @@ class GrowthBookClient:
                 try:
                     self._run_user_callback(
                         self.options.on_experiment_viewed,
-                        (experiment, result, user_context),
+                        (),
                         "tracking",
                         # An async tracking callback is deduped at schedule
                         # time; if it later fails, un-mark so the impression
                         # is retried on the next eval — same retry semantics
                         # as a sync callback that raises.
                         on_error=lambda: self._untrack(key),
+                        # Tracking callbacks are invoked by keyword (same
+                        # contract as the sync client): implementations must
+                        # name their params experiment/result/user_context.
+                        kwargs={
+                            "experiment": experiment,
+                            "result": result,
+                            "user_context": user_context,
+                        },
                     )
                     self._tracked[key] = True
                 except Exception:
