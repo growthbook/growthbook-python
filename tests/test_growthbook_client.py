@@ -984,10 +984,87 @@ async def test_sticky_bucket_save_failure_is_logged_not_raised(caplog):
             result = await client.eval_feature("exp-feature", UserContext(attributes={"id": "user-1"}))
             assert result.value == 1  # eval unaffected
             await client.flush_sticky_bucket_saves()
-            assert client._sticky_save_tasks == set()
+            assert client._sticky_save_inflight == {}
+            assert client._sticky_save_dirty == set()
 
     assert service.save_calls == 1
     assert any("Sticky bucket save failed" in r.message for r in caplog.records)
+
+
+# Two experiment features so one user can accumulate two assignments in
+# one sticky doc.
+STICKY_TWO_EXP_FEATURES = {
+    "features": {
+        "feature-a": {"defaultValue": 0, "rules": [{
+            "key": "exp_a", "variations": [0, 1], "weights": [0, 1],
+            "meta": [{"key": "0"}, {"key": "v"}]}]},
+        "feature-b": {"defaultValue": 0, "rules": [{
+            "key": "exp_b", "variations": [0, 1], "weights": [0, 1],
+            "meta": [{"key": "0"}, {"key": "v"}]}]},
+    },
+    "savedGroups": {}
+}
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_same_id_different_attributes_loses_no_assignments():
+    """Regression: two evaluations with the SAME sticky identifier but
+    DIFFERENT surrounding attributes fetch separate snapshots. Before the
+    authoritative doc map, each snapshot generated a doc missing the other's
+    assignment and unordered saves overwrote each other, silently losing one
+    assignment. Both assignments must survive, regardless of save timing."""
+    save_gate = asyncio.Event()
+    service = AsyncInMemoryStickyBucketService(save_gate=save_gate)
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_TWO_EXP_FEATURES)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            # Same id, different surrounding attributes -> distinct snapshots.
+            # Saves stay parked behind the gate the whole time, so the second
+            # eval can never see the first one's write via the service.
+            await client.eval_feature("feature-a", UserContext(attributes={"id": "1", "x": "1"}))
+            await client.eval_feature("feature-b", UserContext(attributes={"id": "1", "x": "2"}))
+            save_gate.set()
+            await client.flush_sticky_bucket_saves()
+
+    assert service.docs["id||1"]["assignments"] == {"exp_a__0": "v", "exp_b__0": "v"}
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_saves_serialized_per_key():
+    """At most one save per doc key is in flight; writes landing mid-save
+    trigger a trailing save so the service converges to the merged doc."""
+    inflight_peak = 0
+
+    class ProbeService(AsyncInMemoryStickyBucketService):
+        def __init__(self):
+            super().__init__()
+            self._inflight = 0
+            self.release = asyncio.Event()
+
+        async def save_assignments(self, doc):
+            nonlocal inflight_peak
+            self._inflight += 1
+            inflight_peak = max(inflight_peak, self._inflight)
+            self.save_calls += 1
+            await self.release.wait()
+            self.docs[self.get_key(doc["attributeName"], doc["attributeValue"])] = doc
+            self._inflight -= 1
+
+    service = ProbeService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_TWO_EXP_FEATURES)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            await client.eval_feature("feature-a", UserContext(attributes={"id": "1", "x": "1"}))
+            await client.eval_feature("feature-b", UserContext(attributes={"id": "1", "x": "2"}))
+            service.release.set()
+            await client.flush_sticky_bucket_saves()
+
+    assert inflight_peak == 1  # per-key serialization held under concurrent writes
+    assert service.docs["id||1"]["assignments"] == {"exp_a__0": "v", "exp_b__0": "v"}
 
 
 @pytest.mark.asyncio

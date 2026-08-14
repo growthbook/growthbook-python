@@ -623,10 +623,21 @@ class GrowthBookClient:
             'assignments': {}
         }
         self._sticky_bucket_lock = asyncio.Lock()
-        # Strong refs to in-flight fire-and-forget save_assignments futures;
-        # bare create_task results are only weakly held by the loop and can be
-        # garbage-collected mid-write. Drained in close()/flush.
-        self._sticky_save_tasks: Set["asyncio.Future[Any]"] = set()
+        # Authoritative map of every sticky assignment doc THIS process has
+        # written: doc key ("attributeName||attributeValue") -> doc. This is
+        # the merge base for saves and is overlaid onto every fetched
+        # snapshot, so an assignment made under one attributes snapshot is
+        # never lost when a different snapshot for the same identifier
+        # generates the next save (two snapshots for one id are otherwise
+        # disjoint dicts, and unordered last-write-wins would drop data).
+        # LRU-bounded; only clean (saved, not dirty/in-flight) entries evict.
+        self._sticky_docs: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        # Per-doc-key save pipeline: at most ONE in-flight save per key, with
+        # a dirty flag that triggers a trailing save of the latest merged doc.
+        # Serializing per key is what makes persistence converge — even
+        # superset docs would regress if an older write landed last.
+        self._sticky_save_inflight: Dict[str, "asyncio.Future[Any]"] = {}
+        self._sticky_save_dirty: Set[str] = set()
         # Strong refs to scheduled async user callbacks (tracking, feature
         # usage, subscriptions). Drained in close().
         self._callback_tasks: Set["asyncio.Future[Any]"] = set()
@@ -792,7 +803,8 @@ class GrowthBookClient:
 
         async with self._sticky_bucket_lock:
             if attributes == self._sticky_bucket_cache['attributes']:
-                return self._sticky_bucket_cache['assignments']
+                return self._overlay_local_sticky_docs(
+                    attributes, self._sticky_bucket_cache['assignments'])
 
             if isinstance(service, AbstractAsyncStickyBucketService):
                 assignments = await service.get_all_assignments(attributes)
@@ -801,22 +813,69 @@ class GrowthBookClient:
                 assignments = await loop.run_in_executor(
                     None, service.get_all_assignments, attributes
                 )
+            self._overlay_local_sticky_docs(attributes, assignments)
             self._sticky_bucket_cache['attributes'] = attributes.copy()
             self._sticky_bucket_cache['assignments'] = assignments
             return assignments
 
+    _STICKY_DOCS_MAX = 1000  # LRU bound for the authoritative doc map
+
+    @staticmethod
+    def _sticky_doc_key(doc: Dict) -> str:
+        return f"{doc['attributeName']}||{doc['attributeValue']}"
+
+    def _overlay_local_sticky_docs(self, attributes: Dict[str, Any],
+                                   assignments: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge this process's authoritative assignment docs (local wins per
+        experiment key) into a fetched/cached snapshot, for the doc keys this
+        attributes dict can address. Keeps snapshots for the same identifier
+        consistent with local writes even while their saves are in flight."""
+        for name, value in attributes.items():
+            key = f"{name}||{value}"
+            local = self._sticky_docs.get(key)
+            if local is None:
+                continue
+            service_doc = assignments.get(key) or {}
+            assignments[key] = {
+                "attributeName": name,
+                "attributeValue": value,
+                "assignments": {
+                    **service_doc.get("assignments", {}),
+                    **local["assignments"],
+                },
+            }
+        return assignments
+
     def _schedule_sticky_bucket_save(self, doc: Dict) -> None:
-        """Fire-and-forget persistence of a sticky bucket assignment doc,
-        mirroring the JS SDK: the in-memory doc is already updated
-        synchronously by core (read-your-writes), so the service write can
-        complete in the background without blocking the event loop.
+        """Fire-and-forget persistence of a sticky bucket assignment doc.
+
+        The doc is first merged into the authoritative per-process map, and
+        what gets persisted is always the merged doc — so a save can never
+        drop assignments made under a different attributes snapshot. Saves
+        are serialized per doc key (one in flight, dirty flag for a trailing
+        save), so completion order cannot regress the stored doc.
 
         Called synchronously from core's run_experiment via
-        EvaluationContext.save_sticky_bucket_doc.
+        EvaluationContext.save_sticky_bucket_doc; the in-memory snapshot doc
+        is already updated by core (read-your-writes).
         """
         service = self.options.sticky_bucket_service
         if not service:
             return
+
+        key = self._sticky_doc_key(doc)
+        local = self._sticky_docs.get(key)
+        merged_assignments = {
+            **(local["assignments"] if local else {}),
+            **doc.get("assignments", {}),
+        }
+        self._sticky_docs[key] = {
+            "attributeName": doc["attributeName"],
+            "attributeValue": doc["attributeValue"],
+            "assignments": merged_assignments,
+        }
+        self._sticky_docs.move_to_end(key)
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -828,24 +887,77 @@ class GrowthBookClient:
                     "running event loop"
                 )
             else:
-                service.save_assignments(doc)
+                service.save_assignments(self._sticky_docs[key])
             return
 
+        self._sticky_save_dirty.add(key)
+        if key not in self._sticky_save_inflight:
+            self._kick_sticky_save(key, loop)
+
+    def _kick_sticky_save(self, key: str, loop: asyncio.AbstractEventLoop) -> None:
+        """Start one save for `key` with the current merged doc. On completion,
+        re-kick if the doc changed meanwhile (dirty), so the service converges
+        to the latest merged state without ever having two writes for one key
+        in flight."""
+        self._sticky_save_dirty.discard(key)
+        local = self._sticky_docs.get(key)
+        if local is None:
+            return
+        # Snapshot for the write: the authoritative doc may be merged into
+        # again while the (threaded or awaited) save is in flight.
+        doc = {**local, "assignments": dict(local["assignments"])}
+
+        service = self.options.sticky_bucket_service
+        if service is None:  # unreachable via _schedule; keeps types honest
+            return
         if isinstance(service, AbstractAsyncStickyBucketService):
             fut: "asyncio.Future[Any]" = loop.create_task(service.save_assignments(doc))
         else:
             fut = loop.run_in_executor(None, service.save_assignments, doc)
-        self._spawn_tracked(fut, self._sticky_save_tasks, "Sticky bucket save failed")
+        self._sticky_save_inflight[key] = fut
+
+        def _done(f: "asyncio.Future[Any]") -> None:
+            self._sticky_save_inflight.pop(key, None)
+            if not f.cancelled() and f.exception():
+                logger.error("Sticky bucket save failed", exc_info=f.exception())
+            if key in self._sticky_save_dirty:
+                self._kick_sticky_save(key, loop)
+            else:
+                self._prune_sticky_docs()
+
+        fut.add_done_callback(_done)
+
+    def _prune_sticky_docs(self) -> None:
+        """Evict least-recently-used CLEAN docs beyond the bound. Dirty or
+        in-flight docs are never evicted — they are unsaved local truth."""
+        excess = len(self._sticky_docs) - self._STICKY_DOCS_MAX
+        if excess <= 0:
+            return
+        for key in list(self._sticky_docs.keys()):
+            if excess <= 0:
+                break
+            if key in self._sticky_save_dirty or key in self._sticky_save_inflight:
+                continue
+            del self._sticky_docs[key]
+            excess -= 1
 
     async def flush_sticky_bucket_saves(self) -> None:
-        """Wait for all in-flight sticky bucket saves to complete.
+        """Wait until every sticky bucket doc is persisted (including trailing
+        saves triggered by writes that arrived mid-save).
 
         Useful in short-lived environments (e.g. serverless) where the event
         loop may be torn down before background writes finish. close() calls
         this automatically. Failures are logged, never raised.
         """
-        while self._sticky_save_tasks:
-            await asyncio.gather(*list(self._sticky_save_tasks), return_exceptions=True)
+        while self._sticky_save_inflight or self._sticky_save_dirty:
+            pending = list(self._sticky_save_inflight.values())
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            # ALWAYS yield one loop iteration: awaiting already-done futures
+            # does not yield, and a completed save can still have its
+            # inflight-popping done-callback queued — without this the loop
+            # spins forever and that callback never runs.
+            await asyncio.sleep(0)
 
     async def initialize(self) -> bool:
         """Initialize client with features and start refresh"""
@@ -1072,6 +1184,9 @@ class GrowthBookClient:
         # subscriptions); failures are logged by their done-callbacks.
         while self._callback_tasks:
             await asyncio.gather(*list(self._callback_tasks), return_exceptions=True)
+            # Yield so completed tasks' set-discarding done-callbacks run
+            # (awaiting done futures alone never yields — see flush above).
+            await asyncio.sleep(0)
 
         if self._features_repository:
             await self._features_repository.stop_refresh()
