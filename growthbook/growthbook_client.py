@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import inspect
 import json
 from dataclasses import dataclass, field
 import random
@@ -614,7 +615,7 @@ class GrowthBookClient:
         self._tracked_lock = threading.Lock()
         
         # Thread-safe subscription management
-        self._subscriptions: Set[Callable[[Experiment, Result], None]] = set()
+        self._subscriptions: Set[Callable[[Experiment, Result], Union[None, Awaitable[None]]]] = set()
         self._subscriptions_lock = threading.Lock()
 
         # Add sticky bucket cache
@@ -683,20 +684,21 @@ class GrowthBookClient:
     def _run_user_callback(self, callback: Callable, args: tuple, what: str) -> None:
         """Invoke a user callback that may be sync or async.
 
-        Called from synchronous eval paths, so a returned coroutine cannot be
+        Called from synchronous eval paths, so a returned awaitable cannot be
         awaited here; it is scheduled fire-and-forget on the running loop
         (drained in close()). Sync exceptions propagate to the caller's
         existing try/except."""
         result = callback(*args)
-        if asyncio.iscoroutine(result):
+        if inspect.isawaitable(result):
             try:
-                loop = asyncio.get_running_loop()
+                asyncio.get_running_loop()
             except RuntimeError:
-                result.close()
+                if asyncio.iscoroutine(result):
+                    result.close()
                 logger.error("Async %s callback requires a running event loop; dropped", what)
                 return
             self._spawn_tracked(
-                loop.create_task(result),
+                asyncio.ensure_future(result),
                 self._callback_tasks,
                 f"Error in {what} callback",
             )
@@ -726,7 +728,7 @@ class GrowthBookClient:
                 except Exception:
                     logger.exception("Error in tracking callback")
 
-    def subscribe(self, callback: Callable[[Experiment, Result], None]) -> Callable[[], None]:
+    def subscribe(self, callback: Callable[[Experiment, Result], Union[None, Awaitable[None]]]) -> Callable[[], None]:
         """Thread-safe subscription management"""
         with self._subscriptions_lock:
             self._subscriptions.add(callback)

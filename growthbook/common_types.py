@@ -9,7 +9,7 @@ else:
     from typing_extensions import TypedDict
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Union, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union, Set, Tuple
 from enum import Enum
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse as _urlparse
@@ -447,8 +447,11 @@ class Options:
     refresh_strategy: Optional[FeatureRefreshStrategy] = FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
     sticky_bucket_service: Optional[Union[AbstractStickyBucketService, AbstractAsyncStickyBucketService]] = None
     sticky_bucket_identifier_attributes: Optional[List[str]] = None
-    on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], None]] = None
-    on_feature_usage: Optional[Callable[[str, 'FeatureResult', UserContext], None]] = None
+    # Callbacks may be sync (return None) or async (return an awaitable).
+    # The async GrowthBookClient schedules returned awaitables on the loop;
+    # the sync GrowthBook class supports sync callbacks only.
+    on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], Union[None, Awaitable[None]]]] = None
+    on_feature_usage: Optional[Callable[[str, 'FeatureResult', UserContext], Union[None, Awaitable[None]]]] = None
     tracking_plugins: Optional[List[Any]] = None
     http_connect_timeout: Optional[int] = None
     http_read_timeout: Optional[int] = None
