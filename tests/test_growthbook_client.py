@@ -826,7 +826,7 @@ STICKY_READ_FEATURES = {
 }
 
 
-def _sticky_client_ctx(service, features=STICKY_READ_FEATURES):
+def _sticky_client_ctx(service, features=STICKY_READ_FEATURES, **opt_kwargs):
     return patch('growthbook.FeatureRepository.load_features_async',
                  new_callable=AsyncMock, return_value=features), \
            patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
@@ -837,6 +837,7 @@ def _sticky_client_ctx(service, features=STICKY_READ_FEATURES):
                api_host="https://localhost.growthbook.io",
                client_key="test-key",
                sticky_bucket_service=service,
+               **opt_kwargs,
            )
 
 
@@ -940,6 +941,50 @@ async def test_sticky_bucket_distinct_users_fetch_in_parallel():
             assert service.get_all_calls == 3
             fetch_gate.set()
             await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_opt_in_ttl_cache():
+    """With sticky_bucket_cache_ttl > 0, fetched assignments are reused per
+    attributes dict (bounded staleness), LRU-bounded by
+    sticky_bucket_cache_size."""
+    service = AsyncInMemoryStickyBucketService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(
+        service, sticky_bucket_cache_ttl=60, sticky_bucket_cache_size=2)
+
+    async def ev(uid):
+        await client.eval_feature("read-feature", UserContext(attributes={"id": uid}))
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            await ev("user-1")
+            await ev("user-1")
+            assert service.get_all_calls == 1  # cached
+            await ev("user-2")
+            await ev("user-3")  # evicts user-1 (size bound = 2)
+            assert service.get_all_calls == 3
+            await ev("user-2")  # still cached
+            assert service.get_all_calls == 3
+            await ev("user-1")  # was evicted -> refetch
+            assert service.get_all_calls == 4
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_nonpositive_cache_size_disables_caching():
+    """Regression: sticky_bucket_cache_size=-1 used to crash evaluation with
+    KeyError (popitem on an empty cache). Non-positive size (or ttl) now
+    simply disables caching."""
+    service = AsyncInMemoryStickyBucketService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(
+        service, sticky_bucket_cache_ttl=60, sticky_bucket_cache_size=-1)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            await client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+            await client.eval_feature("read-feature", UserContext(attributes={"id": "user-2"}))
+    assert service.get_all_calls == 2  # no crash; per-eval fetch
 
 
 @pytest.mark.asyncio

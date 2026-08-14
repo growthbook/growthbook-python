@@ -624,6 +624,14 @@ class GrowthBookClient:
         # — assignments are fetched per evaluation context, matching the JS
         # SDK's server-side GrowthBookClient.applyStickyBuckets.
         self._sticky_bucket_inflight: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
+        # Opt-in TTL cache (Options.sticky_bucket_cache_ttl > 0): trades
+        # bounded cross-worker staleness for fewer service round-trips.
+        # Non-positive ttl or size disables caching entirely.
+        self._sticky_cache_enabled = (
+            (self.options.sticky_bucket_cache_ttl or 0) > 0
+            and (self.options.sticky_bucket_cache_size or 0) > 0
+        )
+        self._sticky_bucket_cache: "OrderedDict[str, Any]" = OrderedDict()
         # Authoritative map of every sticky assignment doc THIS process has
         # written: doc key ("attributeName||attributeValue") -> doc. This is
         # the merge base for saves and is overlaid onto every fetched
@@ -822,6 +830,17 @@ class GrowthBookClient:
 
         key = json.dumps(attributes, sort_keys=True, default=str)
 
+        if self._sticky_cache_enabled:
+            entry = self._sticky_bucket_cache.get(key)
+            if entry is not None:
+                cached_assignments, expires_at = entry
+                if time.monotonic() < expires_at:
+                    self._sticky_bucket_cache.move_to_end(key)
+                    # Re-apply local writes: another snapshot for the same
+                    # identifier may have assigned since this entry was cached.
+                    return self._overlay_local_sticky_docs(attributes, cached_assignments)
+                del self._sticky_bucket_cache[key]
+
         while True:
             inflight = self._sticky_bucket_inflight.get(key)
             if inflight is None:
@@ -855,6 +874,15 @@ class GrowthBookClient:
             raise
         finally:
             self._sticky_bucket_inflight.pop(key, None)
+
+        if self._sticky_cache_enabled:
+            self._sticky_bucket_cache[key] = (
+                assignments,
+                time.monotonic() + self.options.sticky_bucket_cache_ttl,
+            )
+            self._sticky_bucket_cache.move_to_end(key)
+            while len(self._sticky_bucket_cache) > self.options.sticky_bucket_cache_size:
+                self._sticky_bucket_cache.popitem(last=False)
 
         if not fut.done():
             fut.set_result(assignments)
