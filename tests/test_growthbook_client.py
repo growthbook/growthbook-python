@@ -896,9 +896,11 @@ async def test_sticky_bucket_concurrent_refresh_coalesced():
 
 
 @pytest.mark.asyncio
-async def test_sticky_bucket_cache_invalidated_on_attribute_change():
-    """Changing user attributes must trigger a fresh service fetch; repeating
-    the same attributes must hit the cache."""
+async def test_sticky_bucket_fetched_per_evaluation():
+    """No cross-eval result cache by default (parity with the JS SDK's
+    server-side GrowthBookClient.applyStickyBuckets): every evaluation
+    fetches assignments for its context, so writes from other workers are
+    visible on the next eval instead of being masked indefinitely."""
     service = AsyncInMemoryStickyBucketService()
     EnhancedFeatureRepository._instances = {}
     p1, p2, p3, opts = _sticky_client_ctx(service)
@@ -908,9 +910,102 @@ async def test_sticky_bucket_cache_invalidated_on_attribute_change():
             await client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
             assert service.get_all_calls == 1
             await client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
-            assert service.get_all_calls == 1  # cache hit
+            assert service.get_all_calls == 2  # sequential evals refetch
             await client.eval_feature("read-feature", UserContext(attributes={"id": "user-2"}))
-            assert service.get_all_calls == 2  # attribute change -> refetch
+            assert service.get_all_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_distinct_users_fetch_in_parallel():
+    """Fetches for DIFFERENT attribute sets must overlap, not serialize.
+    With the first user's fetch still parked behind the gate, the other
+    users' fetches must also have started — impossible under a global
+    refresh lock or an eval-wide lock."""
+    fetch_gate = asyncio.Event()
+    service = AsyncInMemoryStickyBucketService(fetch_gate=fetch_gate)
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            tasks = [
+                asyncio.ensure_future(
+                    client.eval_feature("read-feature", UserContext(attributes={"id": uid}))
+                )
+                for uid in ("user-1", "user-2", "user-3")
+            ]
+            for _ in range(10):
+                await asyncio.sleep(0)
+            # All three fetches are in flight concurrently
+            assert service.get_all_calls == 3
+            fetch_gate.set()
+            await asyncio.gather(*tasks)
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_waiter_cancellation_does_not_poison_owner():
+    """Regression: a cancelled coalesced waiter used to propagate its
+    cancellation into the shared inflight future, making the OWNER's
+    successful fetch die with InvalidStateError. Waiters are shielded now."""
+    fetch_gate = asyncio.Event()
+    service = AsyncInMemoryStickyBucketService(fetch_gate=fetch_gate)
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            user = {"id": "user-1"}
+            owner = asyncio.ensure_future(
+                client.eval_feature("read-feature", UserContext(attributes=dict(user))))
+            for _ in range(3):
+                await asyncio.sleep(0)
+            waiter = asyncio.ensure_future(
+                client.eval_feature("read-feature", UserContext(attributes=dict(user))))
+            for _ in range(3):
+                await asyncio.sleep(0)
+            waiter.cancel()
+            for _ in range(3):
+                await asyncio.sleep(0)
+            fetch_gate.set()
+
+            result = await owner  # owner must complete normally
+            assert result.value == "control"
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+    assert service.get_all_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_owner_cancellation_waiter_retries():
+    """If the fetch OWNER is cancelled, a coalesced waiter must not be
+    collaterally cancelled: it retries, becomes the new owner, and its
+    evaluation succeeds."""
+    fetch_gate = asyncio.Event()
+    service = AsyncInMemoryStickyBucketService(fetch_gate=fetch_gate)
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            user = {"id": "user-1"}
+            owner = asyncio.ensure_future(
+                client.eval_feature("read-feature", UserContext(attributes=dict(user))))
+            for _ in range(3):
+                await asyncio.sleep(0)
+            waiter = asyncio.ensure_future(
+                client.eval_feature("read-feature", UserContext(attributes=dict(user))))
+            for _ in range(3):
+                await asyncio.sleep(0)
+            owner.cancel()
+            for _ in range(3):
+                await asyncio.sleep(0)
+            fetch_gate.set()
+
+            result = await waiter  # waiter retried as the new owner
+            assert result.value == "control"
+            with pytest.raises(asyncio.CancelledError):
+                await owner
+    assert service.get_all_calls == 2  # aborted owner fetch + waiter's retry
 
 
 @pytest.mark.asyncio

@@ -618,12 +618,12 @@ class GrowthBookClient:
         self._subscriptions: Set[Callable[[Experiment, Result], Union[None, Awaitable[None]]]] = set()
         self._subscriptions_lock = threading.Lock()
 
-        # Add sticky bucket cache
-        self._sticky_bucket_cache: Dict[str, Dict[str, Any]] = {
-            'attributes': {},
-            'assignments': {}
-        }
-        self._sticky_bucket_lock = asyncio.Lock()
+        # Per-attributes-key inflight sticky bucket fetches. Concurrent evals
+        # with identical attributes coalesce onto one service fetch; distinct
+        # attributes fetch in parallel. No cross-eval result cache by default
+        # — assignments are fetched per evaluation context, matching the JS
+        # SDK's server-side GrowthBookClient.applyStickyBuckets.
+        self._sticky_bucket_inflight: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
         # Authoritative map of every sticky assignment doc THIS process has
         # written: doc key ("attributeName||attributeValue") -> doc. This is
         # the merge base for saves and is overlaid onto every fetched
@@ -808,33 +808,57 @@ class GrowthBookClient:
         
     
     async def _refresh_sticky_buckets(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
-        """Refresh sticky bucket assignments only if attributes have changed.
+        """Fetch sticky bucket assignments for these attributes.
 
         Never blocks the event loop: async services are awaited natively, sync
-        services are offloaded to the default executor. The lock also coalesces
-        concurrent refreshes for identical attributes — waiters hit the cache
-        check after the first fetch completes.
+        services are offloaded to the default executor. Concurrent evals with
+        identical attributes share one inflight fetch; waiters are shielded so
+        one cancelled waiter cannot poison the shared future, and if the OWNER
+        is cancelled, waiters retry (one becomes the new owner).
         """
         service = self.options.sticky_bucket_service
         if not service:
             return {}
 
-        async with self._sticky_bucket_lock:
-            if attributes == self._sticky_bucket_cache['attributes']:
-                return self._overlay_local_sticky_docs(
-                    attributes, self._sticky_bucket_cache['assignments'])
+        key = json.dumps(attributes, sort_keys=True, default=str)
 
+        while True:
+            inflight = self._sticky_bucket_inflight.get(key)
+            if inflight is None:
+                break
+            try:
+                return await asyncio.shield(inflight)
+            except asyncio.CancelledError:
+                if not inflight.cancelled():
+                    raise  # WE were cancelled; the owner fetch continues
+                continue  # owner was cancelled; retry (maybe become owner)
+
+        loop = asyncio.get_running_loop()
+        fut: "asyncio.Future[Dict[str, Any]]" = loop.create_future()
+        self._sticky_bucket_inflight[key] = fut
+        try:
             if isinstance(service, AbstractAsyncStickyBucketService):
                 assignments = await service.get_all_assignments(attributes)
             else:
-                loop = asyncio.get_running_loop()
                 assignments = await loop.run_in_executor(
                     None, service.get_all_assignments, attributes
                 )
             self._overlay_local_sticky_docs(attributes, assignments)
-            self._sticky_bucket_cache['attributes'] = attributes.copy()
-            self._sticky_bucket_cache['assignments'] = assignments
-            return assignments
+        except asyncio.CancelledError:
+            if not fut.cancelled():
+                fut.cancel()
+            raise
+        except Exception as e:
+            if not fut.done():
+                fut.set_exception(e)
+                fut.exception()  # mark retrieved: no GC warning if unawaited
+            raise
+        finally:
+            self._sticky_bucket_inflight.pop(key, None)
+
+        if not fut.done():
+            fut.set_result(assignments)
+        return assignments
 
     _STICKY_DOCS_MAX = 1000  # LRU bound for the authoritative doc map
 
