@@ -1162,6 +1162,58 @@ def test_ttl_automatic_feature_refresh(mocker):
         feature_repo.clear_cache()
 
 
+def test_sticky_bucket_refresh_does_not_reload_features(mocker):
+    """refresh_sticky_buckets() must not trigger redundant feature reloads.
+
+    Regression: _get_sticky_bucket_attributes() used to call _get_eval_context()
+    -- which runs _ensure_fresh_features() -> load_features() -- once per
+    sticky-bucket identifier attribute. On the set_attributes() path (where the
+    _is_updating_features guard is not set) that meant N redundant feature
+    reloads, each re-running set_features() + the sticky-bucket service lookup.
+    The fix routes sticky-bucket hashing through the side-effect-free
+    _build_eval_context(), so no reload happens during the refresh.
+    """
+    feature_repo.clear_cache()
+    response = {
+        "features": {
+            "exp-feature": {
+                "defaultValue": 0,
+                "rules": [
+                    {
+                        "key": "exp1",
+                        "hashAttribute": "id",
+                        "fallbackAttribute": "deviceId",
+                        "variations": [0, 1],
+                        "meta": [{"key": "0"}, {"key": "1"}],
+                    }
+                ],
+            }
+        },
+        "savedGroups": {},
+    }
+    mocker.patch.object(feature_repo, '_fetch_features', return_value=response)
+
+    service = InMemoryStickyBucketService()
+    gb = GrowthBook(
+        api_host="https://cdn.growthbook.io",
+        client_key="test-key",
+        sticky_bucket_service=service,
+    )
+    try:
+        # Populate features (lazy load) so multiple sticky-bucket identifier
+        # attributes are derived from the rule above.
+        gb.get_feature_value("exp-feature", -1)
+        assert set(gb.sticky_bucket_identifier_attributes) == {"id", "deviceId"}
+
+        # set_attributes() -> refresh_sticky_buckets() must not reload features.
+        spy = mocker.spy(gb, "load_features")
+        gb.set_attributes({"id": "user-123", "deviceId": "dev-abc"})
+        assert spy.call_count == 0
+    finally:
+        gb.destroy()
+        feature_repo.clear_cache()
+
+
 def test_multiple_instances_get_updated_on_cache_expiry(mocker):
     """Test that multiple GrowthBook instances all get updated when cache expires during evaluation"""
     mock_responses = [
