@@ -1076,6 +1076,20 @@ def test_loose_unmarshalling(mocker):
     gb.destroy()
 
 
+def test_async_sticky_bucket_service_rejected_by_sync_client():
+    from growthbook import AbstractAsyncStickyBucketService
+
+    class AsyncService(AbstractAsyncStickyBucketService):
+        async def get_assignments(self, attributeName, attributeValue):
+            return None
+
+        async def save_assignments(self, doc):
+            pass
+
+    with pytest.raises(ValueError, match="GrowthBookClient"):
+        GrowthBook(sticky_bucket_service=AsyncService())
+
+
 def test_sticky_bucket_service(mocker):
     # Start forcing everyone to variation1
     features = {

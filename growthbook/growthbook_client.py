@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import inspect
 import json
 from dataclasses import dataclass, field
 import random
@@ -25,6 +26,7 @@ from .common_types import (
     StackContext,
     FeatureResult,
     FeatureRefreshStrategy,
+    AbstractAsyncStickyBucketService,
     Experiment,
     build_remote_eval_payload,
     features_from_dict,
@@ -517,8 +519,14 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         """Clean shutdown of refresh tasks"""
         self._stop_event.set()
         # Ensure any SSE background thread is stopped as well.
+        # stopAutoRefresh blocks joining a thread (up to `timeout` seconds),
+        # so run it in the executor to keep the event loop free — same as the
+        # SSE lifecycle teardown above.
         try:
-            self.stopAutoRefresh(timeout=10)
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: self.stopAutoRefresh(timeout=10)
+            )
         except Exception:
             # Best-effort cleanup; task cancellation below will proceed.
             logger.exception("Error stopping SSE auto-refresh")
@@ -607,7 +615,7 @@ class GrowthBookClient:
         self._tracked_lock = threading.Lock()
         
         # Thread-safe subscription management
-        self._subscriptions: Set[Callable[[Experiment, Result], None]] = set()
+        self._subscriptions: Set[Callable[[Experiment, Result], Union[None, Awaitable[None]]]] = set()
         self._subscriptions_lock = threading.Lock()
 
         # Add sticky bucket cache
@@ -615,7 +623,25 @@ class GrowthBookClient:
             'attributes': {},
             'assignments': {}
         }
-        self._sticky_bucket_cache_lock = False
+        self._sticky_bucket_lock = asyncio.Lock()
+        # Authoritative map of every sticky assignment doc THIS process has
+        # written: doc key ("attributeName||attributeValue") -> doc. This is
+        # the merge base for saves and is overlaid onto every fetched
+        # snapshot, so an assignment made under one attributes snapshot is
+        # never lost when a different snapshot for the same identifier
+        # generates the next save (two snapshots for one id are otherwise
+        # disjoint dicts, and unordered last-write-wins would drop data).
+        # LRU-bounded; only clean (saved, not dirty/in-flight) entries evict.
+        self._sticky_docs: "OrderedDict[str, Dict[str, Any]]" = OrderedDict()
+        # Per-doc-key save pipeline: at most ONE in-flight save per key, with
+        # a dirty flag that triggers a trailing save of the latest merged doc.
+        # Serializing per key is what makes persistence converge — even
+        # superset docs would regress if an older write landed last.
+        self._sticky_save_inflight: Dict[str, "asyncio.Future[Any]"] = {}
+        self._sticky_save_dirty: Set[str] = set()
+        # Strong refs to scheduled async user callbacks (tracking, feature
+        # usage, subscriptions). Drained in close().
+        self._callback_tasks: Set["asyncio.Future[Any]"] = set()
         
         # Plugin support
         self._tracking_plugins: List[Any] = self.options.tracking_plugins or []
@@ -643,6 +669,40 @@ class GrowthBookClient:
         self._initialize_plugins()
 
 
+    def _spawn_tracked(self, fut: "asyncio.Future[Any]", task_set: Set["asyncio.Future[Any]"], error_msg: str) -> None:
+        """Keep a strong ref to a fire-and-forget future until it completes;
+        log (never raise) its exception."""
+        task_set.add(fut)
+
+        def _done(f: "asyncio.Future[Any]") -> None:
+            task_set.discard(f)
+            if not f.cancelled() and f.exception():
+                logger.error(error_msg, exc_info=f.exception())
+
+        fut.add_done_callback(_done)
+
+    def _run_user_callback(self, callback: Callable, args: tuple, what: str) -> None:
+        """Invoke a user callback that may be sync or async.
+
+        Called from synchronous eval paths, so a returned awaitable cannot be
+        awaited here; it is scheduled fire-and-forget on the running loop
+        (drained in close()). Sync exceptions propagate to the caller's
+        existing try/except."""
+        result = callback(*args)
+        if inspect.isawaitable(result):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                if asyncio.iscoroutine(result):
+                    result.close()
+                logger.error("Async %s callback requires a running event loop; dropped", what)
+                return
+            self._spawn_tracked(
+                asyncio.ensure_future(result),
+                self._callback_tasks,
+                f"Error in {what} callback",
+            )
+
     def _track(self, experiment: Experiment, result: Result, user_context: UserContext) -> None:
         """Thread-safe tracking implementation"""
         if not self.options.on_experiment_viewed:
@@ -659,12 +719,16 @@ class GrowthBookClient:
         with self._tracked_lock:
             if not self._tracked.get(key):
                 try:
-                    self.options.on_experiment_viewed(experiment, result, user_context)
+                    self._run_user_callback(
+                        self.options.on_experiment_viewed,
+                        (experiment, result, user_context),
+                        "tracking",
+                    )
                     self._tracked[key] = True
                 except Exception:
                     logger.exception("Error in tracking callback")
 
-    def subscribe(self, callback: Callable[[Experiment, Result], None]) -> Callable[[], None]:
+    def subscribe(self, callback: Callable[[Experiment, Result], Union[None, Awaitable[None]]]) -> Callable[[], None]:
         """Thread-safe subscription management"""
         with self._subscriptions_lock:
             self._subscriptions.add(callback)
@@ -680,7 +744,7 @@ class GrowthBookClient:
 
         for callback in subscriptions:
             try:
-                callback(experiment, result)
+                self._run_user_callback(callback, (experiment, result), "subscription")
             except Exception:
                 logger.exception("Error in subscription callback")
 
@@ -728,26 +792,174 @@ class GrowthBookClient:
         
     
     async def _refresh_sticky_buckets(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
-        """Refresh sticky bucket assignments only if attributes have changed"""
-        if not self.options.sticky_bucket_service:
+        """Refresh sticky bucket assignments only if attributes have changed.
+
+        Never blocks the event loop: async services are awaited natively, sync
+        services are offloaded to the default executor. The lock also coalesces
+        concurrent refreshes for identical attributes — waiters hit the cache
+        check after the first fetch completes.
+        """
+        service = self.options.sticky_bucket_service
+        if not service:
             return {}
 
-        # Use compare-and-swap pattern
-        while not self._sticky_bucket_cache_lock:
+        async with self._sticky_bucket_lock:
             if attributes == self._sticky_bucket_cache['attributes']:
-                return self._sticky_bucket_cache['assignments']
-            
-            self._sticky_bucket_cache_lock = True
-            try:
-                assignments = self.options.sticky_bucket_service.get_all_assignments(attributes)
-                self._sticky_bucket_cache['attributes'] = attributes.copy()
-                self._sticky_bucket_cache['assignments'] = assignments
-                return assignments
-            finally:
-                self._sticky_bucket_cache_lock = False
-        
-        # Fallback return for edge case where loop condition is never satisfied
-        return {}
+                return self._overlay_local_sticky_docs(
+                    attributes, self._sticky_bucket_cache['assignments'])
+
+            if isinstance(service, AbstractAsyncStickyBucketService):
+                assignments = await service.get_all_assignments(attributes)
+            else:
+                loop = asyncio.get_running_loop()
+                assignments = await loop.run_in_executor(
+                    None, service.get_all_assignments, attributes
+                )
+            self._overlay_local_sticky_docs(attributes, assignments)
+            self._sticky_bucket_cache['attributes'] = attributes.copy()
+            self._sticky_bucket_cache['assignments'] = assignments
+            return assignments
+
+    _STICKY_DOCS_MAX = 1000  # LRU bound for the authoritative doc map
+
+    @staticmethod
+    def _sticky_doc_key(doc: Dict) -> str:
+        return f"{doc['attributeName']}||{doc['attributeValue']}"
+
+    def _overlay_local_sticky_docs(self, attributes: Dict[str, Any],
+                                   assignments: Dict[str, Any]) -> Dict[str, Any]:
+        """Merge this process's authoritative assignment docs (local wins per
+        experiment key) into a fetched/cached snapshot, for the doc keys this
+        attributes dict can address. Keeps snapshots for the same identifier
+        consistent with local writes even while their saves are in flight."""
+        for name, value in attributes.items():
+            key = f"{name}||{value}"
+            local = self._sticky_docs.get(key)
+            if local is None:
+                continue
+            service_doc = assignments.get(key) or {}
+            assignments[key] = {
+                "attributeName": name,
+                "attributeValue": value,
+                "assignments": {
+                    **service_doc.get("assignments", {}),
+                    **local["assignments"],
+                },
+            }
+        return assignments
+
+    def _schedule_sticky_bucket_save(self, doc: Dict) -> None:
+        """Fire-and-forget persistence of a sticky bucket assignment doc.
+
+        The doc is first merged into the authoritative per-process map, and
+        what gets persisted is always the merged doc — so a save can never
+        drop assignments made under a different attributes snapshot. Saves
+        are serialized per doc key (one in flight, dirty flag for a trailing
+        save), so completion order cannot regress the stored doc.
+
+        Called synchronously from core's run_experiment via
+        EvaluationContext.save_sticky_bucket_doc; the in-memory snapshot doc
+        is already updated by core (read-your-writes).
+        """
+        service = self.options.sticky_bucket_service
+        if not service:
+            return
+
+        key = self._sticky_doc_key(doc)
+        local = self._sticky_docs.get(key)
+        merged_assignments = {
+            **(local["assignments"] if local else {}),
+            **doc.get("assignments", {}),
+        }
+        self._sticky_docs[key] = {
+            "attributeName": doc["attributeName"],
+            "attributeValue": doc["attributeValue"],
+            "assignments": merged_assignments,
+        }
+        self._sticky_docs.move_to_end(key)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running loop (hand-rolled context outside the public API):
+            # persist inline if the service is sync, otherwise drop with a log.
+            if isinstance(service, AbstractAsyncStickyBucketService):
+                logger.error(
+                    "Cannot persist sticky bucket doc: async service but no "
+                    "running event loop"
+                )
+            else:
+                service.save_assignments(self._sticky_docs[key])
+            return
+
+        self._sticky_save_dirty.add(key)
+        if key not in self._sticky_save_inflight:
+            self._kick_sticky_save(key, loop)
+
+    def _kick_sticky_save(self, key: str, loop: asyncio.AbstractEventLoop) -> None:
+        """Start one save for `key` with the current merged doc. On completion,
+        re-kick if the doc changed meanwhile (dirty), so the service converges
+        to the latest merged state without ever having two writes for one key
+        in flight."""
+        self._sticky_save_dirty.discard(key)
+        local = self._sticky_docs.get(key)
+        if local is None:
+            return
+        # Snapshot for the write: the authoritative doc may be merged into
+        # again while the (threaded or awaited) save is in flight.
+        doc = {**local, "assignments": dict(local["assignments"])}
+
+        service = self.options.sticky_bucket_service
+        if service is None:  # unreachable via _schedule; keeps types honest
+            return
+        if isinstance(service, AbstractAsyncStickyBucketService):
+            fut: "asyncio.Future[Any]" = loop.create_task(service.save_assignments(doc))
+        else:
+            fut = loop.run_in_executor(None, service.save_assignments, doc)
+        self._sticky_save_inflight[key] = fut
+
+        def _done(f: "asyncio.Future[Any]") -> None:
+            self._sticky_save_inflight.pop(key, None)
+            if not f.cancelled() and f.exception():
+                logger.error("Sticky bucket save failed", exc_info=f.exception())
+            if key in self._sticky_save_dirty:
+                self._kick_sticky_save(key, loop)
+            else:
+                self._prune_sticky_docs()
+
+        fut.add_done_callback(_done)
+
+    def _prune_sticky_docs(self) -> None:
+        """Evict least-recently-used CLEAN docs beyond the bound. Dirty or
+        in-flight docs are never evicted — they are unsaved local truth."""
+        excess = len(self._sticky_docs) - self._STICKY_DOCS_MAX
+        if excess <= 0:
+            return
+        for key in list(self._sticky_docs.keys()):
+            if excess <= 0:
+                break
+            if key in self._sticky_save_dirty or key in self._sticky_save_inflight:
+                continue
+            del self._sticky_docs[key]
+            excess -= 1
+
+    async def flush_sticky_bucket_saves(self) -> None:
+        """Wait until every sticky bucket doc is persisted (including trailing
+        saves triggered by writes that arrived mid-save).
+
+        Useful in short-lived environments (e.g. serverless) where the event
+        loop may be torn down before background writes finish. close() calls
+        this automatically. Failures are logged, never raised.
+        """
+        while self._sticky_save_inflight or self._sticky_save_dirty:
+            pending = list(self._sticky_save_inflight.values())
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            # ALWAYS yield one loop iteration: awaiting already-done futures
+            # does not yield, and a completed save can still have its
+            # inflight-popping done-callback queued — without this the loop
+            # spins forever and that callback never runs.
+            await asyncio.sleep(0)
 
     async def initialize(self) -> bool:
         """Initialize client with features and start refresh"""
@@ -884,13 +1096,21 @@ class GrowthBookClient:
         # Get sticky bucket assignments if needed
         sticky_assignments = await self._refresh_sticky_buckets(user_context.attributes)
 
-        # update user context with sticky bucket assignments
+        # Intentionally the SHARED cached dict, not a copy: core mutates it in
+        # place when an experiment assigns a new sticky bucket, which is what
+        # gives read-your-writes semantics while persistence happens
+        # asynchronously (same mechanism as the JS SDK's
+        # stickyBucketAssignmentDocs).
         user_context.sticky_bucket_assignment_docs = sticky_assignments
 
         return EvaluationContext(
             user=user_context,
             global_ctx=self._global_context,
-            stack=StackContext(evaluated_features=set())
+            stack=StackContext(evaluated_features=set()),
+            save_sticky_bucket_doc=(
+                self._schedule_sticky_bucket_save
+                if self.options.sticky_bucket_service else None
+            ),
         )
 
     @asynccontextmanager
@@ -920,48 +1140,28 @@ class GrowthBookClient:
             # Call feature usage callback if provided
             if self.options.on_feature_usage:
                 try:
-                    self.options.on_feature_usage(key, result, user_context)
+                    self._run_user_callback(
+                        self.options.on_feature_usage,
+                        (key, result, user_context),
+                        "feature usage",
+                    )
                 except Exception:
                     logger.exception("Error in feature usage callback")
             return result
 
     async def is_on(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is enabled with proper async context management"""
-        async with self._eval_lock():
-            context = await self.create_evaluation_context(user_context)
-            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
-            # Call feature usage callback if provided
-            if self.options.on_feature_usage:
-                try:
-                    self.options.on_feature_usage(key, result, user_context)
-                except Exception:
-                    logger.exception("Error in feature usage callback")
-            return result.on
+        result = await self.eval_feature(key, user_context)
+        return result.on
 
     async def is_off(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is set to off with proper async context management"""
-        async with self._eval_lock():
-            context = await self.create_evaluation_context(user_context)
-            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
-            # Call feature usage callback if provided
-            if self.options.on_feature_usage:
-                try:
-                    self.options.on_feature_usage(key, result, user_context)
-                except Exception:
-                    logger.exception("Error in feature usage callback")
-            return result.off
+        result = await self.eval_feature(key, user_context)
+        return result.off
 
     async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext) -> Any:
-        async with self._eval_lock():
-            context = await self.create_evaluation_context(user_context)
-            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
-            # Call feature usage callback if provided
-            if self.options.on_feature_usage:
-                try:
-                    self.options.on_feature_usage(key, result, user_context)
-                except Exception:
-                    logger.exception("Error in feature usage callback")
-            return result.value if result.value is not None else fallback
+        result = await self.eval_feature(key, user_context)
+        return result.value if result.value is not None else fallback
 
     async def run(self, experiment: Experiment, user_context: UserContext) -> Result:
         """Run experiment with tracking"""
@@ -978,6 +1178,18 @@ class GrowthBookClient:
         
     async def close(self) -> None:
         """Clean shutdown with proper cleanup"""
+        # Let in-flight sticky bucket writes finish (sub-ms typically);
+        # cancelling them would lose assignments.
+        await self.flush_sticky_bucket_saves()
+
+        # Drain any scheduled async user callbacks (tracking, feature usage,
+        # subscriptions); failures are logged by their done-callbacks.
+        while self._callback_tasks:
+            await asyncio.gather(*list(self._callback_tasks), return_exceptions=True)
+            # Yield so completed tasks' set-discarding done-callbacks run
+            # (awaiting done futures alone never yields — see flush above).
+            await asyncio.sleep(0)
+
         if self._features_repository:
             await self._features_repository.stop_refresh()
 

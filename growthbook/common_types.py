@@ -9,7 +9,7 @@ else:
     from typing_extensions import TypedDict
 
 from dataclasses import dataclass, field
-from typing import Any, Callable, Dict, List, Optional, Union, Set, Tuple
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Union, Set, Tuple
 from enum import Enum
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse as _urlparse
@@ -384,8 +384,35 @@ class AbstractStickyBucketService(ABC):
                 docs[self.get_key(attributeName, attributeValue)] = doc
         return docs
 
+
+class AbstractAsyncStickyBucketService(ABC):
+    """Async twin of AbstractStickyBucketService for network-backed stores
+    (Redis, DynamoDB, ...). Only usable with the async GrowthBookClient;
+    the sync GrowthBook class rejects it at construction."""
+
+    @abstractmethod
+    async def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+        pass
+
+    @abstractmethod
+    async def save_assignments(self, doc: Dict) -> None:
+        pass
+
+    def get_key(self, attributeName: str, attributeValue: str) -> str:
+        return f"{attributeName}||{attributeValue}"
+
+    # By default, just loop through all attributes and call get_assignments
+    # Override this method in subclasses to perform a multi-query instead
+    async def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
+        docs = {}
+        for attributeName, attributeValue in attributes.items():
+            doc = await self.get_assignments(attributeName, attributeValue)
+            if doc:
+                docs[self.get_key(attributeName, attributeValue)] = doc
+        return docs
+
 @dataclass
-class StackContext: 
+class StackContext:
     id: Optional[str] = None
     evaluated_features: Set[str] = field(default_factory=set)
 
@@ -424,10 +451,13 @@ class Options:
     enable_dev_mode: bool = False
     # forced_variations: Dict[str, Any] = field(default_factory=dict)
     refresh_strategy: Optional[FeatureRefreshStrategy] = FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
-    sticky_bucket_service: Optional[AbstractStickyBucketService] = None
+    sticky_bucket_service: Optional[Union[AbstractStickyBucketService, AbstractAsyncStickyBucketService]] = None
     sticky_bucket_identifier_attributes: Optional[List[str]] = None
-    on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], None]] = None
-    on_feature_usage: Optional[Callable[[str, 'FeatureResult', UserContext], None]] = None
+    # Callbacks may be sync (return None) or async (return an awaitable).
+    # The async GrowthBookClient schedules returned awaitables on the loop;
+    # the sync GrowthBook class supports sync callbacks only.
+    on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], Union[None, Awaitable[None]]]] = None
+    on_feature_usage: Optional[Callable[[str, 'FeatureResult', UserContext], Union[None, Awaitable[None]]]] = None
     tracking_plugins: Optional[List[Any]] = None
     http_connect_timeout: Optional[int] = None
     http_read_timeout: Optional[int] = None
@@ -448,6 +478,10 @@ class EvaluationContext:
     user: UserContext
     global_ctx: GlobalContext
     stack: StackContext
+    # When set, core calls this instead of sticky_bucket_service.save_assignments
+    # directly, letting the async client schedule persistence off the event loop.
+    # None (the default) preserves the sync client's direct-call behavior.
+    save_sticky_bucket_doc: Optional[Callable[[Dict], None]] = None
 
 
 # ---------------------------------------------------------------------------

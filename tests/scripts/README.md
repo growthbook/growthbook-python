@@ -3,6 +3,15 @@
 End-to-end checks for the `remote_eval` / `remoteEval` SDK option, covering
 both the sync `GrowthBook` class and the async `GrowthBookClient`.
 
+Also in this directory (documented in their own docstrings):
+
+- `benchmark_async_client.py` — high-concurrency benchmark of
+  `GrowthBookClient` with sync/async sticky bucket services. Reports
+  throughput, latency percentiles, and event-loop lag.
+  Run with `PYTHONPATH=. python3 tests/scripts/benchmark_async_client.py`.
+- `check_corpus_freshness.py` — cases.json drift check vs the JS SDK
+  (runs as its own CI job).
+
 ## TL;DR
 
 ```bash

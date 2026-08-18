@@ -12,19 +12,89 @@ except ImportError:
         async def __call__(self, *args, **kwargs):
             return super(AsyncMock, self).__call__(*args, **kwargs)
 
-from growthbook import InMemoryStickyBucketService
+from growthbook import InMemoryStickyBucketService, AbstractAsyncStickyBucketService
 import pytest
 import asyncio
 import os
 import json
+import threading
+from typing import Any, Dict, Optional
 
 from growthbook.common_types import Experiment, Options
 from growthbook.growthbook_client import (
-    GrowthBookClient, 
+    GrowthBookClient,
     UserContext,
     FeatureRefreshStrategy,
     EnhancedFeatureRepository
 )
+
+
+class AsyncInMemoryStickyBucketService(AbstractAsyncStickyBucketService):
+    """Async mirror of InMemoryStickyBucketService, instrumented for tests.
+
+    Optional asyncio.Event gates make concurrency tests deterministic:
+    a gated call parks until the test sets the event — no wall-clock sleeps.
+    """
+
+    def __init__(self,
+                 fetch_gate: Optional[asyncio.Event] = None,
+                 save_gate: Optional[asyncio.Event] = None) -> None:
+        self.docs: Dict[str, Dict] = {}
+        self.fetch_gate = fetch_gate
+        self.save_gate = save_gate
+        self.get_all_calls = 0
+        self.save_calls = 0
+
+    async def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+        return self.docs.get(self.get_key(attributeName, attributeValue), None)
+
+    async def save_assignments(self, doc: Dict) -> None:
+        self.save_calls += 1
+        if self.save_gate:
+            await self.save_gate.wait()
+        self.docs[self.get_key(doc["attributeName"], doc["attributeValue"])] = doc
+
+    async def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
+        self.get_all_calls += 1
+        if self.fetch_gate:
+            await self.fetch_gate.wait()
+        return await super().get_all_assignments(attributes)
+
+    def destroy(self) -> None:
+        self.docs.clear()
+
+
+class CountingStickyBucketService(InMemoryStickyBucketService):
+    """Sync service instrumented with call counts and optional threading.Event
+    gates. A gated call BLOCKS its thread until the test sets the event, which
+    lets tests prove the call is not running on the event loop: if it were,
+    the loop-side code that sets the event could never run and the gate would
+    time out."""
+
+    GATE_TIMEOUT = 5  # generous upper bound; only reached on real deadlock
+
+    def __init__(self,
+                 fetch_gate: Optional[threading.Event] = None,
+                 save_gate: Optional[threading.Event] = None) -> None:
+        super().__init__()
+        self.fetch_gate = fetch_gate
+        self.save_gate = save_gate
+        self.fetch_started = threading.Event()
+        self.get_all_calls = 0
+
+    def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
+        self.get_all_calls += 1
+        self.fetch_started.set()
+        if self.fetch_gate:
+            assert self.fetch_gate.wait(timeout=self.GATE_TIMEOUT), \
+                "fetch gate never released — event loop was blocked"
+        return super().get_all_assignments(attributes)
+
+    def save_assignments(self, doc: Dict) -> None:
+        if self.save_gate:
+            assert self.save_gate.wait(timeout=self.GATE_TIMEOUT), \
+                "save gate never released — event loop was blocked"
+        super().save_assignments(doc)
 
 @pytest.fixture
 def mock_features_response():
@@ -672,17 +742,26 @@ def base_client_setup():
     return _setup
 
 @pytest.mark.asyncio
-async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup):
-    """Test sticky bucket functionality in GrowthBookClient"""
+@pytest.mark.parametrize("service_flavor", ["sync", "async"])
+async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup, service_flavor):
+    """Test sticky bucket functionality in GrowthBookClient.
+
+    Runs every cases.json stickyBucket case against BOTH service flavors:
+    the sync AbstractStickyBucketService (executor-offloaded) and the async
+    AbstractAsyncStickyBucketService (awaited natively).
+    """
     _, ctx, initial_docs, key, expected_result, expected_docs = test_sticky_bucket_data
 
     # Initialize sticky bucket service with test data
-    service = InMemoryStickyBucketService()
-    
-    # Add initial documents to the service
-    for doc in initial_docs:
-        service.save_assignments(doc)
-    
+    if service_flavor == "sync":
+        service = InMemoryStickyBucketService()
+        for doc in initial_docs:
+            service.save_assignments(doc)
+    else:
+        service = AsyncInMemoryStickyBucketService()
+        for doc in initial_docs:
+            await service.save_assignments(doc)
+
     # Handle sticky bucket identifier attributes mapping
     if 'stickyBucketIdentifierAttributes' in ctx:
         ctx['sticky_bucket_identifier_attributes'] = ctx['stickyBucketIdentifierAttributes']
@@ -715,13 +794,16 @@ async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup):
             async with GrowthBookClient(Options(**client_opts)) as client:
                 # Evaluate feature
                 result = await client.eval_feature(key, UserContext(**user_attrs))
-                
+
                 # Verify experiment result
                 if not result.experimentResult:
                     assert None == expected_result
                 else:
                     assert result.experimentResult.to_dict() == expected_result
-  
+
+                # Persistence is fire-and-forget; settle before asserting
+                await client.flush_sticky_bucket_saves()
+
                 # Verify sticky bucket assignments - check each expected doc individually
                 for doc_key, expected_doc in expected_docs.items():
                     assert service.docs[doc_key] == expected_doc
@@ -732,6 +814,325 @@ async def test_sticky_bucket(test_sticky_bucket_data, base_client_setup):
         await client.close()
         service.destroy()
         await asyncio.sleep(0.1)
+
+
+# Rule-free feature: evaluating it still triggers the sticky bucket READ
+# (prefetch happens per evaluation context), but never a write.
+STICKY_READ_FEATURES = {
+    "features": {
+        "read-feature": {"defaultValue": "control"}
+    },
+    "savedGroups": {}
+}
+
+
+def _sticky_client_ctx(service, features=STICKY_READ_FEATURES):
+    return patch('growthbook.FeatureRepository.load_features_async',
+                 new_callable=AsyncMock, return_value=features), \
+           patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+                 new_callable=AsyncMock), \
+           patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+                 new_callable=AsyncMock), \
+           Options(
+               api_host="https://localhost.growthbook.io",
+               client_key="test-key",
+               sticky_bucket_service=service,
+           )
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_sync_service_does_not_block_loop():
+    """Deterministic proof the SYNC-service fetch runs OFF the event loop:
+    the fetch blocks its thread on a gate that only a coroutine running on
+    the loop can release. If the fetch ran on the loop, the releaser
+    coroutine could never be scheduled and the gate would time out."""
+    fetch_gate = threading.Event()
+    service = CountingStickyBucketService(fetch_gate=fetch_gate)
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service)
+
+    async def releaser():
+        # Wait (on the loop) until the fetch has actually started in the
+        # executor, then release it — impossible if the loop is blocked.
+        while not service.fetch_started.is_set():
+            await asyncio.sleep(0.001)
+        fetch_gate.set()
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            releaser_task = asyncio.ensure_future(releaser())
+            await client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+            await releaser_task
+
+    assert service.get_all_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_concurrent_refresh_coalesced():
+    """Concurrent evals with identical attributes must trigger exactly one
+    get_all_assignments fetch. The first fetch is gated so all ten evals are
+    provably in flight (queued on the refresh lock) before it completes."""
+    fetch_gate = asyncio.Event()
+    service = AsyncInMemoryStickyBucketService(fetch_gate=fetch_gate)
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            tasks = [
+                asyncio.ensure_future(
+                    client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+                )
+                for _ in range(10)
+            ]
+            # Let every task advance to its await point (first holds the lock
+            # awaiting the gate, the rest park on the lock).
+            for _ in range(5):
+                await asyncio.sleep(0)
+            fetch_gate.set()
+            await asyncio.gather(*tasks)
+
+    assert service.get_all_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_cache_invalidated_on_attribute_change():
+    """Changing user attributes must trigger a fresh service fetch; repeating
+    the same attributes must hit the cache."""
+    service = AsyncInMemoryStickyBucketService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            await client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+            assert service.get_all_calls == 1
+            await client.eval_feature("read-feature", UserContext(attributes={"id": "user-1"}))
+            assert service.get_all_calls == 1  # cache hit
+            await client.eval_feature("read-feature", UserContext(attributes={"id": "user-2"}))
+            assert service.get_all_calls == 2  # attribute change -> refetch
+
+
+# Experiment forcing variation1 (weights [0, 1]) so a sticky bucket
+# assignment doc is written deterministically on first evaluation.
+STICKY_WRITE_FEATURES = {
+    "features": {
+        "exp-feature": {
+            "defaultValue": 0,
+            "rules": [{
+                "key": "exp",
+                "variations": [0, 1],
+                "weights": [0, 1],
+                "meta": [{"key": "control"}, {"key": "variation1"}],
+            }]
+        }
+    },
+    "savedGroups": {}
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("service_flavor", ["sync", "async"])
+async def test_sticky_bucket_write_fire_and_forget(service_flavor):
+    """The in-memory assignment doc must be visible immediately after eval
+    (read-your-writes) while the service write is still parked behind a gate
+    — proving eval never waits on persistence and (for the sync flavor) that
+    the blocking write runs off the event loop. Releasing the gate and
+    flushing makes the write observable."""
+    if service_flavor == "sync":
+        save_gate: Any = threading.Event()
+        service: Any = CountingStickyBucketService(save_gate=save_gate)
+    else:
+        save_gate = asyncio.Event()
+        service = AsyncInMemoryStickyBucketService(save_gate=save_gate)
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_WRITE_FEATURES)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            user = UserContext(attributes={"id": "user-1"})
+            result = await client.eval_feature("exp-feature", user)
+            assert result.value == 1
+
+            # Read-your-writes: in-memory doc updated synchronously during eval
+            assert "id||user-1" in user.sticky_bucket_assignment_docs
+
+            # The write is still gated: eval returned without waiting for it
+            assert "id||user-1" not in service.docs
+
+            save_gate.set()
+            await client.flush_sticky_bucket_saves()
+            assert service.docs["id||user-1"]["assignments"] == {"exp__0": "variation1"}
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_save_failure_is_logged_not_raised(caplog):
+    """A failing save must never propagate into eval; it is logged and the
+    task set is drained."""
+
+    class FailingAsyncService(AsyncInMemoryStickyBucketService):
+        async def save_assignments(self, doc):
+            self.save_calls += 1
+            raise RuntimeError("backend down")
+
+    service = FailingAsyncService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_WRITE_FEATURES)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            result = await client.eval_feature("exp-feature", UserContext(attributes={"id": "user-1"}))
+            assert result.value == 1  # eval unaffected
+            await client.flush_sticky_bucket_saves()
+            assert client._sticky_save_inflight == {}
+            assert client._sticky_save_dirty == set()
+
+    assert service.save_calls == 1
+    assert any("Sticky bucket save failed" in r.message for r in caplog.records)
+
+
+# Two experiment features so one user can accumulate two assignments in
+# one sticky doc.
+STICKY_TWO_EXP_FEATURES = {
+    "features": {
+        "feature-a": {"defaultValue": 0, "rules": [{
+            "key": "exp_a", "variations": [0, 1], "weights": [0, 1],
+            "meta": [{"key": "0"}, {"key": "v"}]}]},
+        "feature-b": {"defaultValue": 0, "rules": [{
+            "key": "exp_b", "variations": [0, 1], "weights": [0, 1],
+            "meta": [{"key": "0"}, {"key": "v"}]}]},
+    },
+    "savedGroups": {}
+}
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_same_id_different_attributes_loses_no_assignments():
+    """Regression: two evaluations with the SAME sticky identifier but
+    DIFFERENT surrounding attributes fetch separate snapshots. Before the
+    authoritative doc map, each snapshot generated a doc missing the other's
+    assignment and unordered saves overwrote each other, silently losing one
+    assignment. Both assignments must survive, regardless of save timing."""
+    save_gate = asyncio.Event()
+    service = AsyncInMemoryStickyBucketService(save_gate=save_gate)
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_TWO_EXP_FEATURES)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            # Same id, different surrounding attributes -> distinct snapshots.
+            # Saves stay parked behind the gate the whole time, so the second
+            # eval can never see the first one's write via the service.
+            await client.eval_feature("feature-a", UserContext(attributes={"id": "1", "x": "1"}))
+            await client.eval_feature("feature-b", UserContext(attributes={"id": "1", "x": "2"}))
+            save_gate.set()
+            await client.flush_sticky_bucket_saves()
+
+    assert service.docs["id||1"]["assignments"] == {"exp_a__0": "v", "exp_b__0": "v"}
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_saves_serialized_per_key():
+    """At most one save per doc key is in flight; writes landing mid-save
+    trigger a trailing save so the service converges to the merged doc."""
+    inflight_peak = 0
+
+    class ProbeService(AsyncInMemoryStickyBucketService):
+        def __init__(self):
+            super().__init__()
+            self._inflight = 0
+            self.release = asyncio.Event()
+
+        async def save_assignments(self, doc):
+            nonlocal inflight_peak
+            self._inflight += 1
+            inflight_peak = max(inflight_peak, self._inflight)
+            self.save_calls += 1
+            await self.release.wait()
+            self.docs[self.get_key(doc["attributeName"], doc["attributeValue"])] = doc
+            self._inflight -= 1
+
+    service = ProbeService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_TWO_EXP_FEATURES)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            await client.eval_feature("feature-a", UserContext(attributes={"id": "1", "x": "1"}))
+            await client.eval_feature("feature-b", UserContext(attributes={"id": "1", "x": "2"}))
+            service.release.set()
+            await client.flush_sticky_bucket_saves()
+
+    assert inflight_peak == 1  # per-key serialization held under concurrent writes
+    assert service.docs["id||1"]["assignments"] == {"exp_a__0": "v", "exp_b__0": "v"}
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_unchanged_assignment_not_resaved():
+    """Re-evaluating with an unchanged assignment must not schedule another
+    save (core's changed=False gate). Regression test: core used to replace
+    an EMPTY shared assignment-docs dict instead of mutating it in place,
+    severing the client's cache reference so every re-eval looked 'changed'
+    and re-saved."""
+    service = AsyncInMemoryStickyBucketService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service, STICKY_WRITE_FEATURES)
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            await client.eval_feature("exp-feature", UserContext(attributes={"id": "user-1"}))
+            await client.flush_sticky_bucket_saves()
+            assert service.save_calls == 1
+
+            await client.eval_feature("exp-feature", UserContext(attributes={"id": "user-1"}))
+            await client.flush_sticky_bucket_saves()
+            assert service.save_calls == 1  # unchanged -> no new save
+
+
+@pytest.mark.asyncio
+async def test_async_user_callbacks_are_scheduled_and_drained():
+    """Coroutine-function callbacks (on_experiment_viewed, on_feature_usage,
+    subscriptions) must be scheduled on the loop instead of silently dropped,
+    and drained by close()."""
+    viewed, usage, subs = [], [], []
+
+    async def on_viewed(experiment, result, user_context):
+        viewed.append(experiment.key)
+
+    async def on_usage(key, result, user_context):
+        usage.append(key)
+
+    async def on_sub(experiment, result):
+        subs.append(experiment.key)
+
+    EnhancedFeatureRepository._instances = {}
+    opts = Options(
+        api_host="https://localhost.growthbook.io",
+        client_key="test-key",
+        on_experiment_viewed=on_viewed,
+        on_feature_usage=on_usage,
+    )
+
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=STICKY_WRITE_FEATURES), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+        async with GrowthBookClient(opts) as client:
+            client.subscribe(on_sub)
+            result = await client.eval_feature("exp-feature", UserContext(attributes={"id": "user-1"}))
+            assert result.value == 1
+            await client.run(
+                Experiment(key="manual-exp", variations=[0, 1], weights=[0, 1]),
+                UserContext(attributes={"id": "user-1"}),
+            )
+        # close() has drained all scheduled callback coroutines
+        assert "exp" in viewed  # experiment key of the feature rule
+        assert "manual-exp" in viewed
+        assert usage == ["exp-feature"]
+        assert "manual-exp" in subs
+
 
 async def getTrackingMock(client: GrowthBookClient):
     """Helper function to mock tracking for tests"""

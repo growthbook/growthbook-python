@@ -25,6 +25,7 @@ from .common_types import (
     StackContext,
     UserContext,
     AbstractStickyBucketService,
+    AbstractAsyncStickyBucketService,
     FeatureRule,
     build_remote_eval_payload,
     features_from_dict,
@@ -867,6 +868,13 @@ class GrowthBook(object):
     ):
         self._remoteEval = remoteEval
         self._cacheKeyAttributes = cacheKeyAttributes
+
+        if isinstance(sticky_bucket_service, AbstractAsyncStickyBucketService):
+            raise ValueError(
+                "AbstractAsyncStickyBucketService is not supported by the synchronous "
+                "GrowthBook class. Use GrowthBookClient, or provide an "
+                "AbstractStickyBucketService implementation."
+            )
 
         if remoteEval:
             validate_remote_eval_options(
