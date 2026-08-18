@@ -54,6 +54,7 @@ class Experiment(object):
         bucketVersion: Optional[int] = None,
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
+        customFields: Optional[Dict[str, Any]] = None,
         **_ignored: Any,
     ) -> None:
         self.key = key
@@ -76,6 +77,9 @@ class Experiment(object):
         self.bucketVersion = bucketVersion or 0
         self.minBucketVersion = minBucketVersion or 0
         self.parentConditions = parentConditions
+        # Custom Fields defined for the experiment in the GrowthBook UI.
+        # Arrives from the API as a flat dict (e.g. {"cfl_abc123": "value"}).
+        self.customFields = customFields or {}
 
         self.fallbackAttribute = None
         if not self.disableStickyBucketing:
@@ -117,6 +121,8 @@ class Experiment(object):
             obj["minBucketVersion"] = self.minBucketVersion
         if self.parentConditions:
             obj["parentConditions"] = self.parentConditions
+        if self.customFields:
+            obj["customFields"] = self.customFields
 
         return obj
 
