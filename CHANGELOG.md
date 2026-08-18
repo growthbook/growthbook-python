@@ -5,17 +5,41 @@
 
 ### Features
 
-* add customFields property to Experiment ([67b91cc](https://github.com/growthbook/growthbook-python/commit/67b91ccb96df070a43b6dc98eddf8f7cdbd36e0d))
-* add customFields property to Experiment ([17f042f](https://github.com/growthbook/growthbook-python/commit/17f042f9f8f9fa926ba8b23bca02f80233c0c3e7))
-* add customFields property to Experiment - Merge pull request [#125](https://github.com/growthbook/growthbook-python/issues/125) from vazarkevych/feat/experiment-custom-fields ([67b91cc](https://github.com/growthbook/growthbook-python/commit/67b91ccb96df070a43b6dc98eddf8f7cdbd36e0d))
-* Async sticky bucket service support - Merge pull request [#128](https://github.com/growthbook/growthbook-python/issues/128) from growthbook/mc/growthbook-async-client-cb160c ([7f8d96a](https://github.com/growthbook/growthbook-python/commit/7f8d96a8942d21ece454f6881493db62e40c733d))
+* Async sticky bucketing for `GrowthBookClient` ([#128](https://github.com/growthbook/growthbook-python/pull/128), [#129](https://github.com/growthbook/growthbook-python/pull/129)):
+  * New `AbstractAsyncStickyBucketService` base class with `async` `get_assignments` / `save_assignments`; override `get_all_assignments` to batch all lookups for a user into one round trip (e.g. a single Redis `MGET`). Existing synchronous `AbstractStickyBucketService` implementations keep working with both clients — the async client offloads their blocking calls to a thread pool.
+  * Sticky bucket reads no longer block the event loop. Assignments are fetched per evaluation for the supplied `UserContext`, matching the JavaScript SDK's multi-user client; concurrent evaluations for the same user share a single cancellation-safe in-flight lookup.
+  * Sticky bucket writes are fire-and-forget: evaluation never waits on persistence. New assignments are immediately visible to later evaluations in the same process, and the client keeps an authoritative in-process copy of every document it has written, so a slow or stale store read can never roll back an assignment. Saves are serialized per document key so completion order cannot regress the stored document.
+  * New `GrowthBookClient.flush_sticky_bucket_saves()` waits for all pending writes to persist (useful for serverless and short-lived processes); `close()` flushes automatically.
+  * Optional bounded read cache for hot users via `Options(sticky_bucket_cache_ttl=..., sticky_bucket_cache_size=...)`; disabled by default.
+* Async user callbacks in `GrowthBookClient` ([#128](https://github.com/growthbook/growthbook-python/pull/128), [#129](https://github.com/growthbook/growthbook-python/pull/129)): `on_experiment_viewed`, `on_feature_usage`, and `subscribe()` callbacks may now be coroutines. They are scheduled on the event loop without blocking evaluation, and a tracking callback that raises is retried on the next evaluation of the same experiment/user pair.
+* Added `customFields` property to `Experiment` ([#125](https://github.com/growthbook/growthbook-python/pull/125))
+
+
+### Performance Improvements
+
+* Lock-free evaluation in `GrowthBookClient`: feature updates now swap an immutable snapshot instead of taking a per-evaluation lock ([#129](https://github.com/growthbook/growthbook-python/pull/129))
+* `stop_refresh()` no longer blocks the event loop during shutdown ([#128](https://github.com/growthbook/growthbook-python/pull/128))
+* In the included benchmark (`tests/scripts/benchmark_async_client.py`: 100 concurrent requests, 1 ms simulated service latency), distinct-user throughput with a network-backed sticky bucket service goes from ~350 evaluations/second with multi-second event-loop stalls on 2.3.x to ~20,000 evaluations/second with sub-2 ms loop lag.
 
 
 ### Bug Fixes
 
-* avoid redundant feature reloads - Merge pull request [#124](https://github.com/growthbook/growthbook-python/issues/124) from vazarkevych/fix/sticky-bucket-redundant-reloads ([573ba3a](https://github.com/growthbook/growthbook-python/commit/573ba3ab6f61705b60e94466cff12cf6ba67a7ba))
-* avoid redundant feature reloads during sticky bucket refresh ([573ba3a](https://github.com/growthbook/growthbook-python/commit/573ba3ab6f61705b60e94466cff12cf6ba67a7ba))
-* avoid redundant feature reloads during sticky bucket refresh ([ef0a45b](https://github.com/growthbook/growthbook-python/commit/ef0a45b914618dfa5273d0c5153a4a201f6c24e6))
+* Sticky bucket refresh no longer triggers a redundant feature reload per identifier attribute in the synchronous client ([#124](https://github.com/growthbook/growthbook-python/pull/124))
+* The shared sticky bucket assignment-docs dict is now mutated in place instead of replaced when initially empty, preserving in-process read-your-writes ([#128](https://github.com/growthbook/growthbook-python/pull/128))
+* The synchronous `GrowthBook` class now raises `ValueError` at construction if given an async sticky bucket service, instead of failing silently at runtime ([#128](https://github.com/growthbook/growthbook-python/pull/128))
+
+
+### Tests and CI
+
+* Synced the conformance corpus with the JavaScript SDK 0.8.0 cases, with documented skips for unsupported contextual-bandit cases ([#130](https://github.com/growthbook/growthbook-python/pull/130))
+* Consumer-facing typing is now checked in CI via a mypy probe; public callback annotations accept both plain functions and coroutines ([#128](https://github.com/growthbook/growthbook-python/pull/128))
+* Replaced sleep-based concurrency tests with deterministic event-gated tests and added a high-concurrency benchmark harness for the async client ([#128](https://github.com/growthbook/growthbook-python/pull/128))
+
+
+### Compatibility notes
+
+* Sticky bucket writes from `GrowthBookClient` are now eventual rather than synchronous with evaluation. Read-your-writes is preserved in-process; short-lived processes should `await client.flush_sticky_bucket_saves()` (or `close()`) before exit to guarantee persistence.
+* `GrowthBookClient` now fetches sticky bucket assignments per evaluation instead of caching them for the lifetime of the process. This matches the JavaScript SDK and picks up cross-process assignment changes promptly, but increases service lookups; opt into bounded caching with `sticky_bucket_cache_ttl` / `sticky_bucket_cache_size` if needed.
 
 ## [2.3.1](https://github.com/growthbook/growthbook-python/compare/v2.3.0...v2.3.1) (2026-06-18)
 
