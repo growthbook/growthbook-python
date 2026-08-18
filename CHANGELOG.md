@@ -1,5 +1,22 @@
 # Changelog
 
+## [2.4.0](https://github.com/growthbook/growthbook-python/compare/v2.3.1...v2.4.0) (2026-08-18)
+
+
+### Features
+
+* add customFields property to Experiment ([67b91cc](https://github.com/growthbook/growthbook-python/commit/67b91ccb96df070a43b6dc98eddf8f7cdbd36e0d))
+* add customFields property to Experiment ([17f042f](https://github.com/growthbook/growthbook-python/commit/17f042f9f8f9fa926ba8b23bca02f80233c0c3e7))
+* add customFields property to Experiment - Merge pull request [#125](https://github.com/growthbook/growthbook-python/issues/125) from vazarkevych/feat/experiment-custom-fields ([67b91cc](https://github.com/growthbook/growthbook-python/commit/67b91ccb96df070a43b6dc98eddf8f7cdbd36e0d))
+* Async sticky bucket service support - Merge pull request [#128](https://github.com/growthbook/growthbook-python/issues/128) from growthbook/mc/growthbook-async-client-cb160c ([7f8d96a](https://github.com/growthbook/growthbook-python/commit/7f8d96a8942d21ece454f6881493db62e40c733d))
+
+
+### Bug Fixes
+
+* avoid redundant feature reloads - Merge pull request [#124](https://github.com/growthbook/growthbook-python/issues/124) from vazarkevych/fix/sticky-bucket-redundant-reloads ([573ba3a](https://github.com/growthbook/growthbook-python/commit/573ba3ab6f61705b60e94466cff12cf6ba67a7ba))
+* avoid redundant feature reloads during sticky bucket refresh ([573ba3a](https://github.com/growthbook/growthbook-python/commit/573ba3ab6f61705b60e94466cff12cf6ba67a7ba))
+* avoid redundant feature reloads during sticky bucket refresh ([ef0a45b](https://github.com/growthbook/growthbook-python/commit/ef0a45b914618dfa5273d0c5153a4a201f6c24e6))
+
 ## [2.3.1](https://github.com/growthbook/growthbook-python/compare/v2.3.0...v2.3.1) (2026-06-18)
 
 
