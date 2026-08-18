@@ -618,12 +618,20 @@ class GrowthBookClient:
         self._subscriptions: Set[Callable[[Experiment, Result], Union[None, Awaitable[None]]]] = set()
         self._subscriptions_lock = threading.Lock()
 
-        # Add sticky bucket cache
-        self._sticky_bucket_cache: Dict[str, Dict[str, Any]] = {
-            'attributes': {},
-            'assignments': {}
-        }
-        self._sticky_bucket_lock = asyncio.Lock()
+        # Per-attributes-key inflight sticky bucket fetches. Concurrent evals
+        # with identical attributes coalesce onto one service fetch; distinct
+        # attributes fetch in parallel. No cross-eval result cache by default
+        # — assignments are fetched per evaluation context, matching the JS
+        # SDK's server-side GrowthBookClient.applyStickyBuckets.
+        self._sticky_bucket_inflight: Dict[str, "asyncio.Future[Dict[str, Any]]"] = {}
+        # Opt-in TTL cache (Options.sticky_bucket_cache_ttl > 0): trades
+        # bounded cross-worker staleness for fewer service round-trips.
+        # Non-positive ttl or size disables caching entirely.
+        self._sticky_cache_enabled = (
+            (self.options.sticky_bucket_cache_ttl or 0) > 0
+            and (self.options.sticky_bucket_cache_size or 0) > 0
+        )
+        self._sticky_bucket_cache: "OrderedDict[str, Any]" = OrderedDict()
         # Authoritative map of every sticky assignment doc THIS process has
         # written: doc key ("attributeName||attributeValue") -> doc. This is
         # the merge base for saves and is overlaid onto every fetched
@@ -681,13 +689,16 @@ class GrowthBookClient:
 
         fut.add_done_callback(_done)
 
-    def _run_user_callback(self, callback: Callable, args: tuple, what: str) -> None:
+    def _run_user_callback(self, callback: Callable, args: tuple, what: str,
+                           on_error: Optional[Callable[[], None]] = None) -> None:
         """Invoke a user callback that may be sync or async.
 
         Called from synchronous eval paths, so a returned awaitable cannot be
         awaited here; it is scheduled fire-and-forget on the running loop
         (drained in close()). Sync exceptions propagate to the caller's
-        existing try/except."""
+        existing try/except. `on_error` fires if the SCHEDULED coroutine
+        fails or cannot be scheduled — sync failures don't need it because
+        they propagate."""
         result = callback(*args)
         if inspect.isawaitable(result):
             try:
@@ -696,12 +707,16 @@ class GrowthBookClient:
                 if asyncio.iscoroutine(result):
                     result.close()
                 logger.error("Async %s callback requires a running event loop; dropped", what)
+                if on_error:
+                    on_error()
                 return
-            self._spawn_tracked(
-                asyncio.ensure_future(result),
-                self._callback_tasks,
-                f"Error in {what} callback",
-            )
+            fut = asyncio.ensure_future(result)
+            if on_error is not None:
+                def _fire_on_error(f: "asyncio.Future[Any]") -> None:
+                    if not f.cancelled() and f.exception():
+                        on_error()
+                fut.add_done_callback(_fire_on_error)
+            self._spawn_tracked(fut, self._callback_tasks, f"Error in {what} callback")
 
     def _track(self, experiment: Experiment, result: Result, user_context: UserContext) -> None:
         """Thread-safe tracking implementation"""
@@ -723,10 +738,19 @@ class GrowthBookClient:
                         self.options.on_experiment_viewed,
                         (experiment, result, user_context),
                         "tracking",
+                        # An async tracking callback is deduped at schedule
+                        # time; if it later fails, un-mark so the impression
+                        # is retried on the next eval — same retry semantics
+                        # as a sync callback that raises.
+                        on_error=lambda: self._untrack(key),
                     )
                     self._tracked[key] = True
                 except Exception:
                     logger.exception("Error in tracking callback")
+
+    def _untrack(self, key: str) -> None:
+        with self._tracked_lock:
+            self._tracked.pop(key, None)
 
     def subscribe(self, callback: Callable[[Experiment, Result], Union[None, Awaitable[None]]]) -> Callable[[], None]:
         """Thread-safe subscription management"""
@@ -792,33 +816,77 @@ class GrowthBookClient:
         
     
     async def _refresh_sticky_buckets(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
-        """Refresh sticky bucket assignments only if attributes have changed.
+        """Fetch sticky bucket assignments for these attributes.
 
         Never blocks the event loop: async services are awaited natively, sync
-        services are offloaded to the default executor. The lock also coalesces
-        concurrent refreshes for identical attributes — waiters hit the cache
-        check after the first fetch completes.
+        services are offloaded to the default executor. Concurrent evals with
+        identical attributes share one inflight fetch; waiters are shielded so
+        one cancelled waiter cannot poison the shared future, and if the OWNER
+        is cancelled, waiters retry (one becomes the new owner).
         """
         service = self.options.sticky_bucket_service
         if not service:
             return {}
 
-        async with self._sticky_bucket_lock:
-            if attributes == self._sticky_bucket_cache['attributes']:
-                return self._overlay_local_sticky_docs(
-                    attributes, self._sticky_bucket_cache['assignments'])
+        key = json.dumps(attributes, sort_keys=True, default=str)
 
+        if self._sticky_cache_enabled:
+            entry = self._sticky_bucket_cache.get(key)
+            if entry is not None:
+                cached_assignments, expires_at = entry
+                if time.monotonic() < expires_at:
+                    self._sticky_bucket_cache.move_to_end(key)
+                    # Re-apply local writes: another snapshot for the same
+                    # identifier may have assigned since this entry was cached.
+                    return self._overlay_local_sticky_docs(attributes, cached_assignments)
+                del self._sticky_bucket_cache[key]
+
+        while True:
+            inflight = self._sticky_bucket_inflight.get(key)
+            if inflight is None:
+                break
+            try:
+                return await asyncio.shield(inflight)
+            except asyncio.CancelledError:
+                if not inflight.cancelled():
+                    raise  # WE were cancelled; the owner fetch continues
+                continue  # owner was cancelled; retry (maybe become owner)
+
+        loop = asyncio.get_running_loop()
+        fut: "asyncio.Future[Dict[str, Any]]" = loop.create_future()
+        self._sticky_bucket_inflight[key] = fut
+        try:
             if isinstance(service, AbstractAsyncStickyBucketService):
                 assignments = await service.get_all_assignments(attributes)
             else:
-                loop = asyncio.get_running_loop()
                 assignments = await loop.run_in_executor(
                     None, service.get_all_assignments, attributes
                 )
             self._overlay_local_sticky_docs(attributes, assignments)
-            self._sticky_bucket_cache['attributes'] = attributes.copy()
-            self._sticky_bucket_cache['assignments'] = assignments
-            return assignments
+        except asyncio.CancelledError:
+            if not fut.cancelled():
+                fut.cancel()
+            raise
+        except Exception as e:
+            if not fut.done():
+                fut.set_exception(e)
+                fut.exception()  # mark retrieved: no GC warning if unawaited
+            raise
+        finally:
+            self._sticky_bucket_inflight.pop(key, None)
+
+        if self._sticky_cache_enabled:
+            self._sticky_bucket_cache[key] = (
+                assignments,
+                time.monotonic() + self.options.sticky_bucket_cache_ttl,
+            )
+            self._sticky_bucket_cache.move_to_end(key)
+            while len(self._sticky_bucket_cache) > self.options.sticky_bucket_cache_size:
+                self._sticky_bucket_cache.popitem(last=False)
+
+        if not fut.done():
+            fut.set_result(assignments)
+        return assignments
 
     _STICKY_DOCS_MAX = 1000  # LRU bound for the authoritative doc map
 
@@ -1047,17 +1115,17 @@ class GrowthBookClient:
             logger.warning("Warning: Received empty features data")
             return
 
-        async with self._context_lock:
+        async with self._context_lock:  # serializes concurrent updaters only
             features = features_from_dict(features_data.get("features"))
             saved_groups = features_data.get("savedGroups", {})
 
-            if self._global_context is None:
-                self._global_context = GlobalContext(
-                    options=self.options, features=features, saved_groups=saved_groups
-                )
-            else:
-                self._global_context.features = features
-                self._global_context.saved_groups = saved_groups
+            # Build a NEW immutable snapshot and swap the reference atomically
+            # (single assignment). In-flight evaluations captured the previous
+            # snapshot and finish against it; new evaluations see this one.
+            # This is what lets evaluations run without any lock.
+            self._global_context = GlobalContext(
+                options=self.options, features=features, saved_groups=saved_groups
+            )
 
     async def __aenter__(self):
         await self.initialize()
@@ -1068,7 +1136,10 @@ class GrowthBookClient:
 
     async def create_evaluation_context(self, user_context: UserContext) -> EvaluationContext:
         """Create evaluation context for feature evaluation"""
-        if self._global_context is None:
+        # Capture the snapshot once; feature updates swap the reference, so
+        # this evaluation runs against a consistent view without locking.
+        global_context = self._global_context
+        if global_context is None:
             raise RuntimeError("GrowthBook client not properly initialized")
 
         if self.options.remote_eval and self._features_repository:
@@ -1105,7 +1176,7 @@ class GrowthBookClient:
 
         return EvaluationContext(
             user=user_context,
-            global_ctx=self._global_context,
+            global_ctx=global_context,
             stack=StackContext(evaluated_features=set()),
             save_sticky_bucket_doc=(
                 self._schedule_sticky_bucket_save
@@ -1113,41 +1184,23 @@ class GrowthBookClient:
             ),
         )
 
-    @asynccontextmanager
-    async def _eval_lock(self):
-        """Lock for the duration of an evaluation.
-
-        In CDN mode this guards against `_global_context` mutations (the
-        shared features dict) during `create_evaluation_context` +
-        `core_eval_feature`.
-
-        In remote-eval mode the EvaluationContext is built fresh per-call
-        from the per-user POST response — no shared state to guard, and
-        holding the lock across the network round-trip would serialize all
-        evaluations through one POST even for unrelated users (a real
-        throughput cliff on busy services)."""
-        if self.options.remote_eval:
-            yield
-        else:
-            async with self._context_lock:
-                yield
-
     async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult:
-        """Evaluate a feature with proper async context management"""
-        async with self._eval_lock():
-            context = await self.create_evaluation_context(user_context)
-            result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
-            # Call feature usage callback if provided
-            if self.options.on_feature_usage:
-                try:
-                    self._run_user_callback(
-                        self.options.on_feature_usage,
-                        (key, result, user_context),
-                        "feature usage",
-                    )
-                except Exception:
-                    logger.exception("Error in feature usage callback")
-            return result
+        """Evaluate a feature. Lock-free: the evaluation context captures an
+        immutable feature snapshot, so concurrent evaluations never contend
+        with each other or with feature updates."""
+        context = await self.create_evaluation_context(user_context)
+        result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
+        # Call feature usage callback if provided
+        if self.options.on_feature_usage:
+            try:
+                self._run_user_callback(
+                    self.options.on_feature_usage,
+                    (key, result, user_context),
+                    "feature usage",
+                )
+            except Exception:
+                logger.exception("Error in feature usage callback")
+        return result
 
     async def is_on(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is enabled with proper async context management"""
@@ -1164,17 +1217,16 @@ class GrowthBookClient:
         return result.value if result.value is not None else fallback
 
     async def run(self, experiment: Experiment, user_context: UserContext) -> Result:
-        """Run experiment with tracking"""
-        async with self._eval_lock():
-            context = await self.create_evaluation_context(user_context)
-            result = run_experiment(
-                experiment=experiment, 
-                evalContext=context,
-                tracking_cb=self._track
-            )
-            # Fire subscriptions synchronously
-            self._fire_subscriptions(experiment, result)
-            return result
+        """Run experiment with tracking. Lock-free, same as eval_feature."""
+        context = await self.create_evaluation_context(user_context)
+        result = run_experiment(
+            experiment=experiment,
+            evalContext=context,
+            tracking_cb=self._track
+        )
+        # Fire subscriptions synchronously
+        self._fire_subscriptions(experiment, result)
+        return result
         
     async def close(self) -> None:
         """Clean shutdown with proper cleanup"""

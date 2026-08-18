@@ -465,6 +465,14 @@ class Options:
     remote_eval: bool = False
     cache_key_attributes: Optional[List[str]] = None
     remote_eval_cache_size: int = 1000
+    # Opt-in sticky bucket prefetch cache for the async client. 0 (default)
+    # disables caching: assignments are fetched per evaluation context,
+    # matching the JS SDK's server-side GrowthBookClient. When > 0, fetched
+    # assignments are reused for this many seconds per attributes dict
+    # (bounded staleness across workers), LRU-bounded by
+    # sticky_bucket_cache_size. Non-positive values disable caching.
+    sticky_bucket_cache_ttl: float = 0
+    sticky_bucket_cache_size: int = 1000
 
 
 @dataclass

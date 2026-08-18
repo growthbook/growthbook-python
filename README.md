@@ -487,6 +487,57 @@ gb = GrowthBook(
 )
 ```
 
+### Async Sticky Bucketing (GrowthBookClient)
+
+The async `GrowthBookClient` supports network-backed sticky bucket services (Redis, DynamoDB, etc.) without blocking the event loop. There are two options:
+
+- **Async services** — subclass `AbstractAsyncStickyBucketService` and implement `async` versions of `get_assignments` / `save_assignments`. Optionally override `get_all_assignments` to batch lookups into one round trip (e.g. a single Redis `MGET`).
+- **Existing sync services** — any `AbstractStickyBucketService` subclass also works with `GrowthBookClient` unchanged; its blocking calls are offloaded to a thread pool.
+
+```python
+import json
+from growthbook import AbstractAsyncStickyBucketService, GrowthBookClient, Options
+
+class RedisStickyBucketService(AbstractAsyncStickyBucketService):
+    def __init__(self, redis):  # e.g. redis.asyncio.Redis
+        self.redis = redis
+
+    async def get_assignments(self, attributeName: str, attributeValue: str):
+        raw = await self.redis.get(self.get_key(attributeName, attributeValue))
+        return json.loads(raw) if raw else None
+
+    async def save_assignments(self, doc: dict) -> None:
+        key = self.get_key(doc["attributeName"], doc["attributeValue"])
+        await self.redis.set(key, json.dumps(doc))
+
+    # Optional: batch all lookups for a user into a single MGET
+    async def get_all_assignments(self, attributes: dict):
+        keys = [self.get_key(k, v) for k, v in attributes.items()]
+        docs = {}
+        for raw in await self.redis.mget(keys):
+            if raw:
+                doc = json.loads(raw)
+                docs[self.get_key(doc["attributeName"], doc["attributeValue"])] = doc
+        return docs
+
+client = GrowthBookClient(Options(
+    api_host="https://cdn.growthbook.io",
+    client_key="sdk-abc123",
+    sticky_bucket_service=RedisStickyBucketService(redis),
+))
+```
+
+Behaviors to be aware of:
+
+- **Reads are per evaluation.** Assignments are fetched for the supplied `UserContext` on each evaluation, matching the JavaScript SDK's multi-user client. Concurrent evaluations for the same user share one in-flight lookup. To trade staleness for fewer lookups on hot users, opt into a bounded cache with `Options(sticky_bucket_cache_ttl=30, sticky_bucket_cache_size=1000)` (seconds / max users; disabled by default).
+- **Writes are fire-and-forget.** Evaluation never waits on persistence. New assignments are immediately visible to later evaluations in the same process (the client keeps an authoritative in-process copy of every document it has written, so a slow or stale store read can never roll back an assignment). Writes from *other* processes become visible on the next fetch.
+- **Flushing.** `await client.flush_sticky_bucket_saves()` waits for all pending writes to persist — useful in serverless environments and tests. `await client.close()` flushes automatically.
+- The synchronous `GrowthBook` class only accepts synchronous services; passing an async service raises `ValueError` at construction.
+
+### Async Callbacks (GrowthBookClient)
+
+With `GrowthBookClient`, the `on_experiment_viewed` and `on_feature_usage` options — and callbacks registered via `client.subscribe()` — may be either regular functions or coroutines. Coroutine callbacks are scheduled on the event loop without blocking evaluation, and a tracking callback that raises is retried on the next evaluation of the same experiment/user pair.
+
 ## Inline Experiments
 
 Instead of declaring all features up-front and referencing them by ids in your code, you can also just run an experiment directly. This is done with the `run` method:
