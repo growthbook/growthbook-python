@@ -73,7 +73,7 @@ gb = TypedGrowthBook(api_host="...", client_key="...")
 
 gb.is_on("dark_mode")                        # OK
 gb.is_on("dark_mod")                         # checker error: typo in feature key
-gb.get_feature_value("max_items", "10")      # checker error: fallback must be int
+gb.get_feature_value("max_items", "10")      # checker error: fallback must be a number
 ```
 
 Regenerate the file whenever your feature list changes (e.g. as a CI step).

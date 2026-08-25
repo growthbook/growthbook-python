@@ -42,13 +42,15 @@ def python_type_for(default_value: Any) -> str:
 
     Mirrors the JS CLI's valueType mapping (boolean/string/number/json);
     ``bool`` is checked before ``int`` because it is an ``int`` subclass.
+    GrowthBook numbers are JS numbers: a feature whose defaultValue happens
+    to be an integer may still serve decimal rule values, so int and float
+    map to one ``Union[int, float]`` type rather than whichever the snapshot
+    contained.
     """
     if isinstance(default_value, bool):
         return "bool"
-    if isinstance(default_value, int):
-        return "int"
-    if isinstance(default_value, float):
-        return "float"
+    if isinstance(default_value, (int, float)):
+        return "Union[int, float]"
     if isinstance(default_value, str):
         return "str"
     if isinstance(default_value, list):
@@ -128,6 +130,8 @@ def generate(payload: Dict[str, Any]) -> str:
     if any("List[" in t for t in feature_types.values()):
         typing_imports.append("List")
     typing_imports.append("Literal")
+    if any("Union[" in t for t in feature_types.values()):
+        typing_imports.append("Union")
     if len(feature_types) > 1:
         typing_imports.append("overload")
     header = _HEADER_TEMPLATE.format(typing_imports=", ".join(typing_imports))

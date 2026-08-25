@@ -24,8 +24,11 @@ class TestPythonTypeFor:
         [
             (True, "bool"),
             (False, "bool"),
-            (1, "int"),
-            (2.5, "float"),
+            # GrowthBook numbers are JS numbers: an int default doesn't pin
+            # the feature to int (rules may serve decimals), so both map to
+            # the same Union.
+            (1, "Union[int, float]"),
+            (2.5, "Union[int, float]"),
             ("x", "str"),
             ([1, 2], "List[Any]"),
             ({"a": 1}, "Dict[str, Any]"),
