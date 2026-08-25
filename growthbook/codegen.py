@@ -60,9 +60,44 @@ def python_type_for(default_value: Any) -> str:
     return "Any"
 
 
-def extract_feature_types(payload: Dict[str, Any]) -> Dict[str, str]:
-    """Return {feature_key: python_type} from an endpoint payload or bare map."""
-    features = payload.get("features", payload)
+# Top-level keys the SDK endpoint response may carry. Used to distinguish the
+# endpoint payload from a bare {feature_key: definition} map that happens to
+# contain a feature literally named "features".
+_ENDPOINT_KEYS = frozenset(
+    {"features", "savedGroups", "encryptedFeatures", "encryptedSavedGroups", "dateUpdated", "status"}
+)
+
+
+def _is_endpoint_payload(payload: Dict[str, Any]) -> bool:
+    """Structural check: endpoint payloads only have known top-level keys, and
+    their "features" value maps feature keys to definition objects."""
+    if "features" not in payload or not set(payload) <= _ENDPOINT_KEYS:
+        return False
+    features = payload["features"]
+    if not isinstance(features, dict):
+        # Malformed endpoint payload; classify as one so validation raises.
+        return True
+    return all(isinstance(definition, dict) for definition in features.values())
+
+
+def extract_feature_types(
+    payload: Dict[str, Any], payload_format: str = "auto"
+) -> Dict[str, str]:
+    """Return {feature_key: python_type} from an endpoint payload or bare map.
+
+    ``payload_format`` is "auto" (structural detection), "payload" (force
+    endpoint-payload interpretation), or "map" (force bare-map interpretation
+    — needed for the ambiguous corner of a bare map whose only feature is
+    named "features").
+    """
+    if payload_format not in ("auto", "payload", "map"):
+        raise ValueError(f"unknown payload_format: {payload_format!r}")
+    if payload_format == "payload" or (
+        payload_format == "auto" and _is_endpoint_payload(payload)
+    ):
+        features = payload.get("features", {})
+    else:
+        features = payload
     if not isinstance(features, dict):
         raise ValueError("features JSON must be an object")
     types: Dict[str, str] = {}
@@ -119,9 +154,9 @@ def _client_class(feature_types: Dict[str, str], is_async: bool) -> str:
     return "\n".join(lines)
 
 
-def generate(payload: Dict[str, Any]) -> str:
+def generate(payload: Dict[str, Any], payload_format: str = "auto") -> str:
     """Generate the typed-client module source from a features payload."""
-    feature_types = extract_feature_types(payload)
+    feature_types = extract_feature_types(payload, payload_format)
     if not feature_types:
         raise ValueError("no features found in input JSON")
     typing_imports = ["TYPE_CHECKING", "Any"]
@@ -157,6 +192,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     )
     parser.add_argument("--input", "-i", required=True, help="features JSON file, or - for stdin")
     parser.add_argument("--output", "-o", default="-", help="output .py file (default: stdout)")
+    parser.add_argument(
+        "--format",
+        choices=["auto", "payload", "map"],
+        default="auto",
+        dest="payload_format",
+        help="input shape: SDK endpoint payload, bare {feature_key: definition} map, "
+        "or auto-detect (default)",
+    )
     args = parser.parse_args(argv)
 
     if args.input == "-":
@@ -165,7 +208,7 @@ def main(argv: Optional[List[str]] = None) -> int:
         with open(args.input, encoding="utf-8") as f:
             payload = json.load(f)
 
-    source = generate(payload)
+    source = generate(payload, args.payload_format)
 
     if args.output == "-":
         sys.stdout.write(source)

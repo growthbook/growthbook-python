@@ -55,6 +55,32 @@ class TestExtractFeatureTypes:
         with pytest.raises(ValueError):
             extract_feature_types({"features": []})
 
+    def test_bare_map_with_feature_named_features(self):
+        # A valid feature literally named "features" must not be mistaken for
+        # the endpoint wrapper: "other" is not an endpoint payload key.
+        payload = {"features": {"defaultValue": True}, "other": {"defaultValue": 1}}
+        assert extract_feature_types(payload) == {
+            "features": "bool",
+            "other": "Union[int, float]",
+        }
+
+    def test_single_bare_feature_named_features(self):
+        # Endpoint wrappers map feature keys to definition objects; a bare
+        # definition (non-dict values) is classified as a bare map.
+        assert extract_feature_types({"features": {"defaultValue": True}}) == {
+            "features": "bool"
+        }
+
+    def test_explicit_payload_format_overrides_detection(self):
+        wrapper = {"features": {"a": {"defaultValue": "x"}}}
+        assert extract_feature_types(wrapper, "payload") == {"a": "str"}
+        # Forced bare-map reading treats the whole object as {key: definition}.
+        assert extract_feature_types(wrapper, "map") == {"features": "Any"}
+
+    def test_unknown_payload_format_rejected(self):
+        with pytest.raises(ValueError):
+            extract_feature_types({"f": {"defaultValue": 1}}, "bogus")
+
 
 class TestGenerate:
     def test_matches_golden_file(self):
