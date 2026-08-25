@@ -41,6 +41,15 @@ def bad_pos_only_cb(
 
 GrowthBook(on_experiment_viewed=bad_pos_only_cb)  # expect-error
 
+# Async callbacks are only supported by the async GrowthBookClient; the sync
+# client never awaits them (the coroutine would be silently dropped).
+async def async_cb(
+    experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext]
+) -> None: ...
+
+
+GrowthBook(on_experiment_viewed=async_cb)  # expect-error
+
 # Typo'd keyword arguments are no longer silently swallowed by checkers.
 Experiment(key="t", variations=[1, 2], weigths=[0.5, 0.5])  # expect-error
 

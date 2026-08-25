@@ -7,7 +7,9 @@ from typing import Any, Dict, List, Optional
 
 from growthbook import (
     Experiment,
+    FeatureResult,
     GrowthBook,
+    GrowthBookClient,
     JSONValue,
     Options,
     Result,
@@ -45,6 +47,25 @@ def kw_only_cb(
 
 
 gb3 = GrowthBook(on_experiment_viewed=kw_only_cb)
+
+# The async client (Options) accepts sync AND async callbacks — awaitables
+# are scheduled on the running loop. Regression guard for the widened types.
+async def async_viewed(
+    experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext]
+) -> None: ...
+
+
+def sync_usage(key: str, result: FeatureResult[Any], user_context: UserContext) -> None: ...
+async def async_usage(key: str, result: FeatureResult[Any], user_context: UserContext) -> None: ...
+def sync_sub(experiment: Experiment[Any], result: Result[Any]) -> None: ...
+async def async_sub(experiment: Experiment[Any], result: Result[Any]) -> None: ...
+
+
+sync_opts = Options(on_experiment_viewed=on_experiment_viewed, on_feature_usage=sync_usage)
+async_opts = Options(on_experiment_viewed=async_viewed, on_feature_usage=async_usage)
+client = GrowthBookClient(async_opts)
+client.subscribe(sync_sub)
+client.subscribe(async_sub)
 
 # Payload dict splats with unknown server keys stay valid.
 payload: Dict[str, Any] = {"key": "t", "variations": [1, 2], "unknownServerField": True}

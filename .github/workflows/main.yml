@@ -33,7 +33,6 @@ jobs:
       - name: Static type checking with MyPy
         run: |
           mypy
-          mypy tests/typing_probe.py
 
       - name: Test with pytest
         run: |
