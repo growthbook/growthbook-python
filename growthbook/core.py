@@ -1019,7 +1019,7 @@ def run_experiment(experiment: Experiment[Any],
             # Mutate in place, never replace: the dict may be shared with the
             # client's sticky bucket cache, and subsequent evals must see this
             # assignment (read-your-writes while persistence is async).
-            evalContext.user.sticky_bucket_assignment_docs[data.get('key')] = doc
+            evalContext.user.sticky_bucket_assignment_docs[data["key"]] = doc
             if evalContext.save_sticky_bucket_doc:
                 # Client-provided persistence hook (the async client schedules
                 # the write off the event loop, fire-and-forget).

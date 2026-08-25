@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 import random
 import logging
 from types import TracebackType
-from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Union, Callable, Awaitable, cast
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Tuple, Union, Callable, Awaitable, cast
 from typing import Set
 
 if TYPE_CHECKING:
@@ -703,7 +703,7 @@ class GrowthBookClient:
 
         fut.add_done_callback(_done)
 
-    def _run_user_callback(self, callback: Callable, args: tuple, what: str,
+    def _run_user_callback(self, callback: Callable[..., Any], args: Tuple[Any, ...], what: str,
                            on_error: Optional[Callable[[], None]] = None,
                            kwargs: Optional[Dict[str, Any]] = None) -> None:
         """Invoke a user callback that may be sync or async.
@@ -914,7 +914,7 @@ class GrowthBookClient:
     _STICKY_DOCS_MAX = 1000  # LRU bound for the authoritative doc map
 
     @staticmethod
-    def _sticky_doc_key(doc: Dict) -> str:
+    def _sticky_doc_key(doc: Dict[str, Any]) -> str:
         return f"{doc['attributeName']}||{doc['attributeValue']}"
 
     def _overlay_local_sticky_docs(self, attributes: Dict[str, Any],
@@ -939,7 +939,7 @@ class GrowthBookClient:
             }
         return assignments
 
-    def _schedule_sticky_bucket_save(self, doc: Dict) -> None:
+    def _schedule_sticky_bucket_save(self, doc: Dict[str, Any]) -> None:
         """Fire-and-forget persistence of a sticky bucket assignment doc.
 
         The doc is first merged into the authoritative per-process map, and

@@ -425,11 +425,11 @@ class AbstractAsyncStickyBucketService(ABC):
     the sync GrowthBook class rejects it at construction."""
 
     @abstractmethod
-    async def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+    async def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict[str, Any]]:
         pass
 
     @abstractmethod
-    async def save_assignments(self, doc: Dict) -> None:
+    async def save_assignments(self, doc: Dict[str, Any]) -> None:
         pass
 
     def get_key(self, attributeName: str, attributeValue: str) -> str:
@@ -437,7 +437,7 @@ class AbstractAsyncStickyBucketService(ABC):
 
     # By default, just loop through all attributes and call get_assignments
     # Override this method in subclasses to perform a multi-query instead
-    async def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
+    async def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
         docs = {}
         for attributeName, attributeValue in attributes.items():
             doc = await self.get_assignments(attributeName, attributeValue)
@@ -572,7 +572,7 @@ class EvaluationContext:
     # When set, core calls this instead of sticky_bucket_service.save_assignments
     # directly, letting the async client schedule persistence off the event loop.
     # None (the default) preserves the sync client's direct-call behavior.
-    save_sticky_bucket_doc: Optional[Callable[[Dict], None]] = None
+    save_sticky_bucket_doc: Optional[Callable[[Dict[str, Any]], None]] = None
 
 
 # ---------------------------------------------------------------------------
