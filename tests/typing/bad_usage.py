@@ -4,7 +4,7 @@ produce a checker error, and untagged lines must stay clean.
 Checked by tests/test_typing.py (and the pyright CI step). If a tagged line
 stops erroring, a type-safety guarantee regressed.
 """
-from typing import Any, Optional
+from typing import Any, Dict, Optional
 
 from growthbook import Experiment, GrowthBook, Result, UserContext
 
@@ -49,6 +49,16 @@ async def async_cb(
 
 
 GrowthBook(on_experiment_viewed=async_cb)  # expect-error
+
+
+# The sync client's event logger must also be synchronous: log_event neither
+# awaits nor schedules a returned coroutine, so it would be silently dropped.
+async def async_logger(
+    event_name: str, properties: Dict[str, Any], user_context: Optional[UserContext]
+) -> None: ...
+
+
+gb.set_event_logger(async_logger)  # expect-error
 
 # Typo'd keyword arguments are no longer silently swallowed by checkers.
 Experiment(key="t", variations=[1, 2], weigths=[0.5, 0.5])  # expect-error

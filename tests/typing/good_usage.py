@@ -61,11 +61,18 @@ def sync_sub(experiment: Experiment[Any], result: Result[Any]) -> None: ...
 async def async_sub(experiment: Experiment[Any], result: Result[Any]) -> None: ...
 
 
+def sync_logger(event_name: str, properties: Dict[str, Any], user_context: Optional[UserContext]) -> None: ...
+async def async_logger(event_name: str, properties: Dict[str, Any], user_context: Optional[UserContext]) -> None: ...
+
+
 sync_opts = Options(on_experiment_viewed=on_experiment_viewed, on_feature_usage=sync_usage)
 async_opts = Options(on_experiment_viewed=async_viewed, on_feature_usage=async_usage)
 client = GrowthBookClient(async_opts)
 client.subscribe(sync_sub)
 client.subscribe(async_sub)
+client.set_event_logger(sync_logger)
+client.set_event_logger(async_logger)
+gb.set_event_logger(sync_logger)
 
 # Payload dict splats with unknown server keys stay valid.
 payload: Dict[str, Any] = {"key": "t", "variations": [1, 2], "unknownServerField": True}

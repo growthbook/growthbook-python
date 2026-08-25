@@ -489,11 +489,11 @@ class TrackingCallback(Protocol):
 # Invoked positionally: (feature_key, feature_result, user_context).
 FeatureUsageCallback = Callable[[str, "FeatureResult[Any]", UserContext], None]
 
-# Invoked positionally: (event_name, properties, user_context). The async
-# client awaits a returned coroutine, so async implementations are allowed.
-EventLogger = Callable[
-    [str, Dict[str, Any], Optional[UserContext]], Union[None, Awaitable[None]]
-]
+# Invoked positionally: (event_name, properties, user_context). The sync
+# GrowthBook client neither awaits nor schedules a returned value, so its
+# event logger must be synchronous (an async def would produce a coroutine
+# that is silently dropped).
+EventLogger = Callable[[str, Dict[str, Any], Optional[UserContext]], None]
 
 # Async-client callback contracts (Options is consumed by GrowthBookClient):
 # the async client schedules returned awaitables on the running loop, so
@@ -516,6 +516,12 @@ class AsyncTrackingCallback(Protocol):
 
 AsyncFeatureUsageCallback = Callable[
     [str, "FeatureResult[Any]", UserContext], Union[None, Awaitable[None]]
+]
+
+# Async-client event logger: the async client awaits a returned coroutine,
+# so implementations may be sync or async.
+AsyncEventLogger = Callable[
+    [str, Dict[str, Any], Optional[UserContext]], Union[None, Awaitable[None]]
 ]
 
 
@@ -544,7 +550,7 @@ class Options:
     tracking_plugins: Optional[List["PluginLike"]] = None
     http_connect_timeout: Optional[int] = None
     http_read_timeout: Optional[int] = None
-    event_logger: Optional[EventLogger] = None
+    event_logger: Optional[AsyncEventLogger] = None
     remote_eval: bool = False
     cache_key_attributes: Optional[List[str]] = None
     remote_eval_cache_size: int = 1000

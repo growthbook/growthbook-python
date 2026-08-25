@@ -1,5 +1,8 @@
 from .common_types import (
     AbstractStickyBucketService,
+    AsyncEventLogger,
+    AsyncFeatureUsageCallback,
+    AsyncTrackingCallback,
     EventLogger,
     Experiment,
     Feature,
@@ -63,6 +66,9 @@ __all__ = [
     "TrackingCallback",
     "FeatureUsageCallback",
     "EventLogger",
+    "AsyncTrackingCallback",
+    "AsyncFeatureUsageCallback",
+    "AsyncEventLogger",
     # Feature loading / caching
     "FeatureRepository",
     "EnhancedFeatureRepository",
@@ -74,6 +80,7 @@ __all__ = [
     "SSEClient",
     # Sticky bucketing
     "AbstractStickyBucketService",
+    "AbstractAsyncStickyBucketService",
     "InMemoryStickyBucketService",
     # Crypto
     "decrypt",

@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from .core import eval_feature as core_eval_feature, run_experiment
 from .common_types import (
     T,
-    EventLogger,
+    AsyncEventLogger,
     Feature,
     GlobalContext,
     Options,
@@ -796,7 +796,7 @@ class GrowthBookClient:
                 logger.exception("Error in subscription callback")
 
 
-    def set_event_logger(self, fn: EventLogger) -> None:
+    def set_event_logger(self, fn: AsyncEventLogger) -> None:
         """Register a callable that will be invoked by log_event.
 
         The callable receives (event_name: str, properties: dict, user_context: UserContext).
