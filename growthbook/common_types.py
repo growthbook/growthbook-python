@@ -24,8 +24,12 @@ from urllib.parse import urlparse as _urlparse
 
 from typing_extensions import Required
 
-if TYPE_CHECKING:
-    from .plugins.base import PluginLike
+# Runtime import (not TYPE_CHECKING): Options is a dataclass with a
+# `tracking_plugins: Optional[List["PluginLike"]]` field, so the name must be
+# resolvable at runtime for typing.get_type_hints(Options) and any dataclass
+# introspection (pydantic, dacite, ...). plugins.base only imports stdlib at
+# runtime, so this is cycle-free.
+from .plugins.base import PluginLike
 
 # Generic feature/experiment value type. Deliberately unbounded: a JSONValue
 # bound would reject TypedDict/dataclass-shaped fallbacks (see JS SDK issue #1729,

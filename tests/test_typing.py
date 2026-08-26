@@ -88,6 +88,23 @@ class TestPublicAPITyping:
         )
 
 
+class TestRuntimeIntrospection:
+    """Annotations must stay resolvable at runtime, not just for checkers."""
+
+    def test_options_type_hints_resolve(self):
+        # Regression: PluginLike used to be TYPE_CHECKING-only, so dataclass
+        # introspection of Options (pydantic, dacite, ...) raised NameError.
+        import typing
+
+        from growthbook import Options
+
+        hints = typing.get_type_hints(Options)
+        assert "tracking_plugins" in hints
+
+    def test_plugin_types_importable_from_root(self):
+        from growthbook import GrowthBookPlugin, PluginLike  # noqa: F401
+
+
 SINGLE_FEATURE_PAYLOAD = {"features": {"only_one": {"defaultValue": True}}}
 
 

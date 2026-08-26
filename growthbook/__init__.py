@@ -39,6 +39,8 @@ from .growthbook_client import (
 
 # Plugin support
 from .plugins import (
+    GrowthBookPlugin,
+    PluginLike,
     GrowthBookTrackingPlugin,
     growthbook_tracking_plugin,
     RequestContextPlugin,
@@ -85,6 +87,8 @@ __all__ = [
     # Crypto
     "decrypt",
     # Plugins
+    "GrowthBookPlugin",
+    "PluginLike",
     "GrowthBookTrackingPlugin",
     "growthbook_tracking_plugin",
     "RequestContextPlugin",

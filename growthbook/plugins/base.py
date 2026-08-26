@@ -10,10 +10,11 @@ if TYPE_CHECKING:
     # surfaces (e.g. only the sync GrowthBook has get/set_attributes), so
     # plugins must narrow before using client-specific members.
     GrowthBookInstance = Union[GrowthBook, GrowthBookClient]
-
-    # What the clients accept in their plugin lists: a GrowthBookPlugin
-    # instance, or a bare callable invoked with the client instance.
-    PluginLike = Union["GrowthBookPlugin", Callable[[GrowthBookInstance], None]]
+else:
+    # Runtime placeholder: the precise union above would need runtime imports
+    # of both client modules (circular). Checkers only ever see the branch
+    # above; runtime introspection (e.g. get_type_hints) sees Any here.
+    GrowthBookInstance = Any
 
 logger = logging.getLogger(__name__)
 
@@ -116,4 +117,11 @@ class GrowthBookPlugin(ABC):
             return func(*args, **kwargs)
         except Exception as e:
             self.logger.error(f"Error in {func.__name__}: {e}")
-            return None 
+            return None
+
+
+# What the clients accept in their plugin lists: a GrowthBookPlugin instance,
+# or a bare callable invoked with the client instance. Defined at runtime
+# (below the class, so no forward ref remains) so get_type_hints(Options) and
+# user annotations can resolve it.
+PluginLike = Union[GrowthBookPlugin, Callable[[GrowthBookInstance], None]]
