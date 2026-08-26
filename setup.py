@@ -10,7 +10,7 @@ with open(path.join(this_directory, 'README.md'), encoding='utf-8') as f:
 
 requirements = [
     'cryptography', 
-    'typing_extensions', 
+    'typing_extensions>=4.5',
     'urllib3',
     'aiohttp>=3.6.0',  # For async HTTP support
 ]
