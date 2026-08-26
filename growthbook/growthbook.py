@@ -13,6 +13,8 @@ import warnings
 from abc import ABC, abstractmethod
 from typing import TYPE_CHECKING, Optional, Any, Set, Tuple, List, Dict, Callable, cast
 
+from typing_extensions import deprecated
+
 if TYPE_CHECKING:
     from .plugins.base import PluginLike
 
@@ -867,14 +869,17 @@ class GrowthBook(object):
         forced_features: Optional[Dict[str, Any]] = None,
         sticky_bucket_service: Optional[AbstractStickyBucketService] = None,
         sticky_bucket_identifier_attributes: Optional[List[str]] = None,
-        savedGroups: Optional[Dict[str, Any]] = None,
+        saved_groups: Optional[Dict[str, Any]] = None,
+        remote_eval: bool = False,
+        cache_key_attributes: Optional[List[str]] = None,
         streaming: bool = False,
         streaming_connection_timeout: int = 30,
         stale_while_revalidate: bool = False,
         stale_ttl: int = 300,  # 5 minutes default
         plugins: Optional[List["PluginLike"]] = None,
         skip_all_experiments: bool = False,
-        # Deprecated args
+        # Deprecated args (camelCase spellings fold into their snake_case
+        # equivalents above; the snake_case value wins when both are given)
         trackingCallback: Optional[TrackingCallback] = None,
         qaMode: bool = False,
         user: Optional[Dict[str, Any]] = None,
@@ -883,11 +888,15 @@ class GrowthBook(object):
         forcedVariations: Optional[Dict[str, Any]] = None,
         http_connect_timeout: Optional[int] = None,
         http_read_timeout: Optional[int] = None,
+        savedGroups: Optional[Dict[str, Any]] = None,
         remoteEval: bool = False,
         cacheKeyAttributes: Optional[List[str]] = None,
     ) -> None:
-        self._remoteEval = remoteEval
-        self._cacheKeyAttributes = cacheKeyAttributes
+        remote_eval = remote_eval or remoteEval
+        saved_groups = saved_groups if saved_groups is not None else savedGroups
+        cache_key_attributes = cache_key_attributes if cache_key_attributes is not None else cacheKeyAttributes
+        self._remoteEval = remote_eval
+        self._cacheKeyAttributes = cache_key_attributes
 
         if isinstance(sticky_bucket_service, AbstractAsyncStickyBucketService):
             raise ValueError(
@@ -896,7 +905,7 @@ class GrowthBook(object):
                 "AbstractStickyBucketService implementation."
             )
 
-        if remoteEval:
+        if remote_eval:
             validate_remote_eval_options(
                 client_key, decryption_key, sticky_bucket_service, api_host
             )
@@ -907,7 +916,7 @@ class GrowthBook(object):
         self._attributes = attributes if attributes is not None else {}
         self._url = url
         self._features: Dict[str, Feature] = {}
-        self._saved_groups = savedGroups if savedGroups is not None else {}
+        self._saved_groups = saved_groups if saved_groups is not None else {}
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
@@ -991,7 +1000,7 @@ class GrowthBook(object):
 
         if self._streaming:
             self.load_features()
-            self.startAutoRefresh()
+            self.start_auto_refresh()
         elif self._stale_while_revalidate:
             # Start background refresh task for stale-while-revalidate
             self.load_features()  # Initial load
@@ -1103,18 +1112,22 @@ class GrowthBook(object):
                 self._features_event_handler(event_data.get('data', '{}'))
 
 
-    def startAutoRefresh(self) -> None:
+    def start_auto_refresh(self) -> None:
         if not self._client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
-       
+
         feature_repo.startAutoRefresh(
-            api_host=self._api_host, 
+            api_host=self._api_host,
             client_key=self._client_key,
             cb=self._dispatch_sse_event,
             streaming_timeout=self._streaming_timeout
         )
 
-    def stopAutoRefresh(self, timeout: float = 10) -> None:
+    @deprecated("startAutoRefresh is deprecated, use start_auto_refresh instead")
+    def startAutoRefresh(self) -> None:
+        return self.start_auto_refresh()
+
+    def stop_auto_refresh(self, timeout: float = 10) -> None:
         """Stop auto refresh with timeout"""
         try:
             if hasattr(feature_repo, 'sse_client') and feature_repo.sse_client:
@@ -1124,8 +1137,12 @@ class GrowthBook(object):
         except Exception as e:
             logger.warning(f"Error stopping auto refresh: {e}")
 
+    @deprecated("stopAutoRefresh is deprecated, use stop_auto_refresh instead")
+    def stopAutoRefresh(self, timeout: float = 10) -> None:
+        return self.stop_auto_refresh(timeout=timeout)
+
+    @deprecated("setFeatures is deprecated, use set_features instead")
     def setFeatures(self, features: Dict[str, Any]) -> None:
-        warnings.warn("setFeatures is deprecated, use set_features instead", DeprecationWarning)
         return self.set_features(features)
 
     def set_features(self, features: Dict[str, Any]) -> None:
@@ -1148,15 +1165,15 @@ class GrowthBook(object):
         finally:
             self._is_updating_features = False
 
+    @deprecated("getFeatures is deprecated, use get_features instead")
     def getFeatures(self) -> Dict[str, Feature]:
-        warnings.warn("getFeatures is deprecated, use get_features instead", DeprecationWarning)
         return self.get_features()
 
     def get_features(self) -> Dict[str, Feature]:
         return self._features
 
+    @deprecated("setAttributes is deprecated, use set_attributes instead")
     def setAttributes(self, attributes: Dict[str, Any]) -> None:
-        warnings.warn("setAttributes is deprecated, use set_attributes instead", DeprecationWarning)
         return self.set_attributes(attributes)
 
     def set_attributes(self, attributes: Dict[str, Any]) -> None:
@@ -1192,8 +1209,8 @@ class GrowthBook(object):
         if self._remoteEval and self._client_key:
             self.load_features()
 
+    @deprecated("getAttributes is deprecated, use get_attributes instead")
     def getAttributes(self) -> Dict[str, Any]:
-        warnings.warn("getAttributes is deprecated, use get_attributes instead", DeprecationWarning)
         return self.get_attributes()
 
     def get_attributes(self) -> Dict[str, Any]:
@@ -1212,7 +1229,7 @@ class GrowthBook(object):
         
         try:
             logger.debug("Stopping auto refresh during destroy")
-            self.stopAutoRefresh(timeout=timeout)
+            self.stop_auto_refresh(timeout=timeout)
         except Exception as e:
             logger.warning(f"Error stopping auto refresh during destroy: {e}")
         
@@ -1281,30 +1298,30 @@ class GrowthBook(object):
         except Exception as e:
             logger.exception("Error in event logger: %s", e)
 
+    @deprecated("isOn is deprecated, use is_on instead")
     def isOn(self, key: str) -> bool:
-        warnings.warn("isOn is deprecated, use is_on instead", DeprecationWarning)
         return self.is_on(key)
 
     def is_on(self, key: str) -> bool:
         return self.eval_feature(key).on
 
+    @deprecated("isOff is deprecated, use is_off instead")
     def isOff(self, key: str) -> bool:
-        warnings.warn("isOff is deprecated, use is_off instead", DeprecationWarning)
         return self.is_off(key)
 
     def is_off(self, key: str) -> bool:
         return self.eval_feature(key).off
 
+    @deprecated("getFeatureValue is deprecated, use get_feature_value instead")
     def getFeatureValue(self, key: str, fallback: T) -> T:
-        warnings.warn("getFeatureValue is deprecated, use get_feature_value instead", DeprecationWarning)
         return self.get_feature_value(key, fallback)
 
     def get_feature_value(self, key: str, fallback: T) -> T:
         res = self.eval_feature(key)
         return cast(T, res.value) if res.value is not None else fallback
 
+    @deprecated("evalFeature is deprecated, use eval_feature instead")
     def evalFeature(self, key: str) -> FeatureResult[Any]:
-        warnings.warn("evalFeature is deprecated, use eval_feature instead", DeprecationWarning)
         return self.eval_feature(key)
     
     def _ensure_fresh_features(self) -> None:
@@ -1380,8 +1397,8 @@ class GrowthBook(object):
                 pass
         return result
 
+    @deprecated("getAllResults is deprecated, use get_all_results instead")
     def getAllResults(self) -> Dict[str, Dict[str, Any]]:
-        warnings.warn("getAllResults is deprecated, use get_all_results instead", DeprecationWarning)
         return self.get_all_results()
 
     def get_all_results(self) -> Dict[str, Dict[str, Any]]:
