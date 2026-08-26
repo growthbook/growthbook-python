@@ -20,7 +20,7 @@ bad_str: str = res.value  # expect-error
 
 
 # Callback with wrong parameter names: crashes at runtime in the sync path.
-def bad_names_cb(exp: Experiment[Any], result: Result[Any], ctx: Optional[UserContext]) -> None: ...
+def bad_names_cb(exp: Experiment[Any], result: Result[Any], ctx: UserContext) -> None: ...
 
 
 GrowthBook(on_experiment_viewed=bad_names_cb)  # expect-error
@@ -35,7 +35,7 @@ GrowthBook(on_experiment_viewed=bad_arity_cb)  # expect-error
 
 # Positional-only parameters cannot accept the keyword invocation.
 def bad_pos_only_cb(
-    experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext], /
+    experiment: Experiment[Any], result: Result[Any], user_context: UserContext, /
 ) -> None: ...
 
 
@@ -44,7 +44,7 @@ GrowthBook(on_experiment_viewed=bad_pos_only_cb)  # expect-error
 # Async callbacks are only supported by the async GrowthBookClient; the sync
 # client never awaits them (the coroutine would be silently dropped).
 async def async_cb(
-    experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext]
+    experiment: Experiment[Any], result: Result[Any], user_context: UserContext
 ) -> None: ...
 
 
@@ -54,7 +54,7 @@ GrowthBook(on_experiment_viewed=async_cb)  # expect-error
 # The sync client's event logger must also be synchronous: log_event neither
 # awaits nor schedules a returned coroutine, so it would be silently dropped.
 async def async_logger(
-    event_name: str, properties: Dict[str, Any], user_context: Optional[UserContext]
+    event_name: str, properties: Dict[str, Any], user_context: UserContext
 ) -> None: ...
 
 

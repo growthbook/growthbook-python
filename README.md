@@ -433,7 +433,7 @@ from growthbook import GrowthBook, Experiment, Result, UserContext
 # The parameter names matter: the SDK invokes this callback
 # with keyword arguments (experiment=, result=, user_context=)
 def on_experiment_viewed(
-    experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext]
+    experiment: Experiment[Any], result: Result[Any], user_context: UserContext
 ) -> None:
   # Use whatever event tracking system you want
   analytics.track(attributes["id"], "Experiment Viewed", {

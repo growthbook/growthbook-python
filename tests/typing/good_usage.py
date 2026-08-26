@@ -32,8 +32,10 @@ upper: str = str_res.value.upper()
 
 
 # Tracking callbacks use these exact parameter names (both clients call by keyword).
+# The clients always pass a real UserContext, so the natural (non-Optional)
+# annotation must be accepted.
 def on_experiment_viewed(
-    experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext]
+    experiment: Experiment[Any], result: Result[Any], user_context: UserContext
 ) -> None: ...
 
 
@@ -42,16 +44,25 @@ gb2 = GrowthBook(on_experiment_viewed=on_experiment_viewed)
 
 # Keyword-only implementations are valid too — the clients only ever call by keyword.
 def kw_only_cb(
-    *, experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext]
+    *, experiment: Experiment[Any], result: Result[Any], user_context: UserContext
 ) -> None: ...
 
 
 gb3 = GrowthBook(on_experiment_viewed=kw_only_cb)
 
+
+# Widening user_context to Optional stays valid (param contravariance).
+def optional_ctx_cb(
+    experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext]
+) -> None: ...
+
+
+gb4 = GrowthBook(on_experiment_viewed=optional_ctx_cb)
+
 # The async client (Options) accepts sync AND async callbacks — awaitables
 # are scheduled on the running loop. Regression guard for the widened types.
 async def async_viewed(
-    experiment: Experiment[Any], result: Result[Any], user_context: Optional[UserContext]
+    experiment: Experiment[Any], result: Result[Any], user_context: UserContext
 ) -> None: ...
 
 
@@ -61,8 +72,8 @@ def sync_sub(experiment: Experiment[Any], result: Result[Any]) -> None: ...
 async def async_sub(experiment: Experiment[Any], result: Result[Any]) -> None: ...
 
 
-def sync_logger(event_name: str, properties: Dict[str, Any], user_context: Optional[UserContext]) -> None: ...
-async def async_logger(event_name: str, properties: Dict[str, Any], user_context: Optional[UserContext]) -> None: ...
+def sync_logger(event_name: str, properties: Dict[str, Any], user_context: UserContext) -> None: ...
+async def async_logger(event_name: str, properties: Dict[str, Any], user_context: UserContext) -> None: ...
 
 
 sync_opts = Options(on_experiment_viewed=on_experiment_viewed, on_feature_usage=sync_usage)

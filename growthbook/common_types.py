@@ -482,7 +482,7 @@ class TrackingCallback(Protocol):
         *,
         experiment: Experiment[Any],
         result: Result[Any],
-        user_context: Optional[UserContext],
+        user_context: UserContext,
     ) -> None: ...
 
 
@@ -493,7 +493,7 @@ FeatureUsageCallback = Callable[[str, "FeatureResult[Any]", UserContext], None]
 # GrowthBook client neither awaits nor schedules a returned value, so its
 # event logger must be synchronous (an async def would produce a coroutine
 # that is silently dropped).
-EventLogger = Callable[[str, Dict[str, Any], Optional[UserContext]], None]
+EventLogger = Callable[[str, Dict[str, Any], UserContext], None]
 
 # Async-client callback contracts (Options is consumed by GrowthBookClient):
 # the async client schedules returned awaitables on the running loop, so
@@ -510,7 +510,7 @@ class AsyncTrackingCallback(Protocol):
         *,
         experiment: Experiment[Any],
         result: Result[Any],
-        user_context: Optional[UserContext],
+        user_context: UserContext,
     ) -> Union[None, Awaitable[None]]: ...
 
 
@@ -521,7 +521,7 @@ AsyncFeatureUsageCallback = Callable[
 # Async-client event logger: the async client awaits a returned coroutine,
 # so implementations may be sync or async.
 AsyncEventLogger = Callable[
-    [str, Dict[str, Any], Optional[UserContext]], Union[None, Awaitable[None]]
+    [str, Dict[str, Any], UserContext], Union[None, Awaitable[None]]
 ]
 
 
