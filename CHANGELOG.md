@@ -1,5 +1,17 @@
 # Changelog
 
+## [3.0.0](https://github.com/growthbook/growthbook-python/compare/v2.4.0...v3.0.0) (2026-08-26)
+
+
+### ⚠ BREAKING CHANGES
+
+* Type Safety for GrowthBook Clients - Merge pull request #126 from growthbook/type-safety-hardening
+
+### Features
+
+* Type Safety for GrowthBook Clients - Merge pull request [#126](https://github.com/growthbook/growthbook-python/issues/126) from growthbook/type-safety-hardening ([154e9c1](https://github.com/growthbook/growthbook-python/commit/154e9c19283dabccc3715e2f8597f4e250ac3d90))
+* typed-client generator for strict feature-key checking ([7ffe31e](https://github.com/growthbook/growthbook-python/commit/7ffe31ebdeb5f64baa1340a2a9370633043ab2cd))
+
 ## [2.4.0](https://github.com/growthbook/growthbook-python/compare/v2.3.1...v2.4.0) (2026-08-18)
 
 
