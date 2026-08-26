@@ -6,7 +6,7 @@ import json
 from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
-from typing import Callable, Optional, Any, Set, Tuple, List, Dict
+from typing import Callable, Optional, Any, Set, Tuple, List, Dict, cast
 from .common_types import EvaluationContext, FeatureResult, Experiment, Filter, Result, UserContext, VariationMeta
 
 
@@ -56,7 +56,7 @@ def isOperatorObject(obj: Any) -> bool:
 def _is_numeric(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
-def getType(attributeValue) -> str:
+def getType(attributeValue: Any) -> str:
     if attributeValue is None:
         return "null"
     if isinstance(attributeValue, bool):
@@ -71,7 +71,7 @@ def getType(attributeValue) -> str:
         return "object"
     return "unknown"
 
-def getPath(attributes, path):
+def getPath(attributes: Dict[str, Any], path: str) -> Any:
     current = attributes
     for segment in path.split("."):
         if isinstance(current, dict) and segment in current:
@@ -80,7 +80,7 @@ def getPath(attributes, path):
             return None
     return current
 
-def evalConditionValue(conditionValue, attributeValue, savedGroups, insensitive: bool = False) -> bool:
+def evalConditionValue(conditionValue: Any, attributeValue: Any, savedGroups: Optional[Dict[str, Any]], insensitive: bool = False) -> bool:
     if isinstance(conditionValue, dict) and isOperatorObject(conditionValue):
         for key, value in conditionValue.items():
             if not evalOperatorCondition(key, attributeValue, value, savedGroups):
@@ -93,7 +93,7 @@ def evalConditionValue(conditionValue, attributeValue, savedGroups, insensitive:
     
     return bool(conditionValue == attributeValue)
 
-def elemMatch(condition, attributeValue, savedGroups) -> bool:
+def elemMatch(condition: Dict[str, Any], attributeValue: Any, savedGroups: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(attributeValue, list):
         return False
 
@@ -107,7 +107,7 @@ def elemMatch(condition, attributeValue, savedGroups) -> bool:
 
     return False
 
-def compare(val1, val2) -> int:
+def compare(val1: Any, val2: Any) -> int:
     # IEEE 754: NaN is unordered with everything (including itself), so the
     # "0 if neither > nor <" fallthrough below would wrongly report equal.
     # Raise instead — callers' existing exception handling gives the right
@@ -135,7 +135,7 @@ def compare(val1, val2) -> int:
         return -1
     return 0
 
-def _js_strict_equal(a, b) -> bool:
+def _js_strict_equal(a: Any, b: Any) -> bool:
     """JS === semantics for $eq/$ne. Routed here instead of compare() so
     $lt/$gt keep their JS-aligned coercion via compare() while $eq stays
     strict.
@@ -161,7 +161,7 @@ def _js_strict_equal(a, b) -> bool:
     return bool(a == b)
 
 
-def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups) -> bool:
+def evalOperatorCondition(operator: str, attributeValue: Any, conditionValue: Any, savedGroups: Any) -> bool:
     if operator == "$eq":
         return _js_strict_equal(attributeValue, conditionValue)
     elif operator == "$ne":
@@ -277,7 +277,7 @@ def evalOperatorCondition(operator, attributeValue, conditionValue, savedGroups)
         return not evalConditionValue(conditionValue, attributeValue, savedGroups)
     return False
 
-def paddedVersionString(input) -> str:
+def paddedVersionString(input: Any) -> str:
     # If input is a number, convert to a string
     if _is_numeric(input):
         input = str(input)
@@ -309,14 +309,14 @@ def _paddedVersionString(input: str) -> str:
     return "-".join([v.rjust(5, " ") if v.isdigit() else v for v in parts])
 
 
-def isIn(conditionValue, attributeValue, insensitive: bool = False) -> bool:
+def isIn(conditionValue: List[Any], attributeValue: Any, insensitive: bool = False) -> bool:
     if insensitive:
         # Helper function to case-fold values (lowercase for strings).
         # Uses Python str.lower(), which is byte-identical to JS toLowerCase()
         # for the relevant inputs: both do Unicode-aware single-char mapping
         # without multi-char folds (e.g., "İ".lower() == "i̇" in both;
         # "ß".lower() == "ß" in both; "Σ".lower() == "σ" in both).
-        def case_fold(val):
+        def case_fold(val: Any) -> Any:
             return val.lower() if isinstance(val, str) else val
         
         # Do an intersection if attribute is an array (insensitive)
@@ -333,7 +333,7 @@ def isIn(conditionValue, attributeValue, insensitive: bool = False) -> bool:
         return bool(set(conditionValue) & set(attributeValue))
     return attributeValue in conditionValue
 
-def isInAll(conditionValue, attributeValue, savedGroups, insensitive: bool = False) -> bool:
+def isInAll(conditionValue: List[Any], attributeValue: Any, savedGroups: Optional[Dict[str, Any]], insensitive: bool = False) -> bool:
     """Check if attributeValue (array) contains all elements in conditionValue"""
     if not isinstance(attributeValue, list):
         return False
@@ -521,7 +521,7 @@ def getBucketRanges(
 def _fire_rule_tracks(
     rule_tracks: List[Dict[str, Any]],
     eval_context: EvaluationContext,
-    tracking_cb: Optional[Callable[[Experiment, Result, UserContext], None]],
+    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]],
 ) -> None:
     """Fire tracking_cb for each deferred experiment-tracking entry attached to
     a remote-eval force rule. The proxy server evaluates experiments server-side
@@ -540,9 +540,9 @@ def _fire_rule_tracks(
         # The proxy emits Result in the JS shape: key/name/passthrough flat at
         # the top level. Python's Result takes those via a nested `meta` dict.
         # Re-pack if no explicit `meta` was provided.
-        meta = res_data.get("meta")
+        meta: Optional[VariationMeta] = res_data.get("meta")
         if meta is None:
-            flat = {k: res_data[k] for k in ("key", "name", "passthrough") if k in res_data}
+            flat = cast(VariationMeta, {k: res_data[k] for k in ("key", "name", "passthrough") if k in res_data})
             meta = flat or None
         try:
             # Experiment accepts **_ignored, so passing the raw proxy dict is safe.
@@ -555,7 +555,7 @@ def _fire_rule_tracks(
                 hashAttribute=res_data.get("hashAttribute", "id"),
                 hashValue=res_data.get("hashValue", ""),
                 featureId=res_data.get("featureId"),
-                meta=meta,  # type: ignore[arg-type]
+                meta=meta,
                 bucket=res_data.get("bucket"),
                 stickyBucketUsed=res_data.get("stickyBucketUsed", False),
             )
@@ -567,9 +567,9 @@ def _fire_rule_tracks(
 def eval_feature(
     key: str,
     evalContext: Optional[EvaluationContext] = None,
-    callback_subscription: Optional[Callable[[Experiment, Result], None]] = None,
-    tracking_cb: Optional[Callable[[Experiment, Result, UserContext], None]] = None
-) -> FeatureResult:
+    callback_subscription: Optional[Callable[[Experiment[Any], Result[Any]], None]] = None,
+    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None
+) -> FeatureResult[Any]:
     """Core feature evaluation logic as a standalone function"""
 
     if evalContext is None:
@@ -689,7 +689,7 @@ def eval_feature(
     logger.debug("Use default value for feature %s", key)
     return FeatureResult(feature.defaultValue, "defaultValue")
 
-def eval_prereqs(parentConditions: List[dict], evalContext: EvaluationContext) -> str:
+def eval_prereqs(parentConditions: List[Dict[str, Any]], evalContext: EvaluationContext) -> str:
     evaluated_features = evalContext.stack.evaluated_features.copy()
 
     for parentCondition in parentConditions:
@@ -790,11 +790,15 @@ def _get_sticky_bucket_variation(
 
     return {'variation': variation}
 
-def run_experiment(experiment: Experiment, 
-                   featureId: Optional[str] = None, 
-                   evalContext: Optional[EvaluationContext] = None, 
-                   tracking_cb: Optional[Callable[[Experiment, Result, UserContext], None]] = None
-                ) -> Result:
+# NOTE: both clients' public run() declare `Experiment[T] -> Result[T]` and
+# rely on this returning the experiment's own variation value (Result[Any] is
+# an unchecked cast at that seam). If a refactor ever makes this return a
+# value that isn't one of experiment.variations, the public inference lies.
+def run_experiment(experiment: Experiment[Any],
+                   featureId: Optional[str] = None,
+                   evalContext: Optional[EvaluationContext] = None,
+                   tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None
+                ) -> Result[Any]:
     if evalContext is None:
         raise ValueError("evalContext is required - run_experiment")
     # 1. If experiment has less than 2 variations, return immediately
@@ -1019,7 +1023,7 @@ def run_experiment(experiment: Experiment,
             # Mutate in place, never replace: the dict may be shared with the
             # client's sticky bucket cache, and subsequent evals must see this
             # assignment (read-your-writes while persistence is async).
-            evalContext.user.sticky_bucket_assignment_docs[data.get('key')] = doc
+            evalContext.user.sticky_bucket_assignment_docs[data["key"]] = doc
             if evalContext.save_sticky_bucket_doc:
                 # Client-provided persistence hook (the async client schedules
                 # the write off the event loop, fire-and-forget).
@@ -1044,7 +1048,12 @@ def run_experiment(experiment: Experiment,
     logger.debug("Assigned variation %d in experiment %s", assigned, experiment.key)
     return result
 
-def _generate_sticky_bucket_assignment_doc(attribute_name: str, attribute_value: str, assignments: dict, evalContext: EvaluationContext):
+def _generate_sticky_bucket_assignment_doc(
+    attribute_name: str,
+    attribute_value: str,
+    assignments: Dict[str, str],
+    evalContext: EvaluationContext,
+) -> Dict[str, Any]:
     key = attribute_name + "||" + attribute_value
     existing_assignments = evalContext.user.sticky_bucket_assignment_docs.get(key, {}).get("assignments", {})
 
@@ -1066,14 +1075,14 @@ def _generate_sticky_bucket_assignment_doc(attribute_name: str, attribute_value:
     }
     
 def _getExperimentResult(
-    experiment: Experiment,
+    experiment: Experiment[Any],
     evalContext: EvaluationContext,
     variationId: int = -1,
     hashUsed: bool = False,
     featureId: Optional[str] = None,
     bucket: Optional[float] = None,
     stickyBucketUsed: bool = False
-) -> Result:
+) -> Result[Any]:
     inExperiment = True
     if variationId < 0 or variationId > len(experiment.variations) - 1:
         variationId = 0

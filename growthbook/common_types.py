@@ -1,36 +1,66 @@
 #!/usr/bin/env python
 
-import sys
-from token import OP
-# Only require typing_extensions if using Python 3.7 or earlier
-if sys.version_info >= (3, 8):
-    from typing import TypedDict
-else:
-    from typing_extensions import TypedDict
-
 from dataclasses import dataclass, field
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union, Set, Tuple
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Awaitable,
+    Callable,
+    Dict,
+    Generic,
+    List,
+    NoReturn,
+    Optional,
+    Protocol,
+    TypedDict,
+    TypeVar,
+    Union,
+    Set,
+    Tuple,
+)
 from enum import Enum
 from abc import ABC, abstractmethod
 from urllib.parse import urlparse as _urlparse
 
-class VariationMeta(TypedDict):
+from typing_extensions import Required
+
+# Runtime import (not TYPE_CHECKING): Options is a dataclass with a
+# `tracking_plugins: Optional[List["PluginLike"]]` field, so the name must be
+# resolvable at runtime for typing.get_type_hints(Options) and any dataclass
+# introspection (pydantic, dacite, ...). plugins.base only imports stdlib at
+# runtime, so this is cycle-free.
+from .plugins.base import PluginLike
+
+# Generic feature/experiment value type. Deliberately unbounded: a JSONValue
+# bound would reject TypedDict/dataclass-shaped fallbacks (see JS SDK issue #1729,
+# where the equivalent bound was shipped and then reverted).
+T = TypeVar("T")
+
+# The shape of a JSON-serializable value, mirroring the JS SDK's JSONValue.
+# Used to annotate payload data; NOT used as a TypeVar bound (see note on T).
+# bool precedes int because bool is an int subclass; int and float together
+# cover the JS `number`.
+JSONValue = Union[None, bool, int, float, str, List["JSONValue"], Dict[str, "JSONValue"]]
+
+# Wire shapes: real payloads routinely omit keys, hence total=False.
+class VariationMeta(TypedDict, total=False):
     key: str
     name: str
     passthrough: bool
 
 
-class Filter(TypedDict):
+class Filter(TypedDict, total=False):
     seed: str
-    ranges: List[Tuple[float, float]]
+    # A filter without ranges is meaningless; the eval loop indexes it directly.
+    ranges: Required[List[Tuple[float, float]]]
     hashVersion: int
     attribute: str
 
-class Experiment(object):
+class Experiment(Generic[T]):
     def __init__(
         self,
         key: str,
-        variations: List[Any],
+        variations: List[T],
         weights: Optional[List[float]] = None,
         active: bool = True,
         status: str = "running",
@@ -55,7 +85,10 @@ class Experiment(object):
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
         customFields: Optional[Dict[str, Any]] = None,
-        **_ignored: Any,
+        # NoReturn makes literal unknown kwargs a checker error (like TS excess
+        # property checks) while **dict payload splats (typed Any) still pass;
+        # at runtime unknown payload keys are swallowed as before.
+        **_ignored: NoReturn,
     ) -> None:
         self.key = key
         self.variations = variations
@@ -148,12 +181,12 @@ class Experiment(object):
             self.force = force
 
 
-class Result(object):
+class Result(Generic[T]):
     def __init__(
         self,
         variationId: int,
         inExperiment: bool,
-        value: Any,
+        value: T,
         hashUsed: bool,
         hashAttribute: str,
         hashValue: str,
@@ -206,13 +239,13 @@ class Result(object):
 
         return obj
 
-class FeatureResult(object):
+class FeatureResult(Generic[T]):
     def __init__(
         self,
-        value: Any,
+        value: Optional[T],
         source: str,
-        experiment: Optional[Experiment] = None,
-        experimentResult: Optional[Result] = None,
+        experiment: Optional[Experiment[T]] = None,
+        experimentResult: Optional[Result[T]] = None,
         ruleId: Optional[str] = None,
     ) -> None:
         self.value = value
@@ -239,7 +272,7 @@ class FeatureResult(object):
         return data
 
 class Feature(object):
-    def __init__(self, defaultValue: Any = None, rules: Optional[List[Any]] = None) -> None:
+    def __init__(self, defaultValue: Any = None, rules: Optional[List[Union["FeatureRule", Dict[str, Any]]]] = None) -> None:
         if rules is None:
             rules = []
         self.defaultValue = defaultValue
@@ -279,7 +312,8 @@ class FeatureRule(object):
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
         tracks: Optional[List[Dict[str, Any]]] = None,
-        **_ignored: Any,
+        # See Experiment.__init__: checker-strict, runtime-permissive.
+        **_ignored: NoReturn,
     ) -> None:
 
         if disableStickyBucketing:
@@ -363,12 +397,16 @@ class FeatureRule(object):
         return data
 
 class AbstractStickyBucketService(ABC):
+    # Assignment docs are Dict[str, Any] with a fixed shape:
+    #   {"attributeName": str, "attributeValue": str, "assignments": Dict[str, str]}
+    # Kept as plain dicts (not TypedDict) so third-party implementations
+    # annotated with Dict stay compatible under type checking.
     @abstractmethod
-    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict[str, Any]]:
         pass
 
     @abstractmethod
-    def save_assignments(self, doc: Dict) -> None:
+    def save_assignments(self, doc: Dict[str, Any]) -> None:
         pass
 
     def get_key(self, attributeName: str, attributeValue: str) -> str:
@@ -376,8 +414,8 @@ class AbstractStickyBucketService(ABC):
 
     # By default, just loop through all attributes and call get_assignments
     # Override this method in subclasses to perform a multi-query instead
-    def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
-        docs = {}
+    def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
+        docs: Dict[str, Dict[str, Any]] = {}
         for attributeName, attributeValue in attributes.items():
             doc = self.get_assignments(attributeName, attributeValue)
             if doc:
@@ -391,11 +429,11 @@ class AbstractAsyncStickyBucketService(ABC):
     the sync GrowthBook class rejects it at construction."""
 
     @abstractmethod
-    async def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+    async def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict[str, Any]]:
         pass
 
     @abstractmethod
-    async def save_assignments(self, doc: Dict) -> None:
+    async def save_assignments(self, doc: Dict[str, Any]) -> None:
         pass
 
     def get_key(self, attributeName: str, attributeValue: str) -> str:
@@ -403,7 +441,7 @@ class AbstractAsyncStickyBucketService(ABC):
 
     # By default, just loop through all attributes and call get_assignments
     # Override this method in subclasses to perform a multi-query instead
-    async def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict]:
+    async def get_all_assignments(self, attributes: Dict[str, str]) -> Dict[str, Dict[str, Any]]:
         docs = {}
         for attributeName, attributeValue in attributes.items():
             doc = await self.get_assignments(attributeName, attributeValue)
@@ -433,6 +471,64 @@ class UserContext:
     sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
     skip_all_experiments: bool = False
 
+
+class TrackingCallback(Protocol):
+    """Callback invoked when a user is assigned to an experiment variation.
+
+    The parameter names are part of the contract: both the sync and async
+    clients invoke this callback with keyword arguments (experiment=...,
+    result=..., user_context=...), so implementations must use these exact
+    names. Positional-only parameters cannot satisfy this contract.
+    """
+
+    def __call__(
+        self,
+        *,
+        experiment: Experiment[Any],
+        result: Result[Any],
+        user_context: UserContext,
+    ) -> None: ...
+
+
+# Invoked positionally: (feature_key, feature_result, user_context).
+FeatureUsageCallback = Callable[[str, "FeatureResult[Any]", UserContext], None]
+
+# Invoked positionally: (event_name, properties, user_context). The sync
+# GrowthBook client neither awaits nor schedules a returned value, so its
+# event logger must be synchronous (an async def would produce a coroutine
+# that is silently dropped).
+EventLogger = Callable[[str, Dict[str, Any], UserContext], None]
+
+# Async-client callback contracts (Options is consumed by GrowthBookClient):
+# the async client schedules returned awaitables on the running loop, so
+# implementations may be sync (return None) or async (return a coroutine).
+# The sync GrowthBook client accepts the sync-only contracts above.
+class AsyncTrackingCallback(Protocol):
+    """Tracking callback for the async client. Same keyword-invocation
+    contract as TrackingCallback (parameter names are part of the contract);
+    additionally may be async — a returned awaitable is scheduled on the
+    running loop, fire-and-forget."""
+
+    def __call__(
+        self,
+        *,
+        experiment: Experiment[Any],
+        result: Result[Any],
+        user_context: UserContext,
+    ) -> Union[None, Awaitable[None]]: ...
+
+
+AsyncFeatureUsageCallback = Callable[
+    [str, "FeatureResult[Any]", UserContext], Union[None, Awaitable[None]]
+]
+
+# Async-client event logger: the async client awaits a returned coroutine,
+# so implementations may be sync or async.
+AsyncEventLogger = Callable[
+    [str, Dict[str, Any], UserContext], Union[None, Awaitable[None]]
+]
+
+
 @dataclass
 class Options:
     url: Optional[str] = None
@@ -453,15 +549,12 @@ class Options:
     refresh_strategy: Optional[FeatureRefreshStrategy] = FeatureRefreshStrategy.STALE_WHILE_REVALIDATE
     sticky_bucket_service: Optional[Union[AbstractStickyBucketService, AbstractAsyncStickyBucketService]] = None
     sticky_bucket_identifier_attributes: Optional[List[str]] = None
-    # Callbacks may be sync (return None) or async (return an awaitable).
-    # The async GrowthBookClient schedules returned awaitables on the loop;
-    # the sync GrowthBook class supports sync callbacks only.
-    on_experiment_viewed: Optional[Callable[[Experiment, Result, Optional[UserContext]], Union[None, Awaitable[None]]]] = None
-    on_feature_usage: Optional[Callable[[str, 'FeatureResult', UserContext], Union[None, Awaitable[None]]]] = None
-    tracking_plugins: Optional[List[Any]] = None
+    on_experiment_viewed: Optional[AsyncTrackingCallback] = None
+    on_feature_usage: Optional[AsyncFeatureUsageCallback] = None
+    tracking_plugins: Optional[List["PluginLike"]] = None
     http_connect_timeout: Optional[int] = None
     http_read_timeout: Optional[int] = None
-    event_logger: Optional[Callable[..., Any]] = None
+    event_logger: Optional[AsyncEventLogger] = None
     remote_eval: bool = False
     cache_key_attributes: Optional[List[str]] = None
     remote_eval_cache_size: int = 1000
@@ -478,7 +571,7 @@ class Options:
 @dataclass
 class GlobalContext:
     options: Options
-    features: Dict[str, Any] = field(default_factory=dict)
+    features: Dict[str, "Feature"] = field(default_factory=dict)
     saved_groups: Dict[str, Any] = field(default_factory=dict)
 
 @dataclass
@@ -489,7 +582,7 @@ class EvaluationContext:
     # When set, core calls this instead of sticky_bucket_service.save_assignments
     # directly, letting the async client schedule persistence off the event loop.
     # None (the default) preserves the sync client's direct-call behavior.
-    save_sticky_bucket_doc: Optional[Callable[[Dict], None]] = None
+    save_sticky_bucket_doc: Optional[Callable[[Dict[str, Any]], None]] = None
 
 
 # ---------------------------------------------------------------------------

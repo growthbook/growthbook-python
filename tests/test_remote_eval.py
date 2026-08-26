@@ -1354,7 +1354,7 @@ async def test_async_rule_tracks_fires_tracking_callback():
     async def post_handler(api_host, client_key, payload):
         return body
 
-    def cb(experiment, result, *_):
+    def cb(experiment, result, user_context):
         tracked.append((experiment.key, result.variationId))
 
     client = await _make_async_client(post_handler, on_experiment_viewed=cb)

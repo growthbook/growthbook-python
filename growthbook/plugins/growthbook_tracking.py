@@ -7,6 +7,8 @@ from .base import GrowthBookPlugin
 
 if TYPE_CHECKING:
     import requests
+
+    from .base import GrowthBookInstance
 else:
     try:
         import requests  # type: ignore
@@ -33,7 +35,7 @@ _TOP_LEVEL_ATTR_KEYS = {
 }
 
 
-def _parse_string(value) -> Optional[str]:
+def _parse_string(value: Any) -> Optional[str]:
     return value if isinstance(value, str) else None
 
 
@@ -96,8 +98,8 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
         track_feature_evaluated: bool = True,
         batch_size: int = 10,
         batch_timeout: float = 10.0,
-        additional_callback: Optional[Callable] = None,
-        **options,
+        additional_callback: Optional[Callable[..., Any]] = None,
+        **options: Any,
     ):
         """
         Initialize GrowthBook tracking plugin.
@@ -135,7 +137,7 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
     # Plugin lifecycle
     # ------------------------------------------------------------------
 
-    def initialize(self, gb_instance) -> None:
+    def initialize(self, gb_instance: "GrowthBookInstance") -> None:
         """Initialize plugin with a GrowthBook instance."""
         try:
             self._client_key = getattr(gb_instance, "_client_key", "") or ""
@@ -169,8 +171,8 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
     # Experiment / feature auto-tracking (legacy hooks)
     # ------------------------------------------------------------------
 
-    def _setup_experiment_tracking(self, gb_instance) -> None:
-        def tracking_wrapper(experiment, result, user_context=None):
+    def _setup_experiment_tracking(self, gb_instance: Any) -> None:
+        def tracking_wrapper(experiment: Any, result: Any, user_context: Any = None) -> None:
             self._track_experiment_viewed(experiment, result)
             if self.additional_callback:
                 self._safe_execute(self.additional_callback, experiment, result, user_context)
@@ -178,10 +180,12 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
         if hasattr(gb_instance, "_trackingCallback"):
             original = gb_instance._trackingCallback
 
-            def legacy_wrapper(experiment, result, user_context=None):
+            def legacy_wrapper(experiment: Any, result: Any, user_context: Any = None) -> None:
                 tracking_wrapper(experiment, result, user_context)
                 if original:
-                    self._safe_execute(original, experiment, result, user_context)
+                    # The user's callback follows the TrackingCallback contract:
+                    # invoked with keyword arguments, same as both clients do.
+                    self._safe_execute(original, experiment=experiment, result=result, user_context=user_context)
 
             gb_instance._trackingCallback = legacy_wrapper
 
@@ -190,10 +194,11 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
         ):
             original = gb_instance.options.on_experiment_viewed
 
-            def async_wrapper(experiment, result, user_context):
+            def async_wrapper(experiment: Any, result: Any, user_context: Any) -> None:
                 tracking_wrapper(experiment, result, user_context)
                 if original:
-                    self._safe_execute(original, experiment, result, user_context)
+                    # Same keyword contract as legacy_wrapper above.
+                    self._safe_execute(original, experiment=experiment, result=result, user_context=user_context)
 
             gb_instance.options.on_experiment_viewed = async_wrapper
 
@@ -203,17 +208,17 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
                 "experiment tracking may not work"
             )
 
-    def _setup_feature_tracking(self, gb_instance) -> None:
+    def _setup_feature_tracking(self, gb_instance: Any) -> None:
         original_eval_feature = gb_instance.eval_feature
 
-        def eval_feature_wrapper(key: str, *args, **kwargs):
+        def eval_feature_wrapper(key: str, *args: Any, **kwargs: Any) -> Any:
             result = original_eval_feature(key, *args, **kwargs)
             self._track_feature_evaluated(key, result, gb_instance)
             return result
 
         gb_instance.eval_feature = eval_feature_wrapper
 
-    def _track_experiment_viewed(self, experiment, result) -> None:
+    def _track_experiment_viewed(self, experiment: Any, result: Any) -> None:
         try:
             attrs: Dict[str, Any] = {}
             if self._gb_instance is not None:
@@ -238,7 +243,7 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
         except Exception as e:
             self.logger.error("Error tracking experiment: %s", e)
 
-    def _track_feature_evaluated(self, feature_key: str, result, gb_instance) -> None:
+    def _track_feature_evaluated(self, feature_key: str, result: Any, gb_instance: Any) -> None:
         try:
             attrs: Dict[str, Any] = getattr(gb_instance, "_attributes", {}) or {}
             props: Dict[str, Any] = {
@@ -270,7 +275,7 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
     # ------------------------------------------------------------------
 
     def _handle_log_event(
-        self, event_name: str, properties: Dict[str, Any], user_context
+        self, event_name: str, properties: Dict[str, Any], user_context: Any
     ) -> None:
         """Called by GrowthBook.log_event / GrowthBookClient.log_event."""
         try:
@@ -369,6 +374,6 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
             return "unknown"
 
 
-def growthbook_tracking_plugin(**options) -> GrowthBookTrackingPlugin:
+def growthbook_tracking_plugin(**options: Any) -> GrowthBookTrackingPlugin:
     """Factory helper — returns a configured :class:`GrowthBookTrackingPlugin`."""
     return GrowthBookTrackingPlugin(**options)

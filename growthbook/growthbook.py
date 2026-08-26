@@ -5,16 +5,24 @@ feature flagging and A/B testing platform.
 More info at https://www.growthbook.io
 """
 import atexit
-import sys
 import json
 import threading
 import logging
 import warnings
 
 from abc import ABC, abstractmethod
-from typing import Optional, Any, Set, Tuple, List, Dict, Callable
+from typing import TYPE_CHECKING, Optional, Any, Set, Tuple, List, Dict, Callable, cast
+
+from typing_extensions import deprecated
+
+if TYPE_CHECKING:
+    from .plugins.base import PluginLike
 
 from .common_types import (
+    T,
+    EventLogger,
+    FeatureUsageCallback,
+    TrackingCallback,
     EvaluationContext,
     Experiment,
     FeatureResult,
@@ -32,12 +40,6 @@ from .common_types import (
     validate_remote_eval_options,
 )
 
-# Only require typing_extensions if using Python 3.7 or earlier
-if sys.version_info >= (3, 8):
-    from typing import TypedDict
-else:
-    from typing_extensions import TypedDict
-
 from base64 import b64decode
 from time import time
 import aiohttp
@@ -47,6 +49,10 @@ from aiohttp.client_exceptions import ClientConnectorError, ClientResponseError,
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from cryptography.hazmat.primitives import padding
 from urllib3 import PoolManager, Timeout
+
+if TYPE_CHECKING:
+    # Only present in urllib3 2.x; the runtime dependency allows 1.x too.
+    from urllib3.response import BaseHTTPResponse
 
 from .core import _getHashValue, eval_feature as core_eval_feature, run_experiment
 
@@ -71,11 +77,11 @@ def decrypt(encrypted_str: str, key_str: str) -> str:
 
 class AbstractFeatureCache(ABC):
     @abstractmethod
-    def get(self, key: str) -> Optional[Dict]:
+    def get(self, key: str) -> Optional[Dict[str, Any]]:
         pass
 
     @abstractmethod
-    def set(self, key: str, value: Dict, ttl: int) -> None:
+    def set(self, key: str, value: Dict[str, Any], ttl: int) -> None:
         pass
 
     def clear(self) -> None:
@@ -83,12 +89,12 @@ class AbstractFeatureCache(ABC):
 
 
 class CacheEntry(object):
-    def __init__(self, value: Dict, ttl: int) -> None:
+    def __init__(self, value: Dict[str, Any], ttl: int) -> None:
         self.value = value
         self.ttl = ttl
         self.expires = time() + ttl
 
-    def update(self, value: Dict):
+    def update(self, value: Dict[str, Any]) -> None:
         self.value = value
         self.expires = time() + self.ttl
 
@@ -97,14 +103,14 @@ class InMemoryFeatureCache(AbstractFeatureCache):
     def __init__(self) -> None:
         self.cache: Dict[str, CacheEntry] = {}
 
-    def get(self, key: str) -> Optional[Dict]:
+    def get(self, key: str) -> Optional[Dict[str, Any]]:
         if key in self.cache:
             entry = self.cache[key]
             if entry.expires >= time():
                 return entry.value
         return None
 
-    def set(self, key: str, value: Dict, ttl: int) -> None:
+    def set(self, key: str, value: Dict[str, Any], ttl: int) -> None:
         if key in self.cache:
             self.cache[key].update(value)
         else:
@@ -115,12 +121,12 @@ class InMemoryFeatureCache(AbstractFeatureCache):
 
 class InMemoryStickyBucketService(AbstractStickyBucketService):
     def __init__(self) -> None:
-        self.docs: Dict[str, Dict] = {}
+        self.docs: Dict[str, Dict[str, Any]] = {}
 
-    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict]:
+    def get_assignments(self, attributeName: str, attributeValue: str) -> Optional[Dict[str, Any]]:
         return self.docs.get(self.get_key(attributeName, attributeValue), None)
 
-    def save_assignments(self, doc: Dict) -> None:
+    def save_assignments(self, doc: Dict[str, Any]) -> None:
         self.docs[self.get_key(doc["attributeName"], doc["attributeValue"])] = doc
 
     def destroy(self) -> None:
@@ -128,7 +134,15 @@ class InMemoryStickyBucketService(AbstractStickyBucketService):
 
 
 class SSEClient:
-    def __init__(self, api_host, client_key, on_event, reconnect_delay=5, headers=None, timeout=30):
+    def __init__(
+        self,
+        api_host: str,
+        client_key: str,
+        on_event: Callable[[Dict[str, Any]], None],
+        reconnect_delay: int = 5,
+        headers: Optional[Dict[str, str]] = None,
+        timeout: int = 30,
+    ) -> None:
         self.api_host = api_host
         self.client_key = client_key
 
@@ -136,9 +150,9 @@ class SSEClient:
         self.reconnect_delay = reconnect_delay
         self.timeout = timeout
 
-        self._sse_session = None
-        self._sse_thread = None
-        self._loop = None
+        self._sse_session: Optional[aiohttp.ClientSession] = None
+        self._sse_thread: Optional[threading.Thread] = None
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
 
         self.is_running = False
 
@@ -151,7 +165,7 @@ class SSEClient:
         if headers:
             self.headers.update(headers)
 
-    def connect(self):
+    def connect(self) -> None:
         if self.is_running:
             logger.debug("Streaming session is already running.")
             return
@@ -161,7 +175,7 @@ class SSEClient:
         self._sse_thread.start()
         atexit.register(self.disconnect)
 
-    def disconnect(self, timeout=10):
+    def disconnect(self, timeout: float = 10) -> None:
         """Gracefully disconnect with timeout"""
         logger.debug("Initiating SSE client disconnect")
         self.is_running = False
@@ -194,7 +208,7 @@ class SSEClient:
         api_host = (api_host or "https://cdn.growthbook.io").rstrip("/")
         return f"{api_host}/sub/{client_key}"
 
-    async def _init_session(self):
+    async def _init_session(self) -> None:
         url = self._get_sse_url(self.api_host, self.client_key)
         
         try:
@@ -233,8 +247,8 @@ class SSEClient:
             # Ensure session is closed on any exit
             await self._close_session()
 
-    async def _process_response(self, response):
-        event_data = {}
+    async def _process_response(self, response: aiohttp.ClientResponse) -> None:
+        event_data: Dict[str, Any] = {}
         try:
             async for line in response.content:
                 # Check for cancellation before processing each line
@@ -285,7 +299,7 @@ class SSEClient:
             logger.warning(f"Error processing SSE response: {e}")
             raise
 
-    async def _wait_for_reconnect(self):
+    async def _wait_for_reconnect(self) -> None:
         logger.info(f"Attempting to reconnect streaming in {self.reconnect_delay} seconds")
         try:
             await asyncio.sleep(self.reconnect_delay)
@@ -293,12 +307,12 @@ class SSEClient:
             logger.debug("Reconnect wait cancelled")
             raise
 
-    async def _close_session(self):
+    async def _close_session(self) -> None:
         if self._sse_session:
             await self._sse_session.close()
             logger.debug("Streaming session closed.")
 
-    def _run_sse_channel(self):
+    def _run_sse_channel(self) -> None:
         self._loop = asyncio.new_event_loop()
         
         try:
@@ -309,7 +323,7 @@ class SSEClient:
             self._loop.run_until_complete(self._loop.shutdown_asyncgens())
             self._loop.close()
 
-    async def _stop_session(self, timeout=10):
+    async def _stop_session(self, timeout: float = 10) -> None:
         """Stop the SSE session and cancel all tasks with timeout"""
         logger.debug("Stopping SSE session")
         
@@ -359,7 +373,7 @@ class FeatureRepository(object):
         self.http_connect_timeout: Optional[int] = None
         self.http_read_timeout: Optional[int] = None
         self.sse_client: Optional[SSEClient] = None
-        self._feature_update_callbacks: List[Callable[[Dict], None]] = []
+        self._feature_update_callbacks: List[Callable[[Dict[str, Any]], None]] = []
         
         # Background refresh support
         self._refresh_thread: Optional[threading.Thread] = None
@@ -375,23 +389,23 @@ class FeatureRepository(object):
     def set_cache(self, cache: AbstractFeatureCache) -> None:
         self.cache = cache
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
         self.cache.clear()
 
-    def save_in_cache(self, key: str, res, ttl: int = 600):
+    def save_in_cache(self, key: str, res: Dict[str, Any], ttl: int = 600) -> None:
         self.cache.set(key, res, ttl)
 
-    def add_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
+    def add_feature_update_callback(self, callback: Callable[[Dict[str, Any]], None]) -> None:
         """Add a callback to be notified when features are updated due to cache expiry"""
         if callback not in self._feature_update_callbacks:
             self._feature_update_callbacks.append(callback)
 
-    def remove_feature_update_callback(self, callback: Callable[[Dict], None]) -> None:
+    def remove_feature_update_callback(self, callback: Callable[[Dict[str, Any]], None]) -> None:
         """Remove a feature update callback"""
         if callback in self._feature_update_callbacks:
             self._feature_update_callbacks.remove(callback)
 
-    def _notify_feature_update_callbacks(self, features_data: Dict) -> None:
+    def _notify_feature_update_callbacks(self, features_data: Dict[str, Any]) -> None:
         """Notify all registered callbacks about feature updates"""
         for callback in self._feature_update_callbacks:
             try:
@@ -410,7 +424,7 @@ class FeatureRepository(object):
         payload: Optional[Dict[str, Any]] = None,
         cache_key_attributes: Optional[List[str]] = None,
         force_refresh: bool = False,
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         if not client_key:
             raise ValueError("Must specify `client_key` to refresh features")
 
@@ -451,7 +465,7 @@ class FeatureRepository(object):
         payload: Optional[Dict[str, Any]] = None,
         cache_key_attributes: Optional[List[str]] = None,
         force_refresh: bool = False,
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         key = self._compute_cache_key(api_host, client_key, remote_eval, payload, cache_key_attributes)
 
         cached = None if force_refresh else self.cache.get(key)
@@ -480,14 +494,14 @@ class FeatureRepository(object):
         self._user_agent_suffix = value
 
     # Perform the GET request (separate method for easy mocking)
-    def _get(self, url: str, headers: Optional[Dict[str, str]] = None):
+    def _get(self, url: str, headers: Optional[Dict[str, str]] = None) -> "BaseHTTPResponse":
         timeout = None
         if self.http_connect_timeout and self.http_read_timeout:
             timeout = Timeout(connect=self.http_connect_timeout, read=self.http_read_timeout)
         self.http = self.http or PoolManager(timeout=timeout)
         return self.http.request("GET", url, headers=headers or {})
     
-    def _get_headers(self, client_key: str, existing_headers: Dict[str, str] = None) -> Dict[str, str]:
+    def _get_headers(self, client_key: str, existing_headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
         headers = existing_headers or {}
         headers['Accept-Encoding'] = "gzip, deflate"
         
@@ -499,7 +513,7 @@ class FeatureRepository(object):
         return headers
 
     # Perform the POST request (separate method for easy mocking)
-    def _post(self, url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None):
+    def _post(self, url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> "BaseHTTPResponse":
         timeout = None
         if self.http_connect_timeout and self.http_read_timeout:
             timeout = Timeout(connect=self.http_connect_timeout, read=self.http_read_timeout)
@@ -509,7 +523,7 @@ class FeatureRepository(object):
 
     def _fetch_and_decode_post(
         self, api_host: str, client_key: str, payload: Dict[str, Any]
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         url = self._get_remote_eval_url(api_host, client_key)
         headers = self._get_headers(client_key)
         headers["Content-Type"] = "application/json"
@@ -521,14 +535,15 @@ class FeatureRepository(object):
                     "Failed to fetch features (remote eval), received status code %d", r.status
                 )
                 return None
-            return json.loads(r.data.decode("utf-8"))  # type: ignore[no-any-return]
+            decoded: Dict[str, Any] = json.loads(r.data.decode("utf-8"))
+            return decoded
         except Exception as e:
             logger.warning(f"Failed to decode remote-eval response: {e}")
             return None
 
     async def _fetch_and_decode_post_async(
         self, api_host: str, client_key: str, payload: Dict[str, Any]
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         url = self._get_remote_eval_url(api_host, client_key)
         headers = self._get_headers(client_key)
         headers["Content-Type"] = "application/json"
@@ -542,7 +557,8 @@ class FeatureRepository(object):
                             response.status,
                         )
                         return None
-                    return await response.json()  # type: ignore[no-any-return]
+                    decoded: Dict[str, Any] = await response.json()
+                    return decoded
         except aiohttp.ClientError as e:
             logger.warning(f"HTTP request failed (remote eval): {e}")
             return None
@@ -550,7 +566,7 @@ class FeatureRepository(object):
             logger.warning(f"Failed to decode remote-eval response: {e}")
             return None
 
-    def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict]:
+    def _fetch_and_decode(self, api_host: str, client_key: str) -> Optional[Dict[str, Any]]:
         url = self._get_features_url(api_host, client_key)
         headers = self._get_headers(client_key)
         logger.debug(f"Fetching features from {url} with headers {headers}")
@@ -587,8 +603,8 @@ class FeatureRepository(object):
                 )
                 return None
             
-            decoded = json.loads(r.data.decode("utf-8"))
-            
+            decoded: Dict[str, Any] = json.loads(r.data.decode("utf-8"))
+
             # Store the new ETag if present
             response_etag = r.headers.get('ETag')
             if response_etag:
@@ -606,12 +622,12 @@ class FeatureRepository(object):
             else:
                 logger.debug("No ETag header in response")
             
-            return decoded  # type: ignore[no-any-return]
+            return decoded
         except Exception as e:
             logger.error(f"Failed to decode feature JSON from GrowthBook API: {e}")
             return None
-        
-    async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict]:
+
+    async def _fetch_and_decode_async(self, api_host: str, client_key: str) -> Optional[Dict[str, Any]]:
         url = self._get_features_url(api_host, client_key)
         headers = self._get_headers(client_key=client_key)
         logger.debug(f"[Async] Fetching features from {url} with headers {headers}")
@@ -646,8 +662,8 @@ class FeatureRepository(object):
                         logger.warning("Failed to fetch features, received status code %d", response.status)
                         return None
                     
-                    decoded = await response.json()
-                    
+                    decoded: Dict[str, Any] = await response.json()
+
                     # Store the new ETag if present
                     response_etag = response.headers.get('ETag')
                     if response_etag:
@@ -665,7 +681,7 @@ class FeatureRepository(object):
                     else:
                         logger.debug("[Async] No ETag header in response")
                     
-                    return decoded  # type: ignore[no-any-return]
+                    return decoded
         except aiohttp.ClientError as e:
             logger.warning(f"HTTP request failed: {e}")
             return None
@@ -673,7 +689,7 @@ class FeatureRepository(object):
             logger.error(f"Failed to decode feature JSON from GrowthBook API: {e}")
             return None
         
-    def decrypt_response(self, data, decryption_key: str):
+    def decrypt_response(self, data: Dict[str, Any], decryption_key: str) -> Optional[Dict[str, Any]]:
         if "encryptedFeatures" in data:
             if not decryption_key:
                 raise ValueError("Must specify decryption_key")
@@ -707,34 +723,40 @@ class FeatureRepository(object):
     # Fetch features from the GrowthBook API
     def _fetch_features(
         self, api_host: str, client_key: str, decryption_key: str = ""
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         decoded = self._fetch_and_decode(api_host, client_key)
         if not decoded:
             return None
 
         data = self.decrypt_response(decoded, decryption_key)
 
-        return data  # type: ignore[no-any-return]
+        return data
 
     async def _fetch_features_async(
         self, api_host: str, client_key: str, decryption_key: str = ""
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         decoded = await self._fetch_and_decode_async(api_host, client_key)
         if not decoded:
             return None
 
         data = self.decrypt_response(decoded, decryption_key)
 
-        return data  # type: ignore[no-any-return]
+        return data
 
 
-    def startAutoRefresh(self, api_host, client_key, cb, streaming_timeout=30):
+    def startAutoRefresh(
+        self,
+        api_host: str,
+        client_key: str,
+        cb: Callable[[Dict[str, Any]], None],
+        streaming_timeout: int = 30,
+    ) -> None:
         if not client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
         self.sse_client = self.sse_client or SSEClient(api_host=api_host, client_key=client_key, on_event=cb, timeout=streaming_timeout)
         self.sse_client.connect()
 
-    def stopAutoRefresh(self, timeout=10):
+    def stopAutoRefresh(self, timeout: float = 10) -> None:
         """Stop auto refresh with timeout"""
         if self.sse_client:
             self.sse_client.disconnect(timeout=timeout)
@@ -833,12 +855,12 @@ class GrowthBook(object):
     def __init__(
         self,
         enabled: bool = True,
-        attributes: dict = {},
+        attributes: Optional[Dict[str, Any]] = None,
         url: str = "",
-        features: dict = {},
+        features: Optional[Dict[str, Any]] = None,
         qa_mode: bool = False,
-        on_experiment_viewed=None,
-        on_feature_usage=None,
+        on_experiment_viewed: Optional[TrackingCallback] = None,
+        on_feature_usage: Optional[FeatureUsageCallback] = None,
         api_host: str = "",
         client_key: str = "",
         decryption_key: str = "",
@@ -847,27 +869,34 @@ class GrowthBook(object):
         forced_features: Optional[Dict[str, Any]] = None,
         sticky_bucket_service: Optional[AbstractStickyBucketService] = None,
         sticky_bucket_identifier_attributes: Optional[List[str]] = None,
-        savedGroups: Optional[Dict[str, Any]] = None,
+        saved_groups: Optional[Dict[str, Any]] = None,
+        remote_eval: bool = False,
+        cache_key_attributes: Optional[List[str]] = None,
         streaming: bool = False,
         streaming_connection_timeout: int = 30,
         stale_while_revalidate: bool = False,
         stale_ttl: int = 300,  # 5 minutes default
-        plugins: Optional[List[Any]] = None,
+        plugins: Optional[List["PluginLike"]] = None,
         skip_all_experiments: bool = False,
-        # Deprecated args
-        trackingCallback=None,
+        # Deprecated args (camelCase spellings fold into their snake_case
+        # equivalents above; the snake_case value wins when both are given)
+        trackingCallback: Optional[TrackingCallback] = None,
         qaMode: bool = False,
-        user: dict = {},
-        groups: dict = {},
-        overrides: dict = {},
-        forcedVariations: dict = {},
+        user: Optional[Dict[str, Any]] = None,
+        groups: Optional[Dict[str, Any]] = None,
+        overrides: Optional[Dict[str, Any]] = None,
+        forcedVariations: Optional[Dict[str, Any]] = None,
         http_connect_timeout: Optional[int] = None,
         http_read_timeout: Optional[int] = None,
+        savedGroups: Optional[Dict[str, Any]] = None,
         remoteEval: bool = False,
         cacheKeyAttributes: Optional[List[str]] = None,
-    ):
-        self._remoteEval = remoteEval
-        self._cacheKeyAttributes = cacheKeyAttributes
+    ) -> None:
+        remote_eval = remote_eval or remoteEval
+        saved_groups = saved_groups if saved_groups is not None else savedGroups
+        cache_key_attributes = cache_key_attributes if cache_key_attributes is not None else cacheKeyAttributes
+        self._remoteEval = remote_eval
+        self._cacheKeyAttributes = cache_key_attributes
 
         if isinstance(sticky_bucket_service, AbstractAsyncStickyBucketService):
             raise ValueError(
@@ -876,7 +905,7 @@ class GrowthBook(object):
                 "AbstractStickyBucketService implementation."
             )
 
-        if remoteEval:
+        if remote_eval:
             validate_remote_eval_options(
                 client_key, decryption_key, sticky_bucket_service, api_host
             )
@@ -884,23 +913,28 @@ class GrowthBook(object):
                 raise ValueError("stale_while_revalidate is not compatible with remote_eval")
 
         self._enabled = enabled
-        self._attributes = attributes
+        self._attributes = attributes if attributes is not None else {}
         self._url = url
         self._features: Dict[str, Feature] = {}
-        self._saved_groups = savedGroups if savedGroups is not None else {}
+        self._saved_groups = saved_groups if saved_groups is not None else {}
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
         self._cache_ttl = cache_ttl
         self.sticky_bucket_identifier_attributes = sticky_bucket_identifier_attributes
         self.sticky_bucket_service = sticky_bucket_service
-        self._sticky_bucket_assignment_docs: dict = {}
+        self._sticky_bucket_assignment_docs: Dict[str, Any] = {}
         self._using_derived_sticky_bucket_attributes = not sticky_bucket_identifier_attributes
-        self._sticky_bucket_attributes: Optional[dict] = None
+        self._sticky_bucket_attributes: Optional[Dict[str, Any]] = None
 
         self._qaMode = qa_mode or qaMode
-        self._trackingCallback = on_experiment_viewed or trackingCallback
-        self._featureUsageCallback = on_feature_usage
+        if trackingCallback is not None:
+            warnings.warn(
+                "trackingCallback is deprecated, use on_experiment_viewed instead",
+                DeprecationWarning,
+            )
+        self._trackingCallback: Optional[TrackingCallback] = on_experiment_viewed or trackingCallback
+        self._featureUsageCallback: Optional[FeatureUsageCallback] = on_feature_usage
         self._skip_all_experiments = skip_all_experiments
 
         self._streaming = streaming
@@ -909,21 +943,21 @@ class GrowthBook(object):
         self._stale_ttl = stale_ttl
 
         # Deprecated args
-        self._user = user
-        self._groups = groups
-        self._overrides = overrides
-        self._forcedVariations = (forced_variations if forced_variations is not None else forcedVariations) if forced_variations is not None or forcedVariations else {}
+        self._user = user if user is not None else {}
+        self._groups = groups if groups is not None else {}
+        self._overrides = overrides if overrides is not None else {}
+        self._forcedVariations = forced_variations if forced_variations is not None else (forcedVariations if forcedVariations is not None else {})
         self._forcedFeatures: Dict[str, Any] = forced_features or {}
 
         self._tracked: Dict[str, Any] = {}
         self._assigned: Dict[str, Any] = {}
-        self._subscriptions: Set[Any] = set()
+        self._subscriptions: Set[Callable[[Experiment[Any], Result[Any]], None]] = set()
         self._is_updating_features = False
-        self._event_logger: Optional[Any] = None
+        self._event_logger: Optional[EventLogger] = None
 
         # support plugins
-        self._plugins: List[Any] = plugins if plugins is not None else []
-        self._initialized_plugins: List[Any] = []
+        self._plugins: List["PluginLike"] = plugins if plugins is not None else []
+        self._initialized_plugins: List["PluginLike"] = []
 
         self._global_ctx = GlobalContext(
             options=Options(
@@ -966,7 +1000,7 @@ class GrowthBook(object):
 
         if self._streaming:
             self.load_features()
-            self.startAutoRefresh()
+            self.start_auto_refresh()
         elif self._stale_while_revalidate:
             # Start background refresh task for stale-while-revalidate
             self.load_features()  # Initial load
@@ -989,7 +1023,7 @@ class GrowthBook(object):
             forced_features=self._forcedFeatures,
         )
 
-    def _on_feature_update(self, features_data: Dict) -> None:
+    def _on_feature_update(self, features_data: Dict[str, Any]) -> None:
         """Callback to handle automatic feature updates from FeatureRepository"""
         if features_data and "features" in features_data:
             self.set_features(features_data["features"])
@@ -1043,7 +1077,7 @@ class GrowthBook(object):
             if "savedGroups" in features:
                 self._saved_groups = features["savedGroups"]
 
-    def _features_event_handler(self, features):
+    def _features_event_handler(self, features: str) -> None:
         decoded = json.loads(features)
         if not decoded:
             return None
@@ -1058,7 +1092,7 @@ class GrowthBook(object):
                 self._saved_groups = data["savedGroups"]
             feature_repo.save_in_cache(key, data, self._cache_ttl)
 
-    def _dispatch_sse_event(self, event_data):
+    def _dispatch_sse_event(self, event_data: Dict[str, Any]) -> None:
         event_type = event_data.get('type')
         if event_type == 'features-updated':
             # In remote-eval mode the proxy emits this event with no inline
@@ -1078,18 +1112,22 @@ class GrowthBook(object):
                 self._features_event_handler(event_data.get('data', '{}'))
 
 
-    def startAutoRefresh(self):
+    def start_auto_refresh(self) -> None:
         if not self._client_key:
             raise ValueError("Must specify `client_key` to start features streaming")
-       
+
         feature_repo.startAutoRefresh(
-            api_host=self._api_host, 
+            api_host=self._api_host,
             client_key=self._client_key,
             cb=self._dispatch_sse_event,
             streaming_timeout=self._streaming_timeout
         )
 
-    def stopAutoRefresh(self, timeout=10):
+    @deprecated("startAutoRefresh is deprecated, use start_auto_refresh instead")
+    def startAutoRefresh(self) -> None:
+        return self.start_auto_refresh()
+
+    def stop_auto_refresh(self, timeout: float = 10) -> None:
         """Stop auto refresh with timeout"""
         try:
             if hasattr(feature_repo, 'sse_client') and feature_repo.sse_client:
@@ -1099,11 +1137,15 @@ class GrowthBook(object):
         except Exception as e:
             logger.warning(f"Error stopping auto refresh: {e}")
 
-    def setFeatures(self, features: dict) -> None:
-        warnings.warn("setFeatures is deprecated, use set_features instead", DeprecationWarning)
+    @deprecated("stopAutoRefresh is deprecated, use stop_auto_refresh instead")
+    def stopAutoRefresh(self, timeout: float = 10) -> None:
+        return self.stop_auto_refresh(timeout=timeout)
+
+    @deprecated("setFeatures is deprecated, use set_features instead")
+    def setFeatures(self, features: Dict[str, Any]) -> None:
         return self.set_features(features)
 
-    def set_features(self, features: dict) -> None:
+    def set_features(self, features: Dict[str, Any]) -> None:
         # Prevent infinite recursion during feature updates
         self._is_updating_features = True
         try:
@@ -1123,18 +1165,18 @@ class GrowthBook(object):
         finally:
             self._is_updating_features = False
 
+    @deprecated("getFeatures is deprecated, use get_features instead")
     def getFeatures(self) -> Dict[str, Feature]:
-        warnings.warn("getFeatures is deprecated, use get_features instead", DeprecationWarning)
         return self.get_features()
 
     def get_features(self) -> Dict[str, Feature]:
         return self._features
 
-    def setAttributes(self, attributes: dict) -> None:
-        warnings.warn("setAttributes is deprecated, use set_attributes instead", DeprecationWarning)
+    @deprecated("setAttributes is deprecated, use set_attributes instead")
+    def setAttributes(self, attributes: Dict[str, Any]) -> None:
         return self.set_attributes(attributes)
 
-    def set_attributes(self, attributes: dict) -> None:
+    def set_attributes(self, attributes: Dict[str, Any]) -> None:
         self._attributes = attributes
         self.refresh_sticky_buckets()
         if self._remoteEval and self._client_key:
@@ -1167,14 +1209,14 @@ class GrowthBook(object):
         if self._remoteEval and self._client_key:
             self.load_features()
 
-    def getAttributes(self) -> dict:
-        warnings.warn("getAttributes is deprecated, use get_attributes instead", DeprecationWarning)
+    @deprecated("getAttributes is deprecated, use get_attributes instead")
+    def getAttributes(self) -> Dict[str, Any]:
         return self.get_attributes()
 
-    def get_attributes(self) -> dict:
+    def get_attributes(self) -> Dict[str, Any]:
         return self._attributes
 
-    def destroy(self, timeout=10) -> None:
+    def destroy(self, timeout: float = 10) -> None:
         """Gracefully destroy the GrowthBook instance"""
         logger.debug("Starting GrowthBook destroy process")
         
@@ -1187,7 +1229,7 @@ class GrowthBook(object):
         
         try:
             logger.debug("Stopping auto refresh during destroy")
-            self.stopAutoRefresh(timeout=timeout)
+            self.stop_auto_refresh(timeout=timeout)
         except Exception as e:
             logger.warning(f"Error stopping auto refresh during destroy: {e}")
         
@@ -1222,7 +1264,7 @@ class GrowthBook(object):
         except Exception as e:
             logger.warning(f"Error clearing internal state: {e}")
 
-    def set_event_logger(self, fn) -> None:
+    def set_event_logger(self, fn: EventLogger) -> None:
         """Register a callable that will be invoked by log_event.
 
         The callable receives (event_name: str, properties: dict, user_context: UserContext).
@@ -1256,30 +1298,30 @@ class GrowthBook(object):
         except Exception as e:
             logger.exception("Error in event logger: %s", e)
 
+    @deprecated("isOn is deprecated, use is_on instead")
     def isOn(self, key: str) -> bool:
-        warnings.warn("isOn is deprecated, use is_on instead", DeprecationWarning)
         return self.is_on(key)
 
     def is_on(self, key: str) -> bool:
         return self.eval_feature(key).on
 
+    @deprecated("isOff is deprecated, use is_off instead")
     def isOff(self, key: str) -> bool:
-        warnings.warn("isOff is deprecated, use is_off instead", DeprecationWarning)
         return self.is_off(key)
 
     def is_off(self, key: str) -> bool:
         return self.eval_feature(key).off
 
-    def getFeatureValue(self, key: str, fallback):
-        warnings.warn("getFeatureValue is deprecated, use get_feature_value instead", DeprecationWarning)
+    @deprecated("getFeatureValue is deprecated, use get_feature_value instead")
+    def getFeatureValue(self, key: str, fallback: T) -> T:
         return self.get_feature_value(key, fallback)
 
-    def get_feature_value(self, key: str, fallback):
+    def get_feature_value(self, key: str, fallback: T) -> T:
         res = self.eval_feature(key)
-        return res.value if res.value is not None else fallback
+        return cast(T, res.value) if res.value is not None else fallback
 
-    def evalFeature(self, key: str) -> FeatureResult:
-        warnings.warn("evalFeature is deprecated, use eval_feature instead", DeprecationWarning)
+    @deprecated("evalFeature is deprecated, use eval_feature instead")
+    def evalFeature(self, key: str) -> FeatureResult[Any]:
         return self.eval_feature(key)
     
     def _ensure_fresh_features(self) -> None:
@@ -1341,7 +1383,7 @@ class GrowthBook(object):
         self._ensure_fresh_features()
         return self._build_eval_context()
 
-    def eval_feature(self, key: str) -> FeatureResult:
+    def eval_feature(self, key: str) -> FeatureResult[Any]:
         result = core_eval_feature(key=key, 
                                    evalContext=self._get_eval_context(), 
                                    callback_subscription=self._fireSubscriptions,
@@ -1355,14 +1397,14 @@ class GrowthBook(object):
                 pass
         return result
 
-    def getAllResults(self):
-        warnings.warn("getAllResults is deprecated, use get_all_results instead", DeprecationWarning)
+    @deprecated("getAllResults is deprecated, use get_all_results instead")
+    def getAllResults(self) -> Dict[str, Dict[str, Any]]:
         return self.get_all_results()
 
-    def get_all_results(self):
+    def get_all_results(self) -> Dict[str, Dict[str, Any]]:
         return self._assigned.copy()
 
-    def _fireSubscriptions(self, experiment: Experiment, result: Result):
+    def _fireSubscriptions(self, experiment: Experiment[Any], result: Result[Any]) -> None:
         if experiment is not None:
             prev = self._assigned.get(experiment.key, None)
             if (
@@ -1380,9 +1422,9 @@ class GrowthBook(object):
                     except Exception:
                         pass
 
-    def run(self, experiment: Experiment) -> Result:
+    def run(self, experiment: Experiment[T]) -> Result[T]:
         # result = self._run(experiment)
-        result = run_experiment(experiment=experiment, 
+        result = run_experiment(experiment=experiment,
                                 evalContext=self._get_eval_context(),
                                 tracking_cb=self._track
                                 )
@@ -1390,11 +1432,11 @@ class GrowthBook(object):
         self._fireSubscriptions(experiment, result)
         return result
 
-    def subscribe(self, callback):
+    def subscribe(self, callback: Callable[[Experiment[Any], Result[Any]], None]) -> Callable[[], None]:
         self._subscriptions.add(callback)
         return lambda: self._subscriptions.remove(callback)
 
-    def _track(self, experiment: Experiment, result: Result, user_context: UserContext) -> None:
+    def _track(self, experiment: Experiment[Any], result: Result[Any], user_context: UserContext) -> None:
         if not self._trackingCallback:
             return None
         key = (
@@ -1420,7 +1462,7 @@ class GrowthBook(object):
                         attributes.add(rule.fallbackAttribute)
         return list(attributes)
 
-    def _get_sticky_bucket_attributes(self) -> dict:
+    def _get_sticky_bucket_attributes(self) -> Dict[str, Any]:
         attributes: Dict[str, str] = {}
         if self._using_derived_sticky_bucket_attributes:
             self.sticky_bucket_identifier_attributes = self._derive_sticky_bucket_identifier_attributes()
@@ -1456,16 +1498,19 @@ class GrowthBook(object):
         """Initialize all plugins with this GrowthBook instance."""
         for plugin in self._plugins:
             try:
-                if hasattr(plugin, 'initialize'):
+                # getattr (not hasattr+access) keeps duck-typed plugin objects
+                # working while narrowing cleanly under both checkers.
+                initialize = getattr(plugin, "initialize", None)
+                if callable(initialize):
                     # Plugin is a class instance with initialize method
-                    plugin.initialize(self)
+                    initialize(self)
                     self._initialized_plugins.append(plugin)
                     logger.debug(f"Initialized plugin: {plugin.__class__.__name__}")
                 elif callable(plugin):
                     # Plugin is a callable function
                     plugin(self)
                     self._initialized_plugins.append(plugin)
-                    logger.debug(f"Initialized callable plugin: {plugin.__name__}")
+                    logger.debug(f"Initialized callable plugin: {getattr(plugin, '__name__', plugin)}")
                 else:
                     logger.warning(f"Plugin {plugin} is neither callable nor has initialize method")
             except Exception as e:
@@ -1485,8 +1530,9 @@ class GrowthBook(object):
         """Cleanup all initialized plugins."""
         for plugin in self._initialized_plugins:
             try:
-                if hasattr(plugin, 'cleanup'):
-                    plugin.cleanup()
+                cleanup = getattr(plugin, "cleanup", None)
+                if callable(cleanup):
+                    cleanup()
                     logger.debug(f"Cleaned up plugin: {plugin.__class__.__name__}")
             except Exception as e:
                 logger.error(f"Error cleaning up plugin {plugin}: {e}")

@@ -4,8 +4,12 @@ import json
 from dataclasses import dataclass, field
 import random
 import logging
-from typing import Any, Dict, List, Optional, Union, Callable, Awaitable
+from types import TracebackType
+from typing import TYPE_CHECKING, Any, AsyncIterator, Dict, List, Optional, Tuple, Union, Callable, Awaitable, cast
 from typing import Set
+
+if TYPE_CHECKING:
+    from .plugins.base import PluginLike
 import asyncio
 import threading
 import time
@@ -17,6 +21,8 @@ from contextlib import asynccontextmanager
 
 from .core import eval_feature as core_eval_feature, run_experiment
 from .common_types import (
+    T,
+    AsyncEventLogger,
     Feature,
     GlobalContext,
     Options,
@@ -48,7 +54,7 @@ class SingletonMeta(type):
     _instances: Dict[Any, Any] = {}
     _lock = threading.Lock()
 
-    def __call__(cls, *args, **kwargs):
+    def __call__(cls, *args: Any, **kwargs: Any) -> Any:
         api_host = args[0] if len(args) > 0 else kwargs.get("api_host", "")
         client_key = args[1] if len(args) > 1 else kwargs.get("client_key", "")
         key = (cls, api_host, client_key)
@@ -65,7 +71,7 @@ class BackoffStrategy:
         max_delay: float = 60.0, 
         multiplier: float = 2.0,
         jitter: float = 0.1
-    ):
+    ) -> None:
         self.initial_delay = initial_delay
         self.max_delay = max_delay
         self.multiplier = multiplier
@@ -92,12 +98,12 @@ class BackoffStrategy:
 
 class WeakRefWrapper:
     """A wrapper class to allow weak references for otherwise non-weak-referenceable objects."""
-    def __init__(self, obj):
+    def __init__(self, obj: Any) -> None:
         self.obj = obj
 
 class FeatureCache:
     """Thread-safe feature cache"""
-    def __init__(self):
+    def __init__(self) -> None:
         self._cache: Dict[str, Dict[str, Any]] = {
             'features': {},
             'savedGroups': {}
@@ -127,7 +133,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                  http_connect_timeout: Optional[int] = None,
                  http_read_timeout: Optional[int] = None,
                  remote_eval_cache_size: int = 1000,
-                 remote_eval: bool = False):
+                 remote_eval: bool = False) -> None:
         FeatureRepository.__init__(self)
         self._api_host = api_host
         self._client_key = client_key
@@ -141,7 +147,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         # down the CDN path on a fresh client.
         self._remote_eval = remote_eval
         self._refresh_lock = threading.Lock()
-        self._refresh_task: Optional[asyncio.Task] = None
+        self._refresh_task: Optional[asyncio.Task[None]] = None
         self._stop_event = asyncio.Event()
         self._backoff = BackoffStrategy()
         self._feature_cache = FeatureCache()
@@ -310,7 +316,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         self._remote_eval_inflight.clear()
 
     @asynccontextmanager
-    async def refresh_operation(self):
+    async def refresh_operation(self) -> AsyncIterator[bool]:
         """Context manager for feature refresh with proper cleanup"""
         if self._refresh_in_progress.locked():
             yield False
@@ -408,6 +414,9 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                 ):
                     logger.debug("Decrypting SSE payload...")
                     data = self.decrypt_response(data, self._decryption_key)
+                    if data is None:
+                        logger.warning("Failed to decrypt SSE payload, skipping update")
+                        return
                     logger.debug(f"🟢 Decrypted. Features keys: {list(data.get('features', {}).keys())}")
 
                 await self._handle_feature_update(data)
@@ -506,7 +515,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
 
         self._refresh_task = asyncio.create_task(refresh_loop())
 
-    async def start_feature_refresh(self, strategy: FeatureRefreshStrategy, callback=None):
+    async def start_feature_refresh(self, strategy: FeatureRefreshStrategy, callback: Optional[Callable[..., Any]] = None) -> None:
         """Initialize feature refresh based on strategy"""
         self._refresh_callback = callback
         
@@ -555,10 +564,15 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                 self._backoff.reset()
         self._stop_event.clear()
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "EnhancedFeatureRepository":
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(
+        self,
+        exc_type: Optional[type],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
         await self.stop_refresh()
     
     async def load_features_async(
@@ -571,7 +585,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         payload: Optional[Dict[str, Any]] = None,
         cache_key_attributes: Optional[List[str]] = None,
         force_refresh: bool = False,
-    ) -> Optional[Dict]:
+    ) -> Optional[Dict[str, Any]]:
         # Use stored values when called internally
         if api_host == self._api_host and client_key == self._client_key:
             decryption_key = self._decryption_key
@@ -587,7 +601,7 @@ class GrowthBookClient:
     def __init__(
         self,
         options: Optional[Union[Dict[str, Any], Options]] = None
-    ):
+    ) -> None:
         self.options = (
             options if isinstance(options, Options)
             else Options(**options) if options
@@ -615,7 +629,7 @@ class GrowthBookClient:
         self._tracked_lock = threading.Lock()
         
         # Thread-safe subscription management
-        self._subscriptions: Set[Callable[[Experiment, Result], Union[None, Awaitable[None]]]] = set()
+        self._subscriptions: Set[Callable[[Experiment[Any], Result[Any]], Union[None, Awaitable[None]]]] = set()
         self._subscriptions_lock = threading.Lock()
 
         # Per-attributes-key inflight sticky bucket fetches. Concurrent evals
@@ -652,8 +666,8 @@ class GrowthBookClient:
         self._callback_tasks: Set["asyncio.Future[Any]"] = set()
         
         # Plugin support
-        self._tracking_plugins: List[Any] = self.options.tracking_plugins or []
-        self._initialized_plugins: List[Any] = []
+        self._tracking_plugins: List["PluginLike"] = self.options.tracking_plugins or []
+        self._initialized_plugins: List["PluginLike"] = []
 
         self._features_repository = (
             EnhancedFeatureRepository(
@@ -689,8 +703,9 @@ class GrowthBookClient:
 
         fut.add_done_callback(_done)
 
-    def _run_user_callback(self, callback: Callable, args: tuple, what: str,
-                           on_error: Optional[Callable[[], None]] = None) -> None:
+    def _run_user_callback(self, callback: Callable[..., Any], args: Tuple[Any, ...], what: str,
+                           on_error: Optional[Callable[[], None]] = None,
+                           kwargs: Optional[Dict[str, Any]] = None) -> None:
         """Invoke a user callback that may be sync or async.
 
         Called from synchronous eval paths, so a returned awaitable cannot be
@@ -699,7 +714,7 @@ class GrowthBookClient:
         existing try/except. `on_error` fires if the SCHEDULED coroutine
         fails or cannot be scheduled — sync failures don't need it because
         they propagate."""
-        result = callback(*args)
+        result = callback(*args, **(kwargs or {}))
         if inspect.isawaitable(result):
             try:
                 asyncio.get_running_loop()
@@ -718,7 +733,7 @@ class GrowthBookClient:
                 fut.add_done_callback(_fire_on_error)
             self._spawn_tracked(fut, self._callback_tasks, f"Error in {what} callback")
 
-    def _track(self, experiment: Experiment, result: Result, user_context: UserContext) -> None:
+    def _track(self, experiment: Experiment[Any], result: Result[Any], user_context: UserContext) -> None:
         """Thread-safe tracking implementation"""
         if not self.options.on_experiment_viewed:
             return
@@ -736,13 +751,21 @@ class GrowthBookClient:
                 try:
                     self._run_user_callback(
                         self.options.on_experiment_viewed,
-                        (experiment, result, user_context),
+                        (),
                         "tracking",
                         # An async tracking callback is deduped at schedule
                         # time; if it later fails, un-mark so the impression
                         # is retried on the next eval — same retry semantics
                         # as a sync callback that raises.
                         on_error=lambda: self._untrack(key),
+                        # Tracking callbacks are invoked by keyword (same
+                        # contract as the sync client): implementations must
+                        # name their params experiment/result/user_context.
+                        kwargs={
+                            "experiment": experiment,
+                            "result": result,
+                            "user_context": user_context,
+                        },
                     )
                     self._tracked[key] = True
                 except Exception:
@@ -752,16 +775,16 @@ class GrowthBookClient:
         with self._tracked_lock:
             self._tracked.pop(key, None)
 
-    def subscribe(self, callback: Callable[[Experiment, Result], Union[None, Awaitable[None]]]) -> Callable[[], None]:
+    def subscribe(self, callback: Callable[[Experiment[Any], Result[Any]], Union[None, Awaitable[None]]]) -> Callable[[], None]:
         """Thread-safe subscription management"""
         with self._subscriptions_lock:
             self._subscriptions.add(callback)
-            def unsubscribe():
+            def unsubscribe() -> None:
                 with self._subscriptions_lock:
                     self._subscriptions.discard(callback)
             return unsubscribe
 
-    def _fire_subscriptions(self, experiment: Experiment, result: Result) -> None:
+    def _fire_subscriptions(self, experiment: Experiment[Any], result: Result[Any]) -> None:
         """Thread-safe subscription notifications"""
         with self._subscriptions_lock:
             subscriptions = self._subscriptions.copy()
@@ -773,7 +796,7 @@ class GrowthBookClient:
                 logger.exception("Error in subscription callback")
 
 
-    def set_event_logger(self, fn) -> None:
+    def set_event_logger(self, fn: AsyncEventLogger) -> None:
         """Register a callable that will be invoked by log_event.
 
         The callable receives (event_name: str, properties: dict, user_context: UserContext).
@@ -811,7 +834,7 @@ class GrowthBookClient:
         except Exception as e:
             logger.exception("Error in event logger: %s", e)
 
-    async def set_features(self, features: dict) -> None:
+    async def set_features(self, features: Dict[str, Any]) -> None:
         await self._feature_update_callback({"features": features})
         
     
@@ -891,7 +914,7 @@ class GrowthBookClient:
     _STICKY_DOCS_MAX = 1000  # LRU bound for the authoritative doc map
 
     @staticmethod
-    def _sticky_doc_key(doc: Dict) -> str:
+    def _sticky_doc_key(doc: Dict[str, Any]) -> str:
         return f"{doc['attributeName']}||{doc['attributeValue']}"
 
     def _overlay_local_sticky_docs(self, attributes: Dict[str, Any],
@@ -916,7 +939,7 @@ class GrowthBookClient:
             }
         return assignments
 
-    def _schedule_sticky_bucket_save(self, doc: Dict) -> None:
+    def _schedule_sticky_bucket_save(self, doc: Dict[str, Any]) -> None:
         """Fire-and-forget persistence of a sticky bucket assignment doc.
 
         The doc is first merged into the authoritative per-process map, and
@@ -1127,11 +1150,16 @@ class GrowthBookClient:
                 options=self.options, features=features, saved_groups=saved_groups
             )
 
-    async def __aenter__(self):
+    async def __aenter__(self) -> "GrowthBookClient":
         await self.initialize()
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
+    async def __aexit__(
+        self,
+        exc_type: Optional[type],
+        exc_val: Optional[BaseException],
+        exc_tb: Optional[TracebackType],
+    ) -> None:
         await self.close()
 
     async def create_evaluation_context(self, user_context: UserContext) -> EvaluationContext:
@@ -1184,7 +1212,7 @@ class GrowthBookClient:
             ),
         )
 
-    async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult:
+    async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult[Any]:
         """Evaluate a feature. Lock-free: the evaluation context captures an
         immutable feature snapshot, so concurrent evaluations never contend
         with each other or with feature updates."""
@@ -1212,11 +1240,11 @@ class GrowthBookClient:
         result = await self.eval_feature(key, user_context)
         return result.off
 
-    async def get_feature_value(self, key: str, fallback: Any, user_context: UserContext) -> Any:
+    async def get_feature_value(self, key: str, fallback: T, user_context: UserContext) -> T:
         result = await self.eval_feature(key, user_context)
-        return result.value if result.value is not None else fallback
+        return cast(T, result.value) if result.value is not None else fallback
 
-    async def run(self, experiment: Experiment, user_context: UserContext) -> Result:
+    async def run(self, experiment: Experiment[T], user_context: UserContext) -> Result[T]:
         """Run experiment with tracking. Lock-free, same as eval_feature."""
         context = await self.create_evaluation_context(user_context)
         result = run_experiment(
@@ -1271,16 +1299,19 @@ class GrowthBookClient:
         """Initialize all tracking plugins with this GrowthBookClient instance."""
         for plugin in self._tracking_plugins:
             try:
-                if hasattr(plugin, 'initialize'):
+                # getattr (not hasattr+access) keeps duck-typed plugin objects
+                # working while narrowing cleanly under both checkers.
+                initialize = getattr(plugin, "initialize", None)
+                if callable(initialize):
                     # Plugin is a class instance with initialize method
-                    plugin.initialize(self)
+                    initialize(self)
                     self._initialized_plugins.append(plugin)
                     logger.debug(f"Initialized plugin: {plugin.__class__.__name__}")
                 elif callable(plugin):
                     # Plugin is a callable function
                     plugin(self)
                     self._initialized_plugins.append(plugin)
-                    logger.debug(f"Initialized callable plugin: {plugin.__name__}")
+                    logger.debug(f"Initialized callable plugin: {getattr(plugin, '__name__', plugin)}")
                 else:
                     logger.warning(f"Plugin {plugin} is neither callable nor has initialize method")
             except Exception as e:
@@ -1290,8 +1321,9 @@ class GrowthBookClient:
         """Cleanup all initialized plugins."""
         for plugin in self._initialized_plugins:
             try:
-                if hasattr(plugin, 'cleanup'):
-                    plugin.cleanup()
+                cleanup = getattr(plugin, "cleanup", None)
+                if callable(cleanup):
+                    cleanup()
                     logger.debug(f"Cleaned up plugin: {plugin.__class__.__name__}")
             except Exception as e:
                 logger.error(f"Error cleaning up plugin {plugin}: {e}")

@@ -19,7 +19,7 @@ Powerful Feature flagging and A/B testing for Python apps.
 
 ## Installation
 
-`pip install growthbook` (recommended) or copy `growthbook.py` into your project
+`pip install growthbook`
 
 ## Type Checking Support
 
@@ -39,6 +39,72 @@ mypy your_code.py
 
 The SDK includes a `py.typed` marker file and is compliant with [PEP 561](https://www.python.org/dev/peps/pep-0561/).
 
+### Built-in type inference
+
+Feature evaluation infers types from the fallback value you provide, and
+experiments infer their result type from the variations — no extra setup:
+
+```python
+# Inferred as `str` from the fallback ("blue")
+color = gb.get_feature_value("button-color", "blue")
+
+# result.value is inferred as `str` from the variations
+result = gb.run(Experiment(key="my-test", variations=["blue", "green"]))
+```
+
+### Strict typing (generated feature keys)
+
+For compile-time checking of feature *keys* and per-key value types — the
+equivalent of the JS SDK's `GrowthBook<AppFeatures>` — generate a typed client
+from your features JSON (the SDK endpoint payload, e.g.
+`https://cdn.growthbook.io/api/features/<client_key>`):
+
+```bash
+python -m growthbook.codegen --input features.json --output growthbook_features.py
+```
+
+If your endpoint has encryption enabled (the payload carries `encryptedFeatures`),
+pass `--decryption-key <key>` to decrypt it before generating.
+
+Then use the generated subclasses anywhere you'd use the plain clients. They
+add zero runtime behavior — all checking happens in mypy/pyright/your IDE:
+
+```python
+from growthbook_features import TypedGrowthBook
+
+gb = TypedGrowthBook(api_host="...", client_key="...")
+
+gb.is_on("dark_mode")                        # OK
+gb.is_on("dark_mod")                         # checker error: typo in feature key
+gb.get_feature_value("max_items", "10")      # checker error: fallback must be a number
+gb.get_feature_value("banner_text", None)    # Optional[str]: None if the flag isn't set
+gb.eval_feature("dark_mode").value           # Optional[bool] instead of Any
+```
+
+The async client gets the same treatment:
+
+```python
+from growthbook_features import TypedGrowthBookClient
+
+client = TypedGrowthBookClient(options)
+color = await client.get_feature_value("banner_text", "hello", user)  # str
+```
+
+For dynamic keys (e.g. looping over feature names), the generated `FeatureKey`
+Literal is the escape hatch:
+
+```python
+from typing import cast
+from growthbook_features import FeatureKey
+
+for k in my_keys:
+    gb.is_on(cast(FeatureKey, k))
+```
+
+Regenerate the file whenever your feature list changes (e.g. as a CI step).
+Features whose type can't be inferred (no `defaultValue` and no typed rules)
+are listed in a warning at generation time and fall back to `Any`.
+
 ## Quick Usage
 
 ```python
@@ -50,7 +116,9 @@ attributes = {
   "customUserAttribute": "foo"
 }
 
-def on_experiment_viewed(experiment, result):
+# The parameter names matter: the SDK invokes this callback
+# with keyword arguments (experiment=, result=, user_context=)
+def on_experiment_viewed(experiment, result, user_context):
   # Use whatever event tracking system you want
   analytics.track(attributes["id"], "Experiment Viewed", {
     'experimentId': experiment.key,
@@ -334,7 +402,7 @@ The GrowthBook constructor has the following parameters:
 - **attributes** (`dict`) - Dictionary of user attributes that are used for targeting and to assign variations
 - **url** (`str`) - The URL of the current request (if applicable)
 - **qa_mode** (`boolean`) - If true, random assignment is disabled and only explicitly forced variations are used.
-- **on_experiment_viewed** (`callable`) - A function that takes `experiment` and `result` as arguments.
+- **on_experiment_viewed** (`callable`) - A function invoked with keyword arguments `experiment`, `result`, and `user_context` when a user is assigned to an experiment. Implementations must use these exact parameter names.
 - **api_host** (`str`) - The GrowthBook API host to fetch feature flags from. Defaults to `https://cdn.growthbook.io`
 - **client_key** (`str`) - The client key that will be passed to the API Host to fetch feature flags
 - **decryption_key** (`str`) - If the GrowthBook API endpoint has encryption enabled, specify the decryption key here
@@ -383,9 +451,14 @@ Any time an experiment is run to determine the value of a feature, you want to t
 You can use the `on_experiment_viewed` option to do this:
 
 ```python
-from growthbook import GrowthBook, Experiment, Result
+from typing import Any, Optional
+from growthbook import GrowthBook, Experiment, Result, UserContext
 
-def on_experiment_viewed(experiment: Experiment, result: Result):
+# The parameter names matter: the SDK invokes this callback
+# with keyword arguments (experiment=, result=, user_context=)
+def on_experiment_viewed(
+    experiment: Experiment[Any], result: Result[Any], user_context: UserContext
+) -> None:
   # Use whatever event tracking system you want
   analytics.track(attributes["id"], "Experiment Viewed", {
     'experimentId': experiment.key,

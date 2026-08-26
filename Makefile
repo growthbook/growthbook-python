@@ -50,7 +50,7 @@ lint: ## check style with flake8
 	flake8 growthbook/growthbook.py --max-line-length=150
 
 type-check:
-	mypy growthbook/growthbook.py --implicit-optional
+	mypy
 
 test: ## run tests quickly with the default Python
 	pytest

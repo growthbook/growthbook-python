@@ -1352,7 +1352,7 @@ async def getTrackingMock(client: GrowthBookClient):
     """Helper function to mock tracking for tests"""
     calls = []
 
-    def track(experiment, result, user_context):
+    def track(*, experiment, result, user_context):
         calls.append([experiment, result, user_context])
 
     client.options.on_experiment_viewed = track

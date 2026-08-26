@@ -1,6 +1,20 @@
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Union, cast
 import logging
+
+if TYPE_CHECKING:
+    from ..growthbook import GrowthBook
+    from ..growthbook_client import GrowthBookClient
+
+    # The client object handed to plugin hooks. The two clients have different
+    # surfaces (e.g. only the sync GrowthBook has get/set_attributes), so
+    # plugins must narrow before using client-specific members.
+    GrowthBookInstance = Union[GrowthBook, GrowthBookClient]
+else:
+    # Runtime placeholder: the precise union above would need runtime imports
+    # of both client modules (circular). Checkers only ever see the branch
+    # above; runtime introspection (e.g. get_type_hints) sees Any here.
+    GrowthBookInstance = Any
 
 logger = logging.getLogger(__name__)
 
@@ -19,15 +33,15 @@ class GrowthBookPlugin(ABC):
     4. cleanup() is called when GrowthBook.destroy() is called
     """
     
-    def __init__(self, **options):
+    def __init__(self, **options: Any) -> None:
         """Initialize plugin with configuration options."""
         self.options = options
         self._initialized = False
-        self._gb_instance = None
+        self._gb_instance: Optional["GrowthBookInstance"] = None
         self.logger = logging.getLogger(f"{self.__class__.__module__}.{self.__class__.__name__}")
     
     @abstractmethod
-    def initialize(self, gb_instance) -> None:
+    def initialize(self, gb_instance: "GrowthBookInstance") -> None:
         """
         Initialize the plugin with a GrowthBook instance.
         
@@ -58,7 +72,7 @@ class GrowthBookPlugin(ABC):
         """Check if plugin has been initialized."""
         return self._initialized
     
-    def _set_initialized(self, gb_instance) -> None:
+    def _set_initialized(self, gb_instance: "GrowthBookInstance") -> None:
         """Mark plugin as initialized and store GrowthBook reference."""
         self._initialized = True
         self._gb_instance = gb_instance
@@ -78,14 +92,17 @@ class GrowthBookPlugin(ABC):
         if not self._gb_instance:
             self.logger.warning("Cannot merge attributes - plugin not initialized")
             return
-        
-        current_attributes = self._gb_instance.get_attributes()
+
+        # Attribute merging only exists on the sync client; calling this with a
+        # GrowthBookClient raises AttributeError, same as it always has.
+        gb = cast("GrowthBook", self._gb_instance)
+        current_attributes = gb.get_attributes()
         merged_attributes = {**new_attributes, **current_attributes}  # Existing attrs take precedence
-        self._gb_instance.set_attributes(merged_attributes)
+        gb.set_attributes(merged_attributes)
         
         self.logger.debug(f"Merged {len(new_attributes)} attributes: {list(new_attributes.keys())}")
     
-    def _safe_execute(self, func, *args, **kwargs):
+    def _safe_execute(self, func: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """
         Safely execute a function, logging any exceptions.
         
@@ -100,4 +117,11 @@ class GrowthBookPlugin(ABC):
             return func(*args, **kwargs)
         except Exception as e:
             self.logger.error(f"Error in {func.__name__}: {e}")
-            return None 
+            return None
+
+
+# What the clients accept in their plugin lists: a GrowthBookPlugin instance,
+# or a bare callable invoked with the client instance. Defined at runtime
+# (below the class, so no forward ref remains) so get_type_hints(Options) and
+# user annotations can resolve it.
+PluginLike = Union[GrowthBookPlugin, Callable[[GrowthBookInstance], None]]

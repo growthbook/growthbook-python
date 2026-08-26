@@ -7,9 +7,13 @@ This plugin extracts attributes from HTTP request context using a framework-agno
 import logging
 import uuid
 import time
-from typing import Dict, Any, Optional, Callable, Union
+from typing import TYPE_CHECKING, Dict, Any, Optional, Callable, Union, cast
 from urllib.parse import urlparse
 from .base import GrowthBookPlugin
+
+if TYPE_CHECKING:
+    from ..growthbook import GrowthBook
+    from .base import GrowthBookInstance
 
 logger = logging.getLogger("growthbook.plugins.request_context")
 
@@ -57,11 +61,11 @@ class RequestContextPlugin(GrowthBookPlugin):
     
     def __init__(
         self,
-        request_extractor: Optional[Callable] = None,
+        request_extractor: Optional[Callable[[], Any]] = None,
         client_side_attributes: Optional[ClientSideAttributes] = None,
         extract_utm: bool = True,
         extract_user_agent: bool = True,
-        **options
+        **options: Any
     ):
         """
         Initialize request context plugin.
@@ -79,7 +83,7 @@ class RequestContextPlugin(GrowthBookPlugin):
         self.extract_user_agent = extract_user_agent
         self._extracted_attributes: Dict[str, Any] = {}
         
-    def initialize(self, gb_instance) -> None:
+    def initialize(self, gb_instance: "GrowthBookInstance") -> None:
         """Initialize plugin - extract attributes from request context."""
         try:
             self._set_initialized(gb_instance)
@@ -90,10 +94,12 @@ class RequestContextPlugin(GrowthBookPlugin):
             if request_attributes:
                 # Check client type and merge attributes accordingly
                 if hasattr(gb_instance, 'get_attributes') and hasattr(gb_instance, 'set_attributes'):
-                    # Legacy GrowthBook client
-                    current_attributes = gb_instance.get_attributes()
+                    # Legacy GrowthBook client (the hasattr checks above are the
+                    # runtime narrowing; the cast mirrors them for checkers)
+                    legacy_gb = cast("GrowthBook", gb_instance)
+                    current_attributes = legacy_gb.get_attributes()
                     merged_attributes = {**request_attributes, **current_attributes}
-                    gb_instance.set_attributes(merged_attributes)
+                    legacy_gb.set_attributes(merged_attributes)
                     self.logger.info(f"Extracted {len(request_attributes)} request attributes for legacy client")
                     
                 elif hasattr(gb_instance, 'options'):
@@ -171,7 +177,7 @@ class RequestContextPlugin(GrowthBookPlugin):
         
         return None
     
-    def _normalize_request_object(self, request_obj) -> Dict[str, Any]:
+    def _normalize_request_object(self, request_obj: Any) -> Dict[str, Any]:
         """Convert various request objects to normalized dict."""
         normalized = {}
         
@@ -312,7 +318,7 @@ def clear_request_context() -> None:
 
 
 # Convenience functions
-def request_context_plugin(**options) -> RequestContextPlugin:
+def request_context_plugin(**options: Any) -> RequestContextPlugin:
     """
     Create a request context plugin.
     
@@ -343,7 +349,7 @@ def request_context_plugin(**options) -> RequestContextPlugin:
     return RequestContextPlugin(**options)
 
 
-def client_side_attributes(**kwargs) -> ClientSideAttributes:
+def client_side_attributes(**kwargs: Any) -> ClientSideAttributes:
     """
     Create client-side attributes.
     
