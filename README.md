@@ -19,7 +19,7 @@ Powerful Feature flagging and A/B testing for Python apps.
 
 ## Installation
 
-`pip install growthbook` (recommended) or copy `growthbook.py` into your project
+`pip install growthbook`
 
 ## Type Checking Support
 
@@ -70,16 +70,40 @@ Then use the generated subclasses anywhere you'd use the plain clients. They
 add zero runtime behavior — all checking happens in mypy/pyright/your IDE:
 
 ```python
-from growthbook_features import TypedGrowthBook  # or TypedGrowthBookClient (async)
+from growthbook_features import TypedGrowthBook
 
 gb = TypedGrowthBook(api_host="...", client_key="...")
 
 gb.is_on("dark_mode")                        # OK
 gb.is_on("dark_mod")                         # checker error: typo in feature key
 gb.get_feature_value("max_items", "10")      # checker error: fallback must be a number
+gb.get_feature_value("banner_text", None)    # Optional[str]: None if the flag isn't set
+gb.eval_feature("dark_mode").value           # Optional[bool] instead of Any
+```
+
+The async client gets the same treatment:
+
+```python
+from growthbook_features import TypedGrowthBookClient
+
+client = TypedGrowthBookClient(options)
+color = await client.get_feature_value("banner_text", "hello", user)  # str
+```
+
+For dynamic keys (e.g. looping over feature names), the generated `FeatureKey`
+Literal is the escape hatch:
+
+```python
+from typing import cast
+from growthbook_features import FeatureKey
+
+for k in my_keys:
+    gb.is_on(cast(FeatureKey, k))
 ```
 
 Regenerate the file whenever your feature list changes (e.g. as a CI step).
+Features whose type can't be inferred (no `defaultValue` and no typed rules)
+are listed in a warning at generation time and fall back to `Any`.
 
 ## Quick Usage
 
