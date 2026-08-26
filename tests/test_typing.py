@@ -159,6 +159,30 @@ class TestGeneratedClientTyping:
         errors = mypy_error_lines(str(snippet))
         assert errors.get("typed_usage.py", set()) == tagged_lines(str(snippet))
 
+    def test_typed_async_client_strictness(self, generated_dir):
+        # Also guards the generated `# type: ignore[override]` lines against
+        # silent signature drift: if TypedGrowthBookClient's overloads stop
+        # matching the real async signature, these lines change verdicts.
+        snippet = generated_dir / "typed_async_usage.py"
+        snippet.write_text(
+            "from growthbook import UserContext\n"
+            "from growthbook_features import TypedGrowthBookClient\n"
+            "\n"
+            "tgb = TypedGrowthBookClient()\n"
+            "ctx = UserContext(attributes={'id': '1'})\n"
+            "\n"
+            "async def _usage() -> None:\n"
+            "    ok: str = await tgb.get_feature_value('banner_text', 'hi', ctx)\n"
+            "    ok2: bool = await tgb.is_on('dark_mode', ctx)\n"
+            "    await tgb.is_on('buton_color', ctx)  " + EXPECT_TAG + "\n"
+            "    await tgb.get_feature_value('max_items', '12', ctx)  " + EXPECT_TAG + "\n"
+            "    bad: str = await tgb.get_feature_value('banner_text', 'hi', ctx)  # ok line\n"
+            "    await tgb.get_feature_value('banner_text', 'hi')  " + EXPECT_TAG + "\n",
+            encoding="utf-8",
+        )
+        errors = mypy_error_lines(str(snippet))
+        assert errors.get("typed_async_usage.py", set()) == tagged_lines(str(snippet))
+
     def test_single_feature_client_strictness(self, tmp_path):
         """The non-overload code path must enforce the same guarantees."""
         (tmp_path / "growthbook_features.py").write_text(

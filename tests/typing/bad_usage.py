@@ -4,9 +4,9 @@ produce a checker error, and untagged lines must stay clean.
 Checked by tests/test_typing.py (and the pyright CI step). If a tagged line
 stops erroring, a type-safety guarantee regressed.
 """
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-from growthbook import Experiment, GrowthBook, Result, UserContext
+from growthbook import Experiment, FeatureRule, GrowthBook, Result, UserContext
 
 gb = GrowthBook()
 
@@ -62,6 +62,7 @@ gb.set_event_logger(async_logger)  # expect-error
 
 # Typo'd keyword arguments are no longer silently swallowed by checkers.
 Experiment(key="t", variations=[1, 2], weigths=[0.5, 0.5])  # expect-error
+FeatureRule(force="on", coverege=0.5)  # expect-error
 
 # Wrong argument types to public methods.
 GrowthBook(attributes="not-a-dict")  # expect-error

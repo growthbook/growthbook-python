@@ -85,6 +85,18 @@ client.set_event_logger(sync_logger)
 client.set_event_logger(async_logger)
 gb.set_event_logger(sync_logger)
 
+# The async client's inference mirrors the sync client end-to-end.
+# (Statically checked only — never executed.)
+async def _async_usage() -> None:
+    ctx = UserContext(attributes={"id": "1"})
+    a_color: str = await client.get_feature_value("banner", "blue", ctx)
+    a_count: int = await client.get_feature_value("max-items", 5, ctx)
+    a_res: Result[int] = await client.run(Experiment(key="t", variations=[1, 2]), ctx)
+    a_doubled: int = a_res.value * 2
+    a_fr: FeatureResult[Any] = await client.eval_feature("banner", ctx)
+    a_flag: bool = await client.is_on("dark-mode", ctx)
+
+
 # Payload dict splats with unknown server keys stay valid.
 payload: Dict[str, Any] = {"key": "t", "variations": [1, 2], "unknownServerField": True}
 exp = Experiment(**payload)
