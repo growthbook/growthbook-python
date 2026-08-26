@@ -3,10 +3,6 @@
 ## [3.0.0](https://github.com/growthbook/growthbook-python/compare/v2.4.0...v3.0.0) (2026-08-26)
 
 
-### ⚠ BREAKING CHANGES
-
-* Type Safety for GrowthBook Clients - Merge pull request #126 from growthbook/type-safety-hardening
-
 ### Features
 
 * Type Safety for GrowthBook Clients - Merge pull request [#126](https://github.com/growthbook/growthbook-python/issues/126) from growthbook/type-safety-hardening ([154e9c1](https://github.com/growthbook/growthbook-python/commit/154e9c19283dabccc3715e2f8597f4e250ac3d90))
