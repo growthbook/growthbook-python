@@ -790,6 +790,10 @@ def _get_sticky_bucket_variation(
 
     return {'variation': variation}
 
+# NOTE: both clients' public run() declare `Experiment[T] -> Result[T]` and
+# rely on this returning the experiment's own variation value (Result[Any] is
+# an unchecked cast at that seam). If a refactor ever makes this return a
+# value that isn't one of experiment.variations, the public inference lies.
 def run_experiment(experiment: Experiment[Any],
                    featureId: Optional[str] = None,
                    evalContext: Optional[EvaluationContext] = None,
