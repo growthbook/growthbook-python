@@ -63,6 +63,9 @@ from your features JSON (the SDK endpoint payload, e.g.
 python -m growthbook.codegen --input features.json --output growthbook_features.py
 ```
 
+If your endpoint has encryption enabled (the payload carries `encryptedFeatures`),
+pass `--decryption-key <key>` to decrypt it before generating.
+
 Then use the generated subclasses anywhere you'd use the plain clients. They
 add zero runtime behavior — all checking happens in mypy/pyright/your IDE:
 

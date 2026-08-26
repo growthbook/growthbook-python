@@ -8,7 +8,7 @@ import sys
 import pytest
 
 from growthbook import GrowthBook
-from growthbook.codegen import extract_feature_types, generate, python_type_for
+from growthbook.codegen import decrypt_payload, extract_feature_types, generate, python_type_for
 
 FIXTURE_DIR = os.path.join(os.path.dirname(__file__), "codegen")
 
@@ -80,6 +80,47 @@ class TestExtractFeatureTypes:
     def test_unknown_payload_format_rejected(self):
         with pytest.raises(ValueError):
             extract_feature_types({"f": {"defaultValue": 1}}, "bogus")
+
+    def test_encrypted_payload_rejected(self):
+        # Regression: this used to be read as a bare map, fabricating fake
+        # Any-typed feature keys (encryptedFeatures, status, dateUpdated).
+        payload = {"status": 200, "encryptedFeatures": "aXY=.Y3Q=", "dateUpdated": "2026-01-01"}
+        with pytest.raises(ValueError, match="decrypt"):
+            extract_feature_types(payload)
+        with pytest.raises(ValueError, match="decrypt"):
+            extract_feature_types(payload, "payload")
+
+
+def _encrypt_features(features: dict, key_b64: str) -> str:
+    """Test-only inverse of growthbook.decrypt (AES-128-CBC, iv.ct base64)."""
+    import os
+    from base64 import b64decode, b64encode
+
+    from cryptography.hazmat.primitives import padding
+    from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+
+    iv = os.urandom(16)
+    padder = padding.PKCS7(128).padder()
+    data = padder.update(json.dumps(features).encode()) + padder.finalize()
+    encryptor = Cipher(algorithms.AES128(b64decode(key_b64)), modes.CBC(iv)).encryptor()
+    ct = encryptor.update(data) + encryptor.finalize()
+    return b64encode(iv).decode() + "." + b64encode(ct).decode()
+
+
+class TestDecryptPayload:
+    KEY = "Zvwv/+uhpFDznZ6SX28Yjg=="  # any 16 bytes, base64
+
+    def test_round_trip(self):
+        features = {"dark_mode": {"defaultValue": True}}
+        payload = {"status": 200, "encryptedFeatures": _encrypt_features(features, self.KEY)}
+        decrypted = decrypt_payload(payload, self.KEY)
+        assert decrypted["features"] == features
+        assert "encryptedFeatures" not in decrypted
+        assert extract_feature_types(decrypted) == {"dark_mode": "bool"}
+
+    def test_key_without_encrypted_features_rejected(self):
+        with pytest.raises(ValueError):
+            decrypt_payload({"features": {}}, self.KEY)
 
 
 class TestGenerate:

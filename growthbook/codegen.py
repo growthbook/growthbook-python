@@ -92,6 +92,13 @@ def extract_feature_types(
     """
     if payload_format not in ("auto", "payload", "map"):
         raise ValueError(f"unknown payload_format: {payload_format!r}")
+    if payload_format != "map" and "encryptedFeatures" in payload and "features" not in payload:
+        # Without this check the encrypted blob's sibling keys (status,
+        # dateUpdated, ...) would be emitted as fake Any-typed feature keys.
+        raise ValueError(
+            "payload contains encryptedFeatures but no plaintext features: "
+            "decrypt it first (pass --decryption-key to the CLI)"
+        )
     if payload_format == "payload" or (
         payload_format == "auto" and _is_endpoint_payload(payload)
     ):
@@ -154,6 +161,19 @@ def _client_class(feature_types: Dict[str, str], is_async: bool) -> str:
     return "\n".join(lines)
 
 
+def decrypt_payload(payload: Dict[str, Any], decryption_key: str) -> Dict[str, Any]:
+    """Return a copy of an encrypted endpoint payload with ``encryptedFeatures``
+    decrypted into a plaintext ``features`` object."""
+    encrypted = payload.get("encryptedFeatures")
+    if not encrypted:
+        raise ValueError("a decryption key was given but the payload has no encryptedFeatures")
+    from .growthbook import decrypt
+
+    out = {k: v for k, v in payload.items() if k != "encryptedFeatures"}
+    out["features"] = json.loads(decrypt(encrypted, decryption_key))
+    return out
+
+
 def generate(payload: Dict[str, Any], payload_format: str = "auto") -> str:
     """Generate the typed-client module source from a features payload."""
     feature_types = extract_feature_types(payload, payload_format)
@@ -200,6 +220,12 @@ def main(argv: Optional[List[str]] = None) -> int:
         help="input shape: SDK endpoint payload, bare {feature_key: definition} map, "
         "or auto-detect (default)",
     )
+    parser.add_argument(
+        "--decryption-key",
+        default=None,
+        help="decrypt the payload's encryptedFeatures before generating "
+        "(for endpoints with encryption enabled)",
+    )
     args = parser.parse_args(argv)
 
     if args.input == "-":
@@ -207,6 +233,9 @@ def main(argv: Optional[List[str]] = None) -> int:
     else:
         with open(args.input, encoding="utf-8") as f:
             payload = json.load(f)
+
+    if args.decryption_key:
+        payload = decrypt_payload(payload, args.decryption_key)
 
     source = generate(payload, args.payload_format)
 
