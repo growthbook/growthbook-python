@@ -80,6 +80,28 @@ def _is_endpoint_payload(payload: Dict[str, Any]) -> bool:
     return all(isinstance(definition, dict) for definition in features.values())
 
 
+def infer_feature_type(definition: Any) -> str:
+    """Infer a feature's value type from its definition.
+
+    Prefers ``defaultValue``; when that is absent or null, falls back to the
+    rules' ``force`` and ``variations`` values (a feature served only by rules
+    still has a real value type). Mixed candidate types degrade to ``Any``.
+    """
+    if not isinstance(definition, dict):
+        return "Any"
+    candidates: List[Any] = [definition.get("defaultValue")]
+    for rule in definition.get("rules") or []:
+        if isinstance(rule, dict):
+            candidates.append(rule.get("force"))
+            variations = rule.get("variations")
+            if isinstance(variations, list):
+                candidates.extend(variations)
+    types = {python_type_for(v) for v in candidates if v is not None}
+    if len(types) == 1:
+        return types.pop()
+    return "Any"
+
+
 def extract_feature_types(
     payload: Dict[str, Any], payload_format: str = "auto"
 ) -> Dict[str, str]:
@@ -109,8 +131,7 @@ def extract_feature_types(
         raise ValueError("features JSON must be an object")
     types: Dict[str, str] = {}
     for key, definition in features.items():
-        default_value = definition.get("defaultValue") if isinstance(definition, dict) else None
-        types[key] = python_type_for(default_value)
+        types[key] = infer_feature_type(definition)
     return dict(sorted(types.items()))
 
 
@@ -126,36 +147,64 @@ def _client_class(feature_types: Dict[str, str], is_async: bool) -> str:
         "    if TYPE_CHECKING:",
     ]
     items = list(feature_types.items())
-    if len(items) == 1:
-        # PEP 484 requires at least two @overload declarations, so a single
-        # feature gets a plain typed method instead.
-        key, py_type = items[0]
+
+    # get_feature_value: per key, a `fallback: None -> Optional[T]` overload
+    # ("no fallback, give me the value if set") plus the typed-fallback one.
+    # An Any-typed key gets a single `fallback: Any` overload (it already
+    # accepts None), so a lone Any-typed feature keeps the plain-method form
+    # (PEP 484 requires at least two @overload declarations).
+    gfv_signatures = []
+    for key, py_type in items:
+        if py_type != "Any":
+            gfv_signatures.append((key, "None", f"Optional[{py_type}]"))
+        gfv_signatures.append((key, py_type, py_type))
+    if len(gfv_signatures) == 1:
+        key, fb_type, ret_type = gfv_signatures[0]
         lines += [
-            f"        {prefix}def get_feature_value(self, key: Literal[{key!r}], fallback: {py_type}{ctx}) -> {py_type}:  # type: ignore[override]",
+            f"        {prefix}def get_feature_value(self, key: Literal[{key!r}], fallback: {fb_type}{ctx}) -> {ret_type}:  # type: ignore[override]",
             "            raise NotImplementedError",
         ]
     else:
-        for i, (key, py_type) in enumerate(items):
+        for i, (key, fb_type, ret_type) in enumerate(gfv_signatures):
             # The Literal-key override is intentionally narrower than the base
             # class signature; checkers report that on the first @overload line.
             marker = "  # type: ignore[override]" if i == 0 else ""
             lines += [
                 f"        @overload{marker}",
-                f"        {prefix}def get_feature_value(self, key: Literal[{key!r}], fallback: {py_type}{ctx}) -> {py_type}: ...",
+                f"        {prefix}def get_feature_value(self, key: Literal[{key!r}], fallback: {fb_type}{ctx}) -> {ret_type}: ...",
             ]
         lines += [
             f"        {prefix}def get_feature_value(self, key: Any, fallback: Any{ctx}) -> Any:",
             "            raise NotImplementedError",
         ]
+
+    # eval_feature: per-key FeatureResult[T] overloads — result.value is
+    # Optional[T] instead of Any.
+    lines += [""]
+    if len(items) == 1:
+        key, py_type = items[0]
+        lines += [
+            f'        {prefix}def eval_feature(self, key: Literal[{key!r}]{ctx}) -> "FeatureResult[{py_type}]":  # type: ignore[override]',
+            "            raise NotImplementedError",
+        ]
+    else:
+        for i, (key, py_type) in enumerate(items):
+            marker = "  # type: ignore[override]" if i == 0 else ""
+            lines += [
+                f"        @overload{marker}",
+                f'        {prefix}def eval_feature(self, key: Literal[{key!r}]{ctx}) -> "FeatureResult[{py_type}]": ...',
+            ]
+        lines += [
+            f'        {prefix}def eval_feature(self, key: Any{ctx}) -> "FeatureResult[Any]":',
+            "            raise NotImplementedError",
+        ]
+
     lines += [
         "",
         f"        {prefix}def is_on(self, key: FeatureKey{ctx}) -> bool:  # type: ignore[override]",
         "            raise NotImplementedError",
         "",
         f"        {prefix}def is_off(self, key: FeatureKey{ctx}) -> bool:  # type: ignore[override]",
-        "            raise NotImplementedError",
-        "",
-        f'        {prefix}def eval_feature(self, key: FeatureKey{ctx}) -> "FeatureResult[Any]":  # type: ignore[override]',
         "            raise NotImplementedError",
     ]
     return "\n".join(lines)
@@ -179,15 +228,29 @@ def generate(payload: Dict[str, Any], payload_format: str = "auto") -> str:
     feature_types = extract_feature_types(payload, payload_format)
     if not feature_types:
         raise ValueError("no features found in input JSON")
+    degraded = sorted(k for k, t in feature_types.items() if t == "Any")
+    if degraded:
+        # These keys LOOK typed in the generated client but carry no value
+        # contract — make that visible at generation time.
+        print(
+            "warning: no value type could be inferred for feature(s) "
+            f"{', '.join(degraded)}; they are typed Any in the generated client",
+            file=sys.stderr,
+        )
+    typed_count = sum(1 for t in feature_types.values() if t != "Any")
     typing_imports = ["TYPE_CHECKING", "Any"]
     if any("Dict[" in t for t in feature_types.values()):
         typing_imports.append("Dict")
     if any("List[" in t for t in feature_types.values()):
         typing_imports.append("List")
     typing_imports.append("Literal")
+    if typed_count:
+        typing_imports.append("Optional")
     if any("Union[" in t for t in feature_types.values()):
         typing_imports.append("Union")
-    if len(feature_types) > 1:
+    # Overloads are emitted whenever get_feature_value or eval_feature has
+    # more than one signature (see _client_class).
+    if len(feature_types) > 1 or typed_count:
         typing_imports.append("overload")
     header = _HEADER_TEMPLATE.format(typing_imports=", ".join(typing_imports))
     key_literals = ", ".join(repr(k) for k in feature_types)

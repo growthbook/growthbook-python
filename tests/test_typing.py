@@ -146,14 +146,19 @@ class TestGeneratedClientTyping:
     def test_typed_client_strictness(self, generated_dir):
         snippet = generated_dir / "typed_usage.py"
         snippet.write_text(
+            "from typing import Optional\n"
+            "\n"
             "from growthbook_features import TypedGrowthBook\n"
             "\n"
             "tgb = TypedGrowthBook()\n"
             "ok: str = tgb.get_feature_value('banner_text', 'hi')\n"
             "ok2: bool = tgb.is_on('dark_mode')\n"
+            "maybe: Optional[str] = tgb.get_feature_value('banner_text', None)\n"
+            "fr_val: Optional[bool] = tgb.eval_feature('dark_mode').value\n"
             "tgb.is_on('buton_color')  " + EXPECT_TAG + "\n"
             "tgb.get_feature_value('max_items', '12')  " + EXPECT_TAG + "\n"
-            "bad: str = tgb.get_feature_value('donut_price', 1.0)  " + EXPECT_TAG + "\n",
+            "bad: str = tgb.get_feature_value('donut_price', 1.0)  " + EXPECT_TAG + "\n"
+            "bad2: str = tgb.eval_feature('dark_mode').value  " + EXPECT_TAG + "\n",
             encoding="utf-8",
         )
         errors = mypy_error_lines(str(snippet))

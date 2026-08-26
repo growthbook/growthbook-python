@@ -133,14 +133,45 @@ class TestGenerate:
         with pytest.raises(ValueError):
             generate({"features": {}})
 
-    def test_single_feature_uses_plain_methods_not_overloads(self):
-        """PEP 484 requires >=2 @overload declarations; a one-feature payload
-        must emit plain typed methods instead (regression: the overload form
-        made the generated module fail both checkers)."""
+    def test_single_typed_feature_emits_valid_overload_pair(self):
+        """A one-feature payload now has two get_feature_value signatures
+        (None-fallback + typed), satisfying PEP 484's >=2 overload minimum;
+        eval_feature stays a plain method."""
         src = generate({"features": {"only_one": {"defaultValue": True}}})
+        assert "def get_feature_value(self, key: Literal['only_one'], fallback: None) -> Optional[bool]: ..." in src
+        assert "def get_feature_value(self, key: Literal['only_one'], fallback: bool) -> bool: ..." in src
+        assert 'def eval_feature(self, key: Literal[\'only_one\']) -> "FeatureResult[bool]":' in src
+
+    def test_single_any_feature_uses_plain_method_not_overloads(self, capsys):
+        """PEP 484 requires >=2 @overload declarations; a lone Any-typed
+        feature has only one get_feature_value signature, so it must emit a
+        plain typed method (regression: the overload form made the generated
+        module fail both checkers)."""
+        src = generate({"features": {"only_one": {}}})
         assert "@overload" not in src
         assert "overload" not in src.split("\n")[5]  # not imported either
-        assert "def get_feature_value(self, key: Literal['only_one'], fallback: bool) -> bool:" in src
+        assert "def get_feature_value(self, key: Literal['only_one'], fallback: Any) -> Any:" in src
+        assert "only_one" in capsys.readouterr().err
+
+    def test_rules_based_inference_and_any_warning(self, capsys):
+        payload = {
+            "features": {
+                "rules_only": {"rules": [{"force": "SUMMER"}]},
+                "variations_only": {"rules": [{"variations": [1, 2]}]},
+                "mixed": {"rules": [{"force": "x"}, {"force": True}]},
+                "no_signal": {},
+            }
+        }
+        assert extract_feature_types(payload) == {
+            "rules_only": "str",
+            "variations_only": "Union[int, float]",
+            "mixed": "Any",
+            "no_signal": "Any",
+        }
+        generate(payload)
+        err = capsys.readouterr().err
+        # Only the Any-degraded keys are warned about, in sorted order.
+        assert "mixed, no_signal" in err and "rules_only" not in err
 
     def test_unused_typing_names_not_imported(self):
         src = generate({"features": {"a": {"defaultValue": 1}, "b": {"defaultValue": 2}}})
