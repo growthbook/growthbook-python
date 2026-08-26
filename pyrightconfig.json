@@ -1,7 +1,9 @@
 {
-    "include": ["growthbook"],
-    "pythonVersion": "3.9",
-    "typeCheckingMode": "basic",
-    "reportMissingImports": true,
-    "reportMissingTypeStubs": false
+  "include": [
+    "growthbook"
+  ],
+  "pythonVersion": "3.9",
+  "typeCheckingMode": "standard",
+  "reportMissingImports": true,
+  "reportMissingTypeStubs": false
 }

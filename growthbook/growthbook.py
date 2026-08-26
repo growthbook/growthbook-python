@@ -1481,19 +1481,21 @@ class GrowthBook(object):
         """Initialize all plugins with this GrowthBook instance."""
         for plugin in self._plugins:
             try:
-                if hasattr(plugin, 'initialize'):
+                # getattr (not hasattr+access) keeps duck-typed plugin objects
+                # working while narrowing cleanly under both checkers.
+                initialize = getattr(plugin, "initialize", None)
+                if callable(initialize):
                     # Plugin is a class instance with initialize method
-                    plugin.initialize(self)
+                    initialize(self)
                     self._initialized_plugins.append(plugin)
                     logger.debug(f"Initialized plugin: {plugin.__class__.__name__}")
                 elif callable(plugin):
                     # Plugin is a callable function
                     plugin(self)
                     self._initialized_plugins.append(plugin)
-                    logger.debug(f"Initialized callable plugin: {plugin.__name__}")
+                    logger.debug(f"Initialized callable plugin: {getattr(plugin, '__name__', plugin)}")
                 else:
-                    # Statically unreachable under PluginLike, kept for untyped callers.
-                    logger.warning(f"Plugin {plugin} is neither callable nor has initialize method")  # type: ignore[unreachable]
+                    logger.warning(f"Plugin {plugin} is neither callable nor has initialize method")
             except Exception as e:
                 logger.error(f"Failed to initialize plugin {plugin}: {e}")
 
@@ -1511,8 +1513,9 @@ class GrowthBook(object):
         """Cleanup all initialized plugins."""
         for plugin in self._initialized_plugins:
             try:
-                if hasattr(plugin, 'cleanup'):
-                    plugin.cleanup()
+                cleanup = getattr(plugin, "cleanup", None)
+                if callable(cleanup):
+                    cleanup()
                     logger.debug(f"Cleaned up plugin: {plugin.__class__.__name__}")
             except Exception as e:
                 logger.error(f"Error cleaning up plugin {plugin}: {e}")
