@@ -1025,10 +1025,12 @@ class GrowthBook(object):
 
     def _on_feature_update(self, features_data: Dict[str, Any]) -> None:
         """Callback to handle automatic feature updates from FeatureRepository"""
-        if features_data and "features" in features_data:
-            self.set_features(features_data["features"])
+        # savedGroups must be assigned before set_features(), which is what
+        # re-syncs them into the shared global evaluation context.
         if features_data and "savedGroups" in features_data:
             self._saved_groups = features_data["savedGroups"]
+        if features_data and "features" in features_data:
+            self.set_features(features_data["features"])
 
     def load_features(self, force_refresh: bool = False) -> None:
         """Load features from the configured endpoint, populating the cache.
@@ -1049,11 +1051,11 @@ class GrowthBook(object):
             cache_key_attributes=self._cacheKeyAttributes,
             force_refresh=force_refresh,
         )
-        if response is not None and "features" in response.keys():
-            self.set_features(response["features"])
-
         if response is not None and "savedGroups" in response:
             self._saved_groups = response["savedGroups"]
+
+        if response is not None and "features" in response.keys():
+            self.set_features(response["features"])
 
     async def load_features_async(self, force_refresh: bool = False) -> None:
         if not self._client_key:
@@ -1072,10 +1074,10 @@ class GrowthBook(object):
         )
 
         if features is not None:
-            if "features" in features:
-                self.set_features(features["features"])
             if "savedGroups" in features:
                 self._saved_groups = features["savedGroups"]
+            if "features" in features:
+                self.set_features(features["features"])
 
     def _features_event_handler(self, features: str) -> None:
         decoded = json.loads(features)
@@ -1086,10 +1088,10 @@ class GrowthBook(object):
         key = self._api_host + "::" + self._client_key
 
         if data is not None:
-            if "features" in data:
-                self.set_features(data["features"])
             if "savedGroups" in data:
                 self._saved_groups = data["savedGroups"]
+            if "features" in data:
+                self.set_features(data["features"])
             feature_repo.save_in_cache(key, data, self._cache_ttl)
 
     def _dispatch_sse_event(self, event_data: Dict[str, Any]) -> None:
