@@ -1186,10 +1186,14 @@ class GrowthBook(object):
                         rules=feature.get("rules", []),
                         defaultValue=feature.get("defaultValue", None),
                     )
-            # Update the global context with the new features and saved groups
-            self._global_ctx.features = self._features
+            # Update the global context with the new features and saved
+            # groups. The maps go first: evals in other threads key off the
+            # features dict, so if they observe a torn update it must be old
+            # features with new maps (harmless) rather than new features
+            # whose savedGroups/contextualBandits refs aren't loaded yet.
             self._global_ctx.saved_groups = self._saved_groups
             self._global_ctx.contextual_bandits = self._contextual_bandits
+            self._global_ctx.features = self._features
             self.refresh_sticky_buckets()
         finally:
             self._is_updating_features = False
