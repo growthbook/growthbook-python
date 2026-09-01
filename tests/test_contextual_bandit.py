@@ -213,6 +213,41 @@ def test_feature_cache_round_trip():
 
 
 @pytest.mark.asyncio
+async def test_async_set_features_preserves_bandit_map():
+    """A partial update (set_features) must not wipe the contextualBandits or
+    savedGroups sections — mirrors JS setPayload, which only overwrites the
+    sections present in the payload."""
+    EnhancedFeatureRepository._instances = {}
+    payload = {
+        "features": CB_FEATURES,
+        "savedGroups": {"sg": ["1"]},
+        "contextualBandits": CB_MAP,
+    }
+    with patch(
+        "growthbook.FeatureRepository.load_features_async",
+        new_callable=AsyncMock,
+        return_value=payload,
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh",
+        new_callable=AsyncMock,
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh",
+        new_callable=AsyncMock,
+    ):
+        async with GrowthBookClient(
+            Options(api_host="https://localhost.growthbook.io", client_key="test-key")
+        ) as client:
+            await client.set_features(CB_FEATURES)
+            assert client._global_context.contextual_bandits == CB_MAP
+            assert client._global_context.saved_groups == {"sg": ["1"]}
+            result = await client.eval_feature(
+                "bandit-feature", UserContext(attributes={"id": "1"})
+            )
+            assert result.value == "control"
+            assert result.experimentResult.leafId == 1
+
+
+@pytest.mark.asyncio
 async def test_async_client_contextual_bandits():
     EnhancedFeatureRepository._instances = {}
     payload = {

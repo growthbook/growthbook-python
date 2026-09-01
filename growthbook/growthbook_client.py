@@ -1146,9 +1146,22 @@ class GrowthBookClient:
             return
 
         async with self._context_lock:  # serializes concurrent updaters only
-            features = features_from_dict(features_data.get("features"))
-            saved_groups = features_data.get("savedGroups", {})
-            contextual_bandits = features_data.get("contextualBandits", {})
+            prev = self._global_context
+            # Mirror JS setPayload: sections absent from the update carry
+            # over from the previous snapshot, so a partial update (e.g.
+            # set_features) doesn't silently wipe savedGroups or
+            # contextualBandits. Full refreshes carry all three keys.
+            features = (
+                features_from_dict(features_data["features"])
+                if "features" in features_data
+                else (prev.features if prev else {})
+            )
+            saved_groups = features_data.get(
+                "savedGroups", prev.saved_groups if prev else {}
+            )
+            contextual_bandits = features_data.get(
+                "contextualBandits", prev.contextual_bandits if prev else {}
+            )
 
             # Build a NEW immutable snapshot and swap the reference atomically
             # (single assignment). In-flight evaluations captured the previous
