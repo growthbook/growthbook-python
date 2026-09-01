@@ -7,10 +7,25 @@ from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
 from typing import Callable, Optional, Any, Set, Tuple, List, Dict, cast
-from .common_types import EvaluationContext, FeatureResult, Experiment, Filter, Result, UserContext, VariationMeta
+from .common_types import (
+    CBContext,
+    ContextualBanditContext,
+    EvaluationContext,
+    FeatureResult,
+    Experiment,
+    Filter,
+    Result,
+    UserContext,
+    VariationMeta,
+)
 
 
 logger = logging.getLogger("growthbook.core")
+
+# leafId reported when a contextual bandit rule falls back to its marginal
+# weights (no leaf condition matched, empty contexts, or leaf selection
+# errored). Matches CONTEXTUAL_BANDIT_FALLBACK_LEAF_ID in the JS SDK.
+CONTEXTUAL_BANDIT_FALLBACK_LEAF_ID = -1
 
 def evalCondition(attributes: Dict[str, Any], condition: Dict[str, Any], savedGroups: Optional[Dict[str, Any]] = None) -> bool:
     for key, value in condition.items():
@@ -564,6 +579,78 @@ def _fire_rule_tracks(
             logger.exception("Failed to fire rule.tracks tracking event")
 
 
+def _get_contextual_bandit_leaf(
+    contexts: List[ContextualBanditContext],
+    evalContext: EvaluationContext,
+) -> Optional[ContextualBanditContext]:
+    """Return the first leaf whose condition matches the user's attributes.
+
+    Leaf conditions use the regular targeting condition syntax; an empty
+    condition matches everyone (the catch-all leaf)."""
+    for context in contexts:
+        if evalCondition(
+            evalContext.user.attributes,
+            context.get("condition") or {},
+            evalContext.global_ctx.saved_groups,
+        ):
+            return context
+    return None
+
+
+def _build_contextual_bandit_experiment(
+    experiment: Experiment[Any],
+    contextual_bandit_ref: str,
+    feature_id: str,
+    evalContext: EvaluationContext,
+) -> None:
+    """Resolve a rule's contextualBanditRef and substitute the matched leaf's
+    weight vector onto the experiment, mirroring the JS SDK.
+
+    Matched leaf: experiment.weights are replaced with the leaf's weights.
+    No match / empty contexts / errored selection: bucketing keeps the rule's
+    server-computed marginal weights and the fallback leafId -1 is reported.
+    Dangling ref: run as a plain experiment with no bandit metadata at all."""
+    cb_definition = evalContext.global_ctx.contextual_bandits.get(contextual_bandit_ref)
+    if not cb_definition:
+        logger.warning(
+            "Contextual bandit %s not found in payload, feature %s falls back to aggregate weights",
+            contextual_bandit_ref,
+            feature_id,
+        )
+        return
+
+    leaf = None
+    contexts = cb_definition.get("contexts") or []
+    if contexts:
+        try:
+            leaf = _get_contextual_bandit_leaf(contexts, evalContext)
+        except Exception:
+            logger.exception(
+                "Contextual bandit leaf selection failed, feature %s falls back to aggregate weights",
+                feature_id,
+            )
+
+    if leaf is not None:
+        weights = leaf["weights"]
+        experiment.weights = weights
+        cb: CBContext = {"leafId": leaf["leafId"], "variationWeights": weights}
+    else:
+        logger.debug(
+            "Contextual bandit: no matching leaf, feature %s uses aggregate weights", feature_id
+        )
+        cb = {
+            "leafId": CONTEXTUAL_BANDIT_FALLBACK_LEAF_ID,
+            "variationWeights": experiment.weights
+            if experiment.weights is not None
+            else getEqualWeights(len(experiment.variations)),
+        }
+
+    bandit_version = cb_definition.get("banditVersion")
+    if bandit_version is not None:
+        cb["banditVersion"] = bandit_version
+    experiment.contextualBandit = cb
+
+
 def eval_feature(
     key: str,
     evalContext: Optional[EvaluationContext] = None,
@@ -641,13 +728,21 @@ def eval_feature(
                 _fire_rule_tracks(rule.tracks, evalContext, tracking_cb)
             return FeatureResult(rule.force, "force", ruleId=rule.id)
 
-        if rule.variations is None:
+        # Contextual bandit rules carry their variations under
+        # contextualVariations; a rule with neither is skipped (this is what
+        # lets bandit-unaware SDKs degrade to the default value).
+        rule_variations = (
+            rule.contextualVariations
+            if rule.contextualVariations is not None
+            else rule.variations
+        )
+        if rule_variations is None:
             logger.warning("Skip invalid rule, feature %s", key)
             continue
 
         exp = Experiment(
             key=rule.key or key,
-            variations=rule.variations,
+            variations=rule_variations,
             coverage=rule.coverage,
             weights=rule.weights,
             hashAttribute=rule.hashAttribute,
@@ -666,7 +761,16 @@ def eval_feature(
             minBucketVersion=rule.minBucketVersion,
         )
 
+        if rule.contextualBanditRef:
+            _build_contextual_bandit_experiment(exp, rule.contextualBanditRef, key, evalContext)
+
         result = run_experiment(experiment=exp, featureId=key, evalContext=evalContext, tracking_cb=tracking_cb)
+
+        # Bandit metadata is only meaningful for real hashed exposures; strip
+        # it from the experiment for forced/QA/coverage-miss outcomes so it
+        # doesn't leak into the returned FeatureResult.
+        if exp.contextualBandit is not None and not (result.hashUsed and result.inExperiment):
+            exp.contextualBandit = None
 
         if callback_subscription:
             callback_subscription(exp, result)
@@ -816,6 +920,16 @@ def run_experiment(experiment: Experiment[Any],
     # 2.5. If the experiment props have been overridden, merge them in
     if evalContext.user.overrides.get(experiment.key, None):
         experiment.update(evalContext.user.overrides[experiment.key])
+    # Keep reported bandit propensities in sync with the weights actually
+    # used for bucketing (an override may have replaced them)
+    if experiment.contextualBandit and experiment.weights:
+        synced: ContextualBanditAssignment = {
+            "leafId": experiment.contextualBandit["leafId"],
+            "variationWeights": experiment.weights,
+        }
+        if "banditVersion" in experiment.contextualBandit:
+            synced["banditVersion"] = experiment.contextualBandit["banditVersion"]
+        experiment.contextualBandit = synced
     # 3. If experiment is forced via a querystring in the url
     qs = getQueryStringOverride(
         experiment.key, evalContext.user.url, len(experiment.variations)
@@ -1096,6 +1210,17 @@ def _getExperimentResult(
                                                     fallbackAttr=experiment.fallbackAttribute,
                                                     eval_context=evalContext)
 
+    # Contextual bandit exposure metadata is only reported for real hashed
+    # assignments — never for forced variations, QA skips, or coverage misses.
+    leaf_id: Optional[int] = None
+    variation_weights: Optional[List[float]] = None
+    bandit_version: Optional[int] = None
+    cb = experiment.contextualBandit
+    if cb and hashUsed and inExperiment:
+        leaf_id = cb["leafId"]
+        variation_weights = cb["variationWeights"]
+        bandit_version = cb.get("banditVersion")
+
     return Result(
         featureId=featureId,
         inExperiment=inExperiment,
@@ -1106,5 +1231,8 @@ def _getExperimentResult(
         hashValue=hashValue,
         meta=meta,
         bucket=bucket,
-        stickyBucketUsed=stickyBucketUsed
+        stickyBucketUsed=stickyBucketUsed,
+        leafId=leaf_id,
+        variationWeights=variation_weights,
+        banditVersion=bandit_version
     )
