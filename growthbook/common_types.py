@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -585,6 +585,17 @@ AsyncFeatureUsageCallback = Callable[
 AsyncEventLogger = Callable[
     [str, Dict[str, Any], UserContext], Union[None, Awaitable[None]]
 ]
+
+
+def tracking_user_context(user: "UserContext") -> "UserContext":
+    """Exposure-time snapshot of a user context for tracking and
+    feature-usage callbacks (JS SDK: getTrackingUserContext).
+
+    The attributes dict is shallow-copied so callbacks — including ones that
+    defer processing — always see the values that were used for bucketing
+    and contextual bandit leaf routing, even if the caller mutates
+    attributes afterwards."""
+    return replace(user, attributes=dict(user.attributes))
 
 
 @dataclass

@@ -247,6 +247,27 @@ async def test_async_set_features_preserves_bandit_map():
             assert result.experimentResult.leafId == 1
 
 
+def test_tracking_callback_gets_exposure_time_attribute_snapshot():
+    """Attributes mutated after evaluation must not leak into the tracked
+    user context — the warehouse row has to carry the attributes used for
+    leaf routing (JS SDK: getTrackingUserContext snapshot)."""
+    tracked = []
+
+    def on_view(experiment, result, user_context):
+        tracked.append(user_context)
+
+    gb = GrowthBook(
+        attributes={"id": "1", "country": "US"},
+        features=CB_FEATURES,
+        contextualBandits=CB_MAP,
+        on_experiment_viewed=on_view,
+    )
+    gb.eval_feature("bandit-feature")
+    gb.set_attributes({"id": "1", "country": "DE"})
+    assert tracked[0].attributes == {"id": "1", "country": "US"}
+    gb.destroy()
+
+
 @pytest.mark.asyncio
 async def test_async_client_contextual_bandits():
     EnhancedFeatureRepository._instances = {}

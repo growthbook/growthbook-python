@@ -1408,12 +1408,18 @@ async def test_tracking():
             user_context.attributes = {"id": "2"}
             res5 = await client.run(exp2, user_context)
 
-            # Verify tracking calls
+            # Verify tracking calls. The tracked user context is an
+            # exposure-time snapshot, so the first two calls carry the
+            # attributes as they were when each experiment was viewed —
+            # not the later mutation.
             calls = getMockedCalls()
             assert len(calls) == 3, "Expected exactly 3 tracking calls"
-            assert calls[0] == [exp1, res1, user_context], "First tracking call mismatch"
-            assert calls[1] == [exp2, res4, user_context], "Second tracking call mismatch"
-            assert calls[2] == [exp2, res5, user_context], "Third tracking call mismatch"
+            assert calls[0][:2] == [exp1, res1], "First tracking call mismatch"
+            assert calls[0][2].attributes == {"id": "1"}
+            assert calls[1][:2] == [exp2, res4], "Second tracking call mismatch"
+            assert calls[1][2].attributes == {"id": "1"}
+            assert calls[2][:2] == [exp2, res5], "Third tracking call mismatch"
+            assert calls[2][2].attributes == {"id": "2"}
 
     finally:
         await client.close()

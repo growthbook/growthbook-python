@@ -36,6 +36,7 @@ from .common_types import (
     Experiment,
     build_remote_eval_payload,
     features_from_dict,
+    tracking_user_context,
     validate_remote_eval_options,
 )
 
@@ -1246,7 +1247,7 @@ class GrowthBookClient:
             try:
                 self._run_user_callback(
                     self.options.on_feature_usage,
-                    (key, result, user_context),
+                    (key, result, tracking_user_context(user_context)),
                     "feature usage",
                 )
             except Exception:

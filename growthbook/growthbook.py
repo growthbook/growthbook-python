@@ -37,6 +37,7 @@ from .common_types import (
     FeatureRule,
     build_remote_eval_payload,
     features_from_dict,
+    tracking_user_context,
     validate_remote_eval_options,
 )
 
@@ -1425,7 +1426,7 @@ class GrowthBook(object):
         # Call feature usage callback if provided
         if self._featureUsageCallback:
             try:
-                self._featureUsageCallback(key, result, self._user_ctx)
+                self._featureUsageCallback(key, result, tracking_user_context(self._user_ctx))
             except Exception:
                 pass
         return result
