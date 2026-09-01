@@ -167,6 +167,20 @@ def test_feature(feature_data):
     gb.destroy()
 
 
+def test_contextual_bandit(contextualBandit_data):
+    _, ctx, key, expected = contextualBandit_data
+    gb = GrowthBook(**ctx)
+    res = gb.eval_feature(key)
+
+    if "experiment" in expected:
+        expected["experiment"] = Experiment(**expected["experiment"]).to_dict()
+
+    actual = res.to_dict()
+
+    assert actual == expected
+    gb.destroy()
+
+
 def test_run(run_data):
     _, ctx, exp, value, inExperiment, hashUsed = run_data
     gb = GrowthBook(**ctx)

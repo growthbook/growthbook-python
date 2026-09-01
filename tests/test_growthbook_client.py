@@ -737,7 +737,8 @@ def base_client_setup():
         # Features data structure
         features_data = {
             "features": ctx.get("features", {}),
-            "savedGroups": ctx.get("savedGroups", {})
+            "savedGroups": ctx.get("savedGroups", {}),
+            "contextualBandits": ctx.get("contextualBandits", {})
         }
         
         return user_attrs, client_opts, features_data
