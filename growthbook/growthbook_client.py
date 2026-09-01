@@ -106,22 +106,26 @@ class FeatureCache:
     def __init__(self) -> None:
         self._cache: Dict[str, Dict[str, Any]] = {
             'features': {},
-            'savedGroups': {}
+            'savedGroups': {},
+            'contextualBandits': {}
         }
         self._lock = threading.Lock()
 
-    def update(self, features: Dict[str, Any], saved_groups: Dict[str, Any]) -> None:
+    def update(self, features: Dict[str, Any], saved_groups: Dict[str, Any],
+               contextual_bandits: Optional[Dict[str, Any]] = None) -> None:
         """Simple thread-safe update of cache with new API data"""
         with self._lock:
             self._cache['features'] = dict(features)
             self._cache['savedGroups'] = dict(saved_groups)
+            self._cache['contextualBandits'] = dict(contextual_bandits or {})
 
     def get_current_state(self) -> Dict[str, Any]:
         """Get current cache state"""
         with self._lock:
             return {
                 "features": dict(self._cache['features']),
-                "savedGroups": self._cache['savedGroups']
+                "savedGroups": self._cache['savedGroups'],
+                "contextualBandits": self._cache['contextualBandits']
             }
 
 class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
@@ -342,7 +346,8 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         # Directly update with new features
         self._feature_cache.update(
             data.get("features", {}),
-            data.get("savedGroups", {})
+            data.get("savedGroups", {}),
+            data.get("contextualBandits", {})
         )
 
         # Create a copy of callbacks to avoid modification during iteration
@@ -410,7 +415,9 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                     data = json.loads(data)
 
                 if self._decryption_key and isinstance(data, dict) and (
-                    "encryptedFeatures" in data or "encryptedSavedGroups" in data
+                    "encryptedFeatures" in data
+                    or "encryptedSavedGroups" in data
+                    or "encryptedContextualBandits" in data
                 ):
                     logger.debug("Decrypting SSE payload...")
                     data = self.decrypt_response(data, self._decryption_key)
@@ -1141,13 +1148,15 @@ class GrowthBookClient:
         async with self._context_lock:  # serializes concurrent updaters only
             features = features_from_dict(features_data.get("features"))
             saved_groups = features_data.get("savedGroups", {})
+            contextual_bandits = features_data.get("contextualBandits", {})
 
             # Build a NEW immutable snapshot and swap the reference atomically
             # (single assignment). In-flight evaluations captured the previous
             # snapshot and finish against it; new evaluations see this one.
             # This is what lets evaluations run without any lock.
             self._global_context = GlobalContext(
-                options=self.options, features=features, saved_groups=saved_groups
+                options=self.options, features=features, saved_groups=saved_groups,
+                contextual_bandits=contextual_bandits
             )
 
     async def __aenter__(self) -> "GrowthBookClient":
@@ -1185,6 +1194,7 @@ class GrowthBookClient:
                 options=self.options,
                 features=features_from_dict(response.get("features")),
                 saved_groups=response.get("savedGroups") or {},
+                contextual_bandits=response.get("contextualBandits") or {},
             )
             return EvaluationContext(
                 user=user_context,

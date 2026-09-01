@@ -705,6 +705,18 @@ class FeatureRepository(object):
         elif "features" not in data:
             logger.warning("GrowthBook API response missing features")
         
+        if "encryptedContextualBandits" in data:
+            if not decryption_key:
+                raise ValueError("Must specify decryption_key")
+            try:
+                decrypted = decrypt(data["encryptedContextualBandits"], decryption_key)
+                data['contextualBandits'] = json.loads(decrypted)
+                del data['encryptedContextualBandits']
+            except Exception:
+                logger.warning(
+                    "Failed to decrypt contextual bandits from GrowthBook API response"
+                )
+
         if "encryptedSavedGroups" in data:
             if not decryption_key:
                 raise ValueError("Must specify decryption_key")
@@ -717,7 +729,7 @@ class FeatureRepository(object):
                 logger.warning(
                     "Failed to decrypt saved groups from GrowthBook API response"
                 )
-            
+
         return data
 
     # Fetch features from the GrowthBook API
@@ -870,6 +882,7 @@ class GrowthBook(object):
         sticky_bucket_service: Optional[AbstractStickyBucketService] = None,
         sticky_bucket_identifier_attributes: Optional[List[str]] = None,
         saved_groups: Optional[Dict[str, Any]] = None,
+        contextual_bandits: Optional[Dict[str, Any]] = None,
         remote_eval: bool = False,
         cache_key_attributes: Optional[List[str]] = None,
         streaming: bool = False,
@@ -889,11 +902,13 @@ class GrowthBook(object):
         http_connect_timeout: Optional[int] = None,
         http_read_timeout: Optional[int] = None,
         savedGroups: Optional[Dict[str, Any]] = None,
+        contextualBandits: Optional[Dict[str, Any]] = None,
         remoteEval: bool = False,
         cacheKeyAttributes: Optional[List[str]] = None,
     ) -> None:
         remote_eval = remote_eval or remoteEval
         saved_groups = saved_groups if saved_groups is not None else savedGroups
+        contextual_bandits = contextual_bandits if contextual_bandits is not None else contextualBandits
         cache_key_attributes = cache_key_attributes if cache_key_attributes is not None else cacheKeyAttributes
         self._remoteEval = remote_eval
         self._cacheKeyAttributes = cache_key_attributes
@@ -917,6 +932,7 @@ class GrowthBook(object):
         self._url = url
         self._features: Dict[str, Feature] = {}
         self._saved_groups = saved_groups if saved_groups is not None else {}
+        self._contextual_bandits = contextual_bandits if contextual_bandits is not None else {}
         self._api_host = api_host
         self._client_key = client_key
         self._decryption_key = decryption_key
@@ -972,8 +988,9 @@ class GrowthBook(object):
                 qa_mode=self._qaMode
             ),
             features={},
-            saved_groups=self._saved_groups
-        )       
+            saved_groups=self._saved_groups,
+            contextual_bandits=self._contextual_bandits
+        )
         # Create a user context for the current user
         self._user_ctx: UserContext = UserContext(
             url=self._url,
@@ -1025,10 +1042,12 @@ class GrowthBook(object):
 
     def _on_feature_update(self, features_data: Dict[str, Any]) -> None:
         """Callback to handle automatic feature updates from FeatureRepository"""
-        # savedGroups must be assigned before set_features(), which is what
-        # re-syncs them into the shared global evaluation context.
+        # savedGroups/contextualBandits must be assigned before set_features(),
+        # which is what re-syncs them into the shared global evaluation context.
         if features_data and "savedGroups" in features_data:
             self._saved_groups = features_data["savedGroups"]
+        if features_data and "contextualBandits" in features_data:
+            self._contextual_bandits = features_data["contextualBandits"]
         if features_data and "features" in features_data:
             self.set_features(features_data["features"])
 
@@ -1054,6 +1073,9 @@ class GrowthBook(object):
         if response is not None and "savedGroups" in response:
             self._saved_groups = response["savedGroups"]
 
+        if response is not None and "contextualBandits" in response:
+            self._contextual_bandits = response["contextualBandits"]
+
         if response is not None and "features" in response.keys():
             self.set_features(response["features"])
 
@@ -1076,6 +1098,8 @@ class GrowthBook(object):
         if features is not None:
             if "savedGroups" in features:
                 self._saved_groups = features["savedGroups"]
+            if "contextualBandits" in features:
+                self._contextual_bandits = features["contextualBandits"]
             if "features" in features:
                 self.set_features(features["features"])
 
@@ -1090,6 +1114,8 @@ class GrowthBook(object):
         if data is not None:
             if "savedGroups" in data:
                 self._saved_groups = data["savedGroups"]
+            if "contextualBandits" in data:
+                self._contextual_bandits = data["contextualBandits"]
             if "features" in data:
                 self.set_features(data["features"])
             feature_repo.save_in_cache(key, data, self._cache_ttl)
@@ -1163,6 +1189,7 @@ class GrowthBook(object):
             # Update the global context with the new features and saved groups
             self._global_ctx.features = self._features
             self._global_ctx.saved_groups = self._saved_groups
+            self._global_ctx.contextual_bandits = self._contextual_bandits
             self.refresh_sticky_buckets()
         finally:
             self._is_updating_features = False
@@ -1458,7 +1485,7 @@ class GrowthBook(object):
         attributes = set()
         for key, feature in self._features.items():
             for rule in feature.rules:
-                if rule.variations:
+                if rule.variations or rule.contextualVariations:
                     attributes.add(rule.hashAttribute or "id")
                     if rule.fallbackAttribute:
                         attributes.add(rule.fallbackAttribute)

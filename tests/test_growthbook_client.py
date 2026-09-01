@@ -402,7 +402,9 @@ async def test_initialization_state_verification(mock_options, mock_features_res
         
         assert success == True
         assert callback_called == True
-        assert features_received == mock_features_response
+        # Callbacks receive the full cache state, which always carries a
+        # contextualBandits key alongside features/savedGroups
+        assert features_received == {**mock_features_response, "contextualBandits": {}}
         # Convert Feature objects to dict for comparison
         features_dict = {
             key: {"defaultValue": feature.defaultValue, "rules": feature.rules}
