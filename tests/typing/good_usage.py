@@ -6,8 +6,11 @@ change to the SDK makes any line here error, the public typing contract broke.
 from typing import Any, Dict, List, Optional
 
 from growthbook import (
+    ContextualBanditAssignment,
+    ContextualBanditDefinition,
     Experiment,
     FeatureResult,
+    FeatureRule,
     GrowthBook,
     GrowthBookClient,
     JSONValue,
@@ -24,9 +27,27 @@ count: int = gb.get_feature_value("max-items", 5)
 shouted = gb.get_feature_value("banner", "blue").upper()
 flag: bool = gb.is_on("dark-mode")
 
+# Contextual bandit payload fields are first-class named kwargs, and the
+# assignment/definition shapes are exported TypedDicts.
+cb_definition: ContextualBanditDefinition = {
+    "banditVersion": 7,
+    "contexts": [{"leafId": 1, "condition": {}, "weights": [1.0, 0.0]}],
+}
+cb_rule = FeatureRule(contextualBanditRef="cb_1", contextualVariations=["a", "b"])
+cb_exp = Experiment(
+    key="cb",
+    variations=["a", "b"],
+    contextualBandit={"leafId": 1, "variationWeights": [1.0, 0.0]},
+)
+cb_assignment: Optional[ContextualBanditAssignment] = cb_exp.contextualBandit
+
 # run() infers Result[T] from the experiment's variations.
 res: Result[int] = gb.run(Experiment(key="t", variations=[1, 2]))
 doubled: int = res.value * 2
+# Contextual bandit exposure metadata on Result (None for non-CB results).
+res_leaf: Optional[int] = res.leafId
+res_weights: Optional[List[float]] = res.variationWeights
+res_bandit_version: Optional[int] = res.banditVersion
 str_res = gb.run(Experiment(key="t2", variations=["a", "b"]))
 upper: str = str_res.value.upper()
 
