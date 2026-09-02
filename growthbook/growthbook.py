@@ -1488,7 +1488,13 @@ class GrowthBook(object):
         )
         if not self._tracked.get(key):
             try:
-                self._trackingCallback(experiment=experiment, result=result, user_context=user_context)
+                # Snapshot so the logged attributes are exactly the ones used
+                # for bucketing, even if the caller mutates them afterwards.
+                self._trackingCallback(
+                    experiment=experiment,
+                    result=result,
+                    user_context=tracking_user_context(user_context),
+                )
                 self._tracked[key] = True
             except Exception as e:
                 logger.exception(e)

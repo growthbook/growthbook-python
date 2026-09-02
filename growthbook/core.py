@@ -17,7 +17,6 @@ from .common_types import (
     Result,
     UserContext,
     VariationMeta,
-    tracking_user_context,
 )
 
 
@@ -575,7 +574,7 @@ def _fire_rule_tracks(
                 bucket=res_data.get("bucket"),
                 stickyBucketUsed=res_data.get("stickyBucketUsed", False),
             )
-            tracking_cb(experiment, result, tracking_user_context(eval_context.user))
+            tracking_cb(experiment, result, eval_context.user)
         except Exception:
             logger.exception("Failed to fire rule.tracks tracking event")
 
@@ -1159,10 +1158,13 @@ def run_experiment(experiment: Experiment[Any],
                         "assignment doc was not persisted"
                     )
 
-    # 14. Fire the tracking callback if set. The user context is snapshotted
-    # so the logged attributes are exactly the ones used for bucketing.
+    # 14. Fire the tracking callback if set. The clients' _track wrappers
+    # snapshot the user context (tracking_user_context) before invoking the
+    # user's callback, so the logged attributes are exactly the ones used
+    # for bucketing; snapshotting there instead of here keeps evals
+    # allocation-free when no tracking callback is configured.
     if tracking_cb:
-        tracking_cb(experiment, result, tracking_user_context(evalContext.user))
+        tracking_cb(experiment, result, evalContext.user)
 
     # 15. Return the result
     logger.debug("Assigned variation %d in experiment %s", assigned, experiment.key)

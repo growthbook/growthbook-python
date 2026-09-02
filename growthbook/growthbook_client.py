@@ -780,10 +780,13 @@ class GrowthBookClient:
                         # Tracking callbacks are invoked by keyword (same
                         # contract as the sync client): implementations must
                         # name their params experiment/result/user_context.
+                        # user_context is snapshotted so the logged attributes
+                        # are exactly the ones used for bucketing, even if the
+                        # caller mutates them afterwards.
                         kwargs={
                             "experiment": experiment,
                             "result": result,
-                            "user_context": user_context,
+                            "user_context": tracking_user_context(user_context),
                         },
                     )
                     self._tracked[key] = True
