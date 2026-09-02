@@ -112,13 +112,22 @@ class FeatureCache:
         }
         self._lock = threading.Lock()
 
-    def update(self, features: Dict[str, Any], saved_groups: Dict[str, Any],
+    def update(self, features: Optional[Dict[str, Any]],
+               saved_groups: Optional[Dict[str, Any]] = None,
                contextual_bandits: Optional[Dict[str, Any]] = None) -> None:
-        """Simple thread-safe update of cache with new API data"""
+        """Thread-safe update of cache with new API data.
+
+        A section passed as None (the payload omitted that key) keeps its
+        current value — a partial or broken refresh must not wipe state that
+        evaluations depend on (mirrors JS setPayload). Pass an explicit empty
+        dict to clear a section."""
         with self._lock:
-            self._cache['features'] = dict(features)
-            self._cache['savedGroups'] = dict(saved_groups)
-            self._cache['contextualBandits'] = dict(contextual_bandits or {})
+            if features is not None:
+                self._cache['features'] = dict(features)
+            if saved_groups is not None:
+                self._cache['savedGroups'] = dict(saved_groups)
+            if contextual_bandits is not None:
+                self._cache['contextualBandits'] = dict(contextual_bandits)
 
     def get_current_state(self) -> Dict[str, Any]:
         """Get current cache state"""
@@ -345,10 +354,12 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
     async def _handle_feature_update(self, data: Dict[str, Any]) -> None:
         """Update features with memory optimization"""
         # Directly update with new features
+        # Sections absent from the payload are passed as None so the cache
+        # preserves their current values (see FeatureCache.update).
         self._feature_cache.update(
-            data.get("features", {}),
-            data.get("savedGroups", {}),
-            data.get("contextualBandits", {})
+            data.get("features"),
+            data.get("savedGroups"),
+            data.get("contextualBandits")
         )
 
         # Create a copy of callbacks to avoid modification during iteration

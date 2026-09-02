@@ -207,9 +207,52 @@ def test_feature_cache_round_trip():
     cache.update({"f": {"defaultValue": 1}}, {"sg": []}, CB_MAP)
     state = cache.get_current_state()
     assert state["contextualBandits"] == CB_MAP
-    # Omitting the argument clears the map (payload without the key)
-    cache.update({}, {})
+    # A refresh whose payload omits a section (None) preserves its current
+    # value; an explicit empty dict clears it.
+    cache.update({"f": {"defaultValue": 2}})
+    assert cache.get_current_state()["contextualBandits"] == CB_MAP
+    assert cache.get_current_state()["savedGroups"] == {"sg": []}
+    cache.update(None, {}, {})
     assert cache.get_current_state()["contextualBandits"] == {}
+    assert cache.get_current_state()["features"] == {"f": {"defaultValue": 2}}
+
+
+@pytest.mark.asyncio
+async def test_refresh_without_bandit_key_preserves_map():
+    """A second refresh whose payload lacks contextualBandits (partial or
+    broken payload) must not wipe the map mid-flight — evals keep routing
+    with the last known weights."""
+    EnhancedFeatureRepository._instances = {}
+    full_payload = {
+        "features": CB_FEATURES,
+        "savedGroups": {},
+        "contextualBandits": CB_MAP,
+    }
+    with patch(
+        "growthbook.FeatureRepository.load_features_async",
+        new_callable=AsyncMock,
+        return_value=full_payload,
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh",
+        new_callable=AsyncMock,
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh",
+        new_callable=AsyncMock,
+    ):
+        async with GrowthBookClient(
+            Options(api_host="https://localhost.growthbook.io", client_key="test-key")
+        ) as client:
+            repo = client._features_repository
+            # A full refresh populates the cache...
+            await repo._handle_feature_update(full_payload)
+            # ...then a partial refresh missing the CB section must not wipe it
+            await repo._handle_feature_update({"features": CB_FEATURES})
+            assert repo._feature_cache.get_current_state()["contextualBandits"] == CB_MAP
+            result = await client.eval_feature(
+                "bandit-feature", UserContext(attributes={"id": "1"})
+            )
+            assert result.value == "control"
+            assert result.experimentResult.leafId == 1
 
 
 @pytest.mark.asyncio
