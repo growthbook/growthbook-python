@@ -5,6 +5,7 @@
     "donut_price": {"defaultValue": 2.5},
     "max_items": {"defaultValue": 10},
     "meal_overrides": {"defaultValue": {"gluten_free": true}},
+    "hero_layout": {"rules": [{"contextualVariations": ["control", "wide"], "contextualBanditRef": "cb_1"}]},
     "promo_banner": {"rules": [{"force": "SUMMER"}]},
     "recent_tabs": {"defaultValue": ["home", "search"]}
   }

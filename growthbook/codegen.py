@@ -64,7 +64,16 @@ def python_type_for(default_value: Any) -> str:
 # endpoint payload from a bare {feature_key: definition} map that happens to
 # contain a feature literally named "features".
 _ENDPOINT_KEYS = frozenset(
-    {"features", "savedGroups", "encryptedFeatures", "encryptedSavedGroups", "dateUpdated", "status"}
+    {
+        "features",
+        "savedGroups",
+        "contextualBandits",
+        "encryptedFeatures",
+        "encryptedSavedGroups",
+        "encryptedContextualBandits",
+        "dateUpdated",
+        "status",
+    }
 )
 
 
@@ -93,9 +102,12 @@ def infer_feature_type(definition: Any) -> str:
     for rule in definition.get("rules") or []:
         if isinstance(rule, dict):
             candidates.append(rule.get("force"))
-            variations = rule.get("variations")
-            if isinstance(variations, list):
-                candidates.extend(variations)
+            # Contextual bandit rules carry their values under
+            # contextualVariations instead of variations.
+            for key in ("variations", "contextualVariations"):
+                variations = rule.get(key)
+                if isinstance(variations, list):
+                    candidates.extend(variations)
     types = {python_type_for(v) for v in candidates if v is not None}
     if len(types) == 1:
         return types.pop()
