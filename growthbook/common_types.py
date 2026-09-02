@@ -77,7 +77,7 @@ class ContextualBanditDefinition(TypedDict, total=False):
 # Assignment metadata attached to an Experiment/Result for a contextual
 # bandit rule. banditVersion is omitted (never None) when the definition
 # doesn't carry one — serialization must match the JS SDK byte-for-byte.
-class CBContext(TypedDict, total=False):
+class ContextualBanditAssignment(TypedDict, total=False):
     leafId: Required[int]
     variationWeights: Required[List[float]]
     banditVersion: int
@@ -112,7 +112,7 @@ class Experiment(Generic[T]):
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
         customFields: Optional[Dict[str, Any]] = None,
-        contextualBandit: Optional[CBContext] = None,
+        contextualBandit: Optional[ContextualBanditAssignment] = None,
         # NoReturn makes literal unknown kwargs a checker error (like TS excess
         # property checks) while **dict payload splats (typed Any) still pass;
         # at runtime unknown payload keys are swallowed as before.

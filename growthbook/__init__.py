@@ -30,7 +30,7 @@ from .growthbook import (
 
 from .common_types import (
     AbstractAsyncStickyBucketService,
-    CBContext,
+    ContextualBanditAssignment,
     ContextualBanditContext,
     ContextualBanditDefinition,
 )
@@ -68,7 +68,7 @@ __all__ = [
     "Feature",
     "FeatureResult",
     "FeatureRule",
-    "CBContext",
+    "ContextualBanditAssignment",
     "ContextualBanditContext",
     "ContextualBanditDefinition",
     # Typing helpers

@@ -8,7 +8,7 @@ from functools import lru_cache
 from urllib.parse import urlparse, parse_qs
 from typing import Callable, Optional, Any, Set, Tuple, List, Dict, cast
 from .common_types import (
-    CBContext,
+    ContextualBanditAssignment,
     ContextualBanditContext,
     EvaluationContext,
     FeatureResult,
@@ -634,7 +634,7 @@ def _build_contextual_bandit_experiment(
     if leaf is not None:
         weights = leaf["weights"]
         experiment.weights = weights
-        cb: CBContext = {"leafId": leaf["leafId"], "variationWeights": weights}
+        cb: ContextualBanditAssignment = {"leafId": leaf["leafId"], "variationWeights": weights}
     else:
         logger.debug(
             "Contextual bandit: no matching leaf, feature %s uses aggregate weights", feature_id
