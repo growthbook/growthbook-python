@@ -202,6 +202,45 @@ def test_one_bandit_shared_by_two_features():
     gb.destroy()
 
 
+def test_sync_set_payload_seeds_bandit_map():
+    gb = GrowthBook(attributes={"id": "1"})
+    gb.set_payload({"features": CB_FEATURES, "contextualBandits": CB_MAP})
+    res = gb.eval_feature("bandit-feature")
+    assert res.value == "control"
+    assert res.experimentResult.leafId == 1
+    # A later payload without the section preserves it
+    gb.set_payload({"features": CB_FEATURES})
+    assert gb.eval_feature("bandit-feature").experimentResult.leafId == 1
+    gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_async_set_payload_seeds_bandit_map():
+    EnhancedFeatureRepository._instances = {}
+    with patch(
+        "growthbook.FeatureRepository.load_features_async",
+        new_callable=AsyncMock,
+        return_value={"features": {}, "savedGroups": {}},
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh",
+        new_callable=AsyncMock,
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh",
+        new_callable=AsyncMock,
+    ):
+        async with GrowthBookClient(
+            Options(api_host="https://localhost.growthbook.io", client_key="test-key")
+        ) as client:
+            await client.set_payload(
+                {"features": CB_FEATURES, "contextualBandits": CB_MAP}
+            )
+            result = await client.eval_feature(
+                "bandit-feature", UserContext(attributes={"id": "1"})
+            )
+            assert result.value == "control"
+            assert result.experimentResult.leafId == 1
+
+
 def test_feature_cache_round_trip():
     cache = FeatureCache()
     cache.update({"f": {"defaultValue": 1}}, {"sg": []}, CB_MAP)

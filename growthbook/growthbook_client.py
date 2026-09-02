@@ -855,6 +855,13 @@ class GrowthBookClient:
 
     async def set_features(self, features: Dict[str, Any]) -> None:
         await self._feature_update_callback({"features": features})
+
+    async def set_payload(self, payload: Dict[str, Any]) -> None:
+        """Set features, saved groups, and contextual bandits from a full
+        (decrypted) SDK payload, e.g. one fetched out-of-band from the
+        GrowthBook API. Mirrors the JS SDK's setPayload: only the sections
+        present in the payload are overwritten."""
+        await self._feature_update_callback(payload)
         
     
     async def _refresh_sticky_buckets(self, attributes: Dict[str, Any]) -> Dict[str, Any]:

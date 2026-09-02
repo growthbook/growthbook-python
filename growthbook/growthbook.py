@@ -1052,6 +1052,13 @@ class GrowthBook(object):
         if features_data and "features" in features_data:
             self.set_features(features_data["features"])
 
+    def set_payload(self, payload: Dict[str, Any]) -> None:
+        """Set features, saved groups, and contextual bandits from a full
+        (decrypted) SDK payload, e.g. one fetched out-of-band from the
+        GrowthBook API. Mirrors the JS SDK's setPayload: only the sections
+        present in the payload are overwritten."""
+        self._on_feature_update(payload)
+
     def load_features(self, force_refresh: bool = False) -> None:
         """Load features from the configured endpoint, populating the cache.
 
