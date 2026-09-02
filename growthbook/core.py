@@ -613,7 +613,10 @@ def _build_contextual_bandit_experiment(
     Dangling ref: run as a plain experiment with no bandit metadata at all."""
     cb_definition = evalContext.global_ctx.contextual_bandits.get(contextual_bandit_ref)
     if not cb_definition:
-        logger.warning(
+        # debug, not warning: this fires on EVERY evaluation of the feature,
+        # and a payload-skew window makes it reachable in normal operation.
+        # The JS SDK logs these only in debug mode for the same reason.
+        logger.debug(
             "Contextual bandit %s not found in payload, feature %s falls back to aggregate weights",
             contextual_bandit_ref,
             feature_id,
@@ -626,9 +629,10 @@ def _build_contextual_bandit_experiment(
         try:
             leaf = _get_contextual_bandit_leaf(contexts, evalContext)
         except Exception:
-            logger.exception(
+            logger.debug(
                 "Contextual bandit leaf selection failed, feature %s falls back to aggregate weights",
                 feature_id,
+                exc_info=True,
             )
 
     if leaf is not None:
