@@ -642,9 +642,10 @@ class GlobalContext:
     options: Options
     features: Dict[str, "Feature"] = field(default_factory=dict)
     saved_groups: Dict[str, Any] = field(default_factory=dict)
-    # Raw payload "contextualBandits" map ({bandit id -> definition dict}),
-    # kept unmaterialized like saved_groups.
-    contextual_bandits: Dict[str, Any] = field(default_factory=dict)
+    # Payload "contextualBandits" map ({bandit id -> definition}), kept as
+    # dicts (not materialized into classes) like saved_groups; the TypedDict
+    # value type documents the wire shape for readers and checkers.
+    contextual_bandits: Dict[str, ContextualBanditDefinition] = field(default_factory=dict)
 
 @dataclass
 class EvaluationContext:
