@@ -1263,6 +1263,8 @@ class GrowthBookClient:
                 user=user_context,
                 global_ctx=global_ctx,
                 stack=StackContext(evaluated_features=set()),
+                tracking_cb=self._track,
+                callback_subscription=self._fire_subscriptions,
             )
 
         # Get sticky bucket assignments if needed
@@ -1285,6 +1287,8 @@ class GrowthBookClient:
                 self._schedule_sticky_bucket_save
                 if self.options.sticky_bucket_service else None
             ),
+            tracking_cb=self._track,
+            callback_subscription=self._fire_subscriptions,
         )
 
     async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult[Any]:
@@ -1292,7 +1296,7 @@ class GrowthBookClient:
         immutable feature snapshot, so concurrent evaluations never contend
         with each other or with feature updates."""
         context = await self.create_evaluation_context(user_context)
-        result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
+        result = core_eval_feature(key=key, evalContext=context)
         # Call feature usage callback if provided
         if self.options.on_feature_usage:
             try:
@@ -1328,7 +1332,6 @@ class GrowthBookClient:
         result = run_experiment(
             experiment=experiment,
             evalContext=context,
-            tracking_cb=self._track
         )
         # Fire subscriptions synchronously
         self._fire_subscriptions(experiment, result)

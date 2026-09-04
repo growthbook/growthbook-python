@@ -580,13 +580,14 @@ def getBucketRanges(
 def _fire_rule_tracks(
     rule_tracks: List[Dict[str, Any]],
     eval_context: EvaluationContext,
-    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]],
 ) -> None:
-    """Fire tracking_cb for each deferred experiment-tracking entry attached to
-    a remote-eval force rule. The proxy server evaluates experiments server-side
-    and emits the resulting (experiment, result) pairs here so the SDK can still
-    drive its tracking pipeline. Mirrors the JS SDK behavior in
-    packages/sdk-js/src/core.ts (`if (rule.tracks) ...`)."""
+    """Fire the context's tracking callback for each deferred
+    experiment-tracking entry attached to a remote-eval force rule. The proxy
+    server evaluates experiments server-side and emits the resulting
+    (experiment, result) pairs here so the SDK can still drive its tracking
+    pipeline. Mirrors the JS SDK behavior in packages/sdk-js/src/core.ts
+    (`if (rule.tracks) ...`)."""
+    tracking_cb = eval_context.tracking_cb
     if not rule_tracks or not tracking_cb:
         return
     for entry in rule_tracks:
@@ -753,10 +754,11 @@ def _build_contextual_bandit_experiment(
 def eval_feature(
     key: str,
     evalContext: Optional[EvaluationContext] = None,
-    callback_subscription: Optional[Callable[[Experiment[Any], Result[Any]], None]] = None,
-    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None
 ) -> FeatureResult[Any]:
-    """Core feature evaluation logic as a standalone function"""
+    """Core feature evaluation logic as a standalone function.
+
+    Tracking and subscription callbacks are read from the EvaluationContext
+    so recursive evaluations (prerequisites) report through them too."""
 
     if evalContext is None:
         raise ValueError("evalContext is required - eval_feature")
@@ -824,7 +826,7 @@ def eval_feature(
             # remote-eval proxy (no-op when the rule was not produced by remote
             # evaluation).
             if rule.tracks:
-                _fire_rule_tracks(rule.tracks, evalContext, tracking_cb)
+                _fire_rule_tracks(rule.tracks, evalContext)
             return FeatureResult(rule.force, "force", ruleId=rule.id)
 
         # Contextual bandit rules carry their variations under
@@ -863,7 +865,7 @@ def eval_feature(
         if rule.contextualBanditRef:
             _build_contextual_bandit_experiment(exp, rule.contextualBanditRef, key, evalContext)
 
-        result = run_experiment(experiment=exp, featureId=key, evalContext=evalContext, tracking_cb=tracking_cb)
+        result = run_experiment(experiment=exp, featureId=key, evalContext=evalContext)
 
         # Bandit metadata is only meaningful for real hashed exposures; strip
         # it from the experiment for forced/QA/coverage-miss outcomes so it
@@ -871,8 +873,8 @@ def eval_feature(
         if exp.contextualBandit is not None and not (result.hashUsed and result.inExperiment):
             exp.contextualBandit = None
 
-        if callback_subscription:
-            callback_subscription(exp, result)
+        if evalContext.callback_subscription:
+            evalContext.callback_subscription(exp, result)
 
         if not result.inExperiment:
             logger.debug(
@@ -1000,7 +1002,6 @@ def _get_sticky_bucket_variation(
 def run_experiment(experiment: Experiment[Any],
                    featureId: Optional[str] = None,
                    evalContext: Optional[EvaluationContext] = None,
-                   tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None
                 ) -> Result[Any]:
     if evalContext is None:
         raise ValueError("evalContext is required - run_experiment")
@@ -1269,8 +1270,8 @@ def run_experiment(experiment: Experiment[Any],
     # user's callback, so the logged attributes are exactly the ones used
     # for bucketing; snapshotting there instead of here keeps evals
     # allocation-free when no tracking callback is configured.
-    if tracking_cb:
-        tracking_cb(experiment, result, evalContext.user)
+    if evalContext.tracking_cb:
+        evalContext.tracking_cb(experiment, result, evalContext.user)
 
     # 15. Return the result
     logger.debug("Assigned variation %d in experiment %s", assigned, experiment.key)

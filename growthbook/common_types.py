@@ -690,6 +690,13 @@ class EvaluationContext:
     # directly, letting the async client schedule persistence off the event loop.
     # None (the default) preserves the sync client's direct-call behavior.
     save_sticky_bucket_doc: Optional[Callable[[Dict[str, Any]], None]] = None
+    # Client callbacks carried on the context rather than threaded through as
+    # function parameters, so nested evaluations — prerequisites especially —
+    # inherit them automatically (JS SDK: ctx.global.trackingCallback). A
+    # recursive call site that forgets a parameter silently drops telemetry;
+    # a shared context field cannot be forgotten.
+    tracking_cb: Optional[Callable[["Experiment[Any]", "Result[Any]", UserContext], None]] = None
+    callback_subscription: Optional[Callable[["Experiment[Any]", "Result[Any]"], None]] = None
 
 
 # ---------------------------------------------------------------------------

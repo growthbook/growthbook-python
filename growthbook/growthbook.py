@@ -1455,7 +1455,12 @@ class GrowthBook(object):
         return EvaluationContext(
             global_ctx = self._global_ctx,
             user = self._user_ctx,
-            stack = StackContext(evaluated_features=set())
+            stack = StackContext(evaluated_features=set()),
+            # Wired only when a consumer exists (contexts are per-eval, so a
+            # callback installed later — e.g. by a plugin — is still picked
+            # up), letting core skip dead work like rule.tracks hydration.
+            tracking_cb = self._track if self._trackingCallback else None,
+            callback_subscription = self._fireSubscriptions,
         )
 
     def _get_eval_context(self) -> EvaluationContext:
@@ -1465,11 +1470,7 @@ class GrowthBook(object):
         return self._build_eval_context()
 
     def eval_feature(self, key: str) -> FeatureResult[Any]:
-        result = core_eval_feature(key=key, 
-                                   evalContext=self._get_eval_context(), 
-                                   callback_subscription=self._fireSubscriptions,
-                                   tracking_cb=self._track
-                                   )
+        result = core_eval_feature(key=key, evalContext=self._get_eval_context())
         # Call feature usage callback if provided
         if self._featureUsageCallback:
             try:
@@ -1504,11 +1505,8 @@ class GrowthBook(object):
                         pass
 
     def run(self, experiment: Experiment[T]) -> Result[T]:
-        # result = self._run(experiment)
         result = run_experiment(experiment=experiment,
-                                evalContext=self._get_eval_context(),
-                                tracking_cb=self._track
-                                )
+                                evalContext=self._get_eval_context())
 
         self._fireSubscriptions(experiment, result)
         return result
