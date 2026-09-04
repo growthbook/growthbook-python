@@ -13,6 +13,7 @@ from .common_types import (
     JSONValue,
     Options,
     Result,
+    TrackingBuffer,
     TrackingCallback,
     UserContext,
 )
@@ -62,6 +63,7 @@ __all__ = [
     "Options",
     "UserContext",
     "FeatureRefreshStrategy",
+    "TrackingBuffer",
     # Data model
     "Experiment",
     "Result",

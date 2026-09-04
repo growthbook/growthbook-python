@@ -36,6 +36,7 @@ from .common_types import (
     AbstractStickyBucketService,
     AbstractAsyncStickyBucketService,
     FeatureRule,
+    TrackingBuffer,
     build_remote_eval_payload,
     features_from_dict,
     tracking_dedupe_key,
@@ -934,6 +935,11 @@ class GrowthBook(object):
         # included) so every existing positional call site keeps its meaning.
         contextual_bandits: Optional[Dict[str, Any]] = None,
         contextualBandits: Optional[Dict[str, Any]] = None,
+        # New in 3.1.0, after the deprecated block so every earlier positional
+        # index is preserved. Opt-in: buffer every exposure for forwarding to
+        # a client SDK (see get_deferred_tracking_calls). Independent of
+        # on_experiment_viewed.
+        defer_tracking: bool = False,
     ) -> None:
         remote_eval = remote_eval or remoteEval
         saved_groups = saved_groups if saved_groups is not None else savedGroups
@@ -995,6 +1001,7 @@ class GrowthBook(object):
         self._forcedFeatures: Dict[str, Any] = forced_features or {}
 
         self._tracked: Dict[str, Any] = {}
+        self._deferred_buffer: Optional[TrackingBuffer] = TrackingBuffer() if defer_tracking else None
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Callable[[Experiment[Any], Result[Any]], None]] = set()
         self._is_updating_features = False
@@ -1333,6 +1340,8 @@ class GrowthBook(object):
         try:
             self._subscriptions.clear()
             self._tracked.clear()
+            if self._deferred_buffer:
+                self._deferred_buffer.clear()
             self._assigned.clear()
             self._trackingCallback = None
             self._featureUsageCallback = None
@@ -1463,6 +1472,7 @@ class GrowthBook(object):
             tracking_cb = self._track if self._trackingCallback else None,
             callback_subscription = self._fireSubscriptions,
             feature_usage_cb = self._feature_usage if self._featureUsageCallback else None,
+            tracking_buffer = self._deferred_buffer,
         )
 
     def _get_eval_context(self) -> EvaluationContext:
@@ -1519,6 +1529,22 @@ class GrowthBook(object):
     def subscribe(self, callback: Callable[[Experiment[Any], Result[Any]], None]) -> Callable[[], None]:
         self._subscriptions.add(callback)
         return lambda: self._subscriptions.remove(callback)
+
+    def get_deferred_tracking_calls(self) -> List[Dict[str, Any]]:
+        """Exposures buffered by defer_tracking=True, as JSON-ready dicts in
+        the JS SDK's TrackingData shape ({experiment, result, user}) — forward
+        them to a client SDK's setDeferredTrackingCalls. Non-destructive;
+        call clear_deferred_tracking_calls() once they have been handed off.
+
+        When one instance serves many users (set_attributes per request), the
+        buffer spans all of them: read and clear it per request, or use one
+        instance per request, so exposures are never forwarded to the wrong
+        client."""
+        return self._deferred_buffer.get_calls() if self._deferred_buffer else []
+
+    def clear_deferred_tracking_calls(self) -> None:
+        if self._deferred_buffer:
+            self._deferred_buffer.clear()
 
     def _track(self, experiment: Experiment[Any], result: Result[Any], user_context: UserContext) -> None:
         if not self._trackingCallback:

@@ -37,6 +37,7 @@ from .common_types import (
     build_remote_eval_payload,
     features_from_dict,
     snapshot_user_context,
+    TrackingBuffer,
     tracking_dedupe_key,
     tracking_user_context,
     validate_remote_eval_options,
@@ -1217,7 +1218,29 @@ class GrowthBookClient:
     ) -> None:
         await self.close()
 
-    async def create_evaluation_context(self, user_context: UserContext) -> EvaluationContext:
+    def _context_callbacks(self, tracking_buffer: Optional[TrackingBuffer]) -> Dict[str, Any]:
+        """Callback/buffer fields for a new EvaluationContext, shared by both
+        construction branches so neither can drift and silently drop telemetry.
+
+        callback_subscription is intentionally NOT wired: subscriptions on the
+        multi-user client fire only from run() (like the JS multi-user client,
+        which has no eval-time subscriptions). Firing them per eval_feature
+        would spam subscribers, since unlike the single-user sync client there
+        is no per-user assignment change-detection here."""
+        return {
+            # Wired only when a consumer exists (contexts are per-eval, so a
+            # callback installed later — e.g. by a plugin — is still picked
+            # up), letting core skip dead work like rule.tracks hydration.
+            "tracking_cb": self._track if self.options.on_experiment_viewed else None,
+            "feature_usage_cb": self._feature_usage if self.options.on_feature_usage else None,
+            "tracking_buffer": tracking_buffer,
+        }
+
+    async def create_evaluation_context(
+        self,
+        user_context: UserContext,
+        tracking_buffer: Optional[TrackingBuffer] = None,
+    ) -> EvaluationContext:
         """Create evaluation context for feature evaluation"""
         # Capture the snapshot once; feature updates swap the reference, so
         # this evaluation runs against a consistent view without locking.
@@ -1259,9 +1282,7 @@ class GrowthBookClient:
                 user=user_context,
                 global_ctx=global_ctx,
                 stack=StackContext(evaluated_features=set()),
-                tracking_cb=self._track,
-                callback_subscription=self._fire_subscriptions,
-                feature_usage_cb=self._feature_usage if self.options.on_feature_usage else None,
+                **self._context_callbacks(tracking_buffer),
             )
 
         # Get sticky bucket assignments if needed
@@ -1284,16 +1305,24 @@ class GrowthBookClient:
                 self._schedule_sticky_bucket_save
                 if self.options.sticky_bucket_service else None
             ),
-            tracking_cb=self._track,
-            callback_subscription=self._fire_subscriptions,
-            feature_usage_cb=self._feature_usage if self.options.on_feature_usage else None,
+            **self._context_callbacks(tracking_buffer),
         )
 
-    async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult[Any]:
+    async def eval_feature(
+        self,
+        key: str,
+        user_context: UserContext,
+        *,
+        tracking_buffer: Optional[TrackingBuffer] = None,
+    ) -> FeatureResult[Any]:
         """Evaluate a feature. Lock-free: the evaluation context captures an
         immutable feature snapshot, so concurrent evaluations never contend
-        with each other or with feature updates."""
-        context = await self.create_evaluation_context(user_context)
+        with each other or with feature updates.
+
+        Pass a per-request TrackingBuffer to collect the exposures this
+        evaluation produces (deferred tracking); the caller owns the buffer,
+        so requests never mix."""
+        context = await self.create_evaluation_context(user_context, tracking_buffer)
         return core_eval_feature(key=key, evalContext=context)
 
     def _feature_usage(self, key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
@@ -1312,23 +1341,38 @@ class GrowthBookClient:
         except Exception:
             logger.exception("Error in feature usage callback")
 
-    async def is_on(self, key: str, user_context: UserContext) -> bool:
+    async def is_on(
+        self, key: str, user_context: UserContext, *,
+        tracking_buffer: Optional[TrackingBuffer] = None,
+    ) -> bool:
         """Check if a feature is enabled with proper async context management"""
-        result = await self.eval_feature(key, user_context)
+        result = await self.eval_feature(key, user_context, tracking_buffer=tracking_buffer)
         return result.on
 
-    async def is_off(self, key: str, user_context: UserContext) -> bool:
+    async def is_off(
+        self, key: str, user_context: UserContext, *,
+        tracking_buffer: Optional[TrackingBuffer] = None,
+    ) -> bool:
         """Check if a feature is set to off with proper async context management"""
-        result = await self.eval_feature(key, user_context)
+        result = await self.eval_feature(key, user_context, tracking_buffer=tracking_buffer)
         return result.off
 
-    async def get_feature_value(self, key: str, fallback: T, user_context: UserContext) -> T:
-        result = await self.eval_feature(key, user_context)
+    async def get_feature_value(
+        self, key: str, fallback: T, user_context: UserContext, *,
+        tracking_buffer: Optional[TrackingBuffer] = None,
+    ) -> T:
+        result = await self.eval_feature(key, user_context, tracking_buffer=tracking_buffer)
         return cast(T, result.value) if result.value is not None else fallback
 
-    async def run(self, experiment: Experiment[T], user_context: UserContext) -> Result[T]:
+    async def run(
+        self,
+        experiment: Experiment[T],
+        user_context: UserContext,
+        *,
+        tracking_buffer: Optional[TrackingBuffer] = None,
+    ) -> Result[T]:
         """Run experiment with tracking. Lock-free, same as eval_feature."""
-        context = await self.create_evaluation_context(user_context)
+        context = await self.create_evaluation_context(user_context, tracking_buffer)
         result = run_experiment(
             experiment=experiment,
             evalContext=context,

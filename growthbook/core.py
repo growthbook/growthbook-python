@@ -6,7 +6,7 @@ import json
 from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
-from typing import Callable, Optional, Any, Set, Tuple, List, Dict, cast
+from typing import Optional, Any, Set, Tuple, List, Dict, cast
 from typing_extensions import TypeGuard
 from .common_types import (
     ContextualBanditAssignment,
@@ -16,7 +16,6 @@ from .common_types import (
     Experiment,
     Filter,
     Result,
-    UserContext,
     VariationMeta,
 )
 
@@ -581,14 +580,15 @@ def _fire_rule_tracks(
     rule_tracks: List[Dict[str, Any]],
     eval_context: EvaluationContext,
 ) -> None:
-    """Fire the context's tracking callback for each deferred
-    experiment-tracking entry attached to a remote-eval force rule. The proxy
-    server evaluates experiments server-side and emits the resulting
-    (experiment, result) pairs here so the SDK can still drive its tracking
-    pipeline. Mirrors the JS SDK behavior in packages/sdk-js/src/core.ts
-    (`if (rule.tracks) ...`)."""
-    tracking_cb = eval_context.tracking_cb
-    if not rule_tracks or not tracking_cb:
+    """Report each pre-evaluated experiment-tracking entry attached to a
+    remote-eval force rule through the context's tracking buffer and tracking
+    callback. The proxy server evaluates experiments server-side and emits the
+    resulting (experiment, result) pairs here so the SDK can still drive its
+    tracking pipeline. Mirrors the JS SDK behavior in
+    packages/sdk-js/src/core.ts (`if (rule.tracks) ...`)."""
+    if not rule_tracks or (
+        eval_context.tracking_cb is None and eval_context.tracking_buffer is None
+    ):
         return
     for entry in rule_tracks:
         exp_data = entry.get("experiment") or {}
@@ -636,7 +636,7 @@ def _fire_rule_tracks(
                 variationWeights=variation_weights,
                 banditVersion=bandit_version,
             )
-            tracking_cb(experiment, result, eval_context.user)
+            _report_exposure(experiment, result, eval_context)
         except Exception:
             logger.exception("Failed to fire rule.tracks tracking event")
 
@@ -749,6 +749,20 @@ def _build_contextual_bandit_experiment(
     if _is_valid_bandit_id(bandit_version):
         cb["banditVersion"] = bandit_version
     experiment.contextualBandit = cb
+
+
+def _report_exposure(
+    experiment: Experiment[Any],
+    result: Result[Any],
+    evalContext: EvaluationContext,
+) -> None:
+    """Report one experiment exposure: deferred tracking buffer first (it
+    snapshots for itself, so a failing callback can never lose it), then the
+    tracking callback. Buffering is independent of the callback — both fire."""
+    if evalContext.tracking_buffer is not None:
+        evalContext.tracking_buffer.record(experiment, result, evalContext.user)
+    if evalContext.tracking_cb:
+        evalContext.tracking_cb(experiment, result, evalContext.user)
 
 
 def _report_feature_usage(
@@ -1290,13 +1304,13 @@ def run_experiment(experiment: Experiment[Any],
                         "assignment doc was not persisted"
                     )
 
-    # 14. Fire the tracking callback if set. The clients' _track wrappers
-    # snapshot the user context (tracking_user_context) before invoking the
-    # user's callback, so the logged attributes are exactly the ones used
-    # for bucketing; snapshotting there instead of here keeps evals
-    # allocation-free when no tracking callback is configured.
-    if evalContext.tracking_cb:
-        evalContext.tracking_cb(experiment, result, evalContext.user)
+    # 14. Report the exposure (see _report_exposure: buffer first, then the
+    # tracking callback). The clients' _track wrappers snapshot the user
+    # context (tracking_user_context) before invoking the user's callback, so
+    # the logged attributes are exactly the ones used for bucketing;
+    # snapshotting there instead of here keeps evals allocation-free when no
+    # tracking callback is configured.
+    _report_exposure(experiment, result, evalContext)
 
     # 15. Return the result
     logger.debug("Assigned variation %d in experiment %s", assigned, experiment.key)

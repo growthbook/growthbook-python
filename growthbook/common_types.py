@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 
+import logging
+import threading
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import (
     TYPE_CHECKING,
@@ -30,6 +33,8 @@ from typing_extensions import Required
 # introspection (pydantic, dacite, ...). plugins.base only imports stdlib at
 # runtime, so this is cycle-free.
 from .plugins.base import PluginLike
+
+logger = logging.getLogger("growthbook")
 
 # Generic feature/experiment value type. Deliberately unbounded: a JSONValue
 # bound would reject TypedDict/dataclass-shaped fallbacks (see JS SDK issue #1729,
@@ -646,6 +651,60 @@ def tracking_user_context(user: "UserContext") -> "UserContext":
     return replace(user, attributes=snapshot_attributes(user.attributes))
 
 
+class TrackingBuffer:
+    """Collector for deferred tracking calls: experiment exposures buffered
+    during evaluation so a server can forward them to a client SDK (which
+    fires them through its own tracking callback — JS setDeferredTrackingCalls
+    / fireDeferredTrackingCalls). Buffering is independent of the tracking
+    callback: when both are wired, the buffer is written first and the
+    callback still fires (Go SDK semantics).
+
+    Entries use the JS SDK's TrackingData shape —
+    ``{"experiment": {...}, "result": {...}, "user": {"attributes", "url"}}``
+    — snapshotted at record time so nothing the caller mutates afterwards can
+    reach the buffer. Deduped by tracking_dedupe_key, first exposure wins,
+    insertion-ordered. Thread-safe: the async client may share one buffer
+    across concurrent evaluations of the same request."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._calls: Dict[str, Dict[str, Any]] = {}
+
+    def record(self, experiment: "Experiment[Any]", result: "Result[Any]", user: "UserContext") -> None:
+        key = tracking_dedupe_key(experiment, result)
+        if key in self._calls:
+            # Unlocked read is GIL-safe; the setdefault below closes the race
+            # (first exposure wins). This only skips building the entry twice.
+            return
+        try:
+            # Deep-snapshot at record time: to_dict() aliases nested mutables
+            # (variations, condition, attribute values), so a shallow entry
+            # would let later caller mutations reach the buffer.
+            entry = deepcopy({
+                "experiment": experiment.to_dict(),
+                "result": result.to_dict(),
+                "user": {"attributes": user.attributes, "url": user.url},
+            })
+        except Exception:
+            # Telemetry must never break evaluation: drop this exposure.
+            logger.exception("Failed to snapshot deferred tracking call")
+            return
+        with self._lock:
+            self._calls.setdefault(key, entry)
+
+    def get_calls(self) -> List[Dict[str, Any]]:
+        """Buffered exposures as detached copies (mutating them cannot corrupt
+        the buffer, which get_calls leaves intact for a later read), ready for
+        json.dumps. Non-destructive; pair with clear()."""
+        with self._lock:
+            snapshot = list(self._calls.values())
+        return deepcopy(snapshot)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._calls.clear()
+
+
 @dataclass
 class Options:
     url: Optional[str] = None
@@ -716,6 +775,10 @@ class EvaluationContext:
     # evaluation — one usage event per key per top-level eval call, however
     # many times a prerequisite chain re-visits it.
     reported_features: Set[str] = field(default_factory=set)
+    # When set, every exposure produced by this evaluation (prerequisites and
+    # passthrough included) is recorded here, before and independent of
+    # tracking_cb.
+    tracking_buffer: Optional[TrackingBuffer] = None
 
 
 # ---------------------------------------------------------------------------
