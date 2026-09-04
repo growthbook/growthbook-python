@@ -379,3 +379,48 @@ async def test_async_client_contextual_bandits():
             assert result.experimentResult.leafId == 1
             assert result.experimentResult.variationWeights == [1, 0]
             assert result.experimentResult.banditVersion == 7
+
+
+def test_sync_set_payload_bandits_only_republishes():
+    """A payload carrying only contextualBandits must take effect immediately,
+    not wait for the next features update to republish the eval context."""
+    gb = GrowthBook(attributes={"id": "1"}, features=CB_FEATURES, contextualBandits=CB_MAP)
+    assert gb.eval_feature("bandit-feature").value == "control"
+
+    flipped = {
+        "cb-bandit": {
+            "banditVersion": 8,
+            "contexts": [{"leafId": 2, "condition": {}, "weights": [0, 1]}],
+        }
+    }
+    gb.set_payload({"contextualBandits": flipped})
+    res = gb.eval_feature("bandit-feature")
+    assert res.value == "treatment"
+    assert res.experimentResult.leafId == 2
+    assert res.experimentResult.banditVersion == 8
+
+    # An explicit empty map clears it: the ref dangles, so the rule runs as a
+    # plain experiment on aggregate weights with no bandit metadata.
+    gb.set_payload({"contextualBandits": {}})
+    assert gb.eval_feature("bandit-feature").experimentResult.leafId is None
+    gb.destroy()
+
+
+def test_sync_refresh_swaps_a_coherent_snapshot():
+    """Refreshes rebind one new GlobalContext instead of mutating fields in
+    place, so a concurrent eval holding the old snapshot never sees features
+    from one payload generation with bandit weights from another."""
+    gb = GrowthBook(attributes={"id": "1"}, features=CB_FEATURES, contextualBandits=CB_MAP)
+    before = gb._global_ctx
+    gb.set_payload(
+        {
+            "features": CB_FEATURES,
+            "contextualBandits": {
+                "cb-bandit": {"contexts": [{"leafId": 2, "condition": {}, "weights": [0, 1]}]}
+            },
+        }
+    )
+    assert gb._global_ctx is not before
+    # The old snapshot is untouched — in-flight evals stay coherent.
+    assert before.contextual_bandits == CB_MAP
+    gb.destroy()

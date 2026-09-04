@@ -11,6 +11,7 @@ import logging
 import warnings
 
 from abc import ABC, abstractmethod
+from dataclasses import replace
 from typing import TYPE_CHECKING, Optional, Any, Set, Tuple, List, Dict, Callable, cast
 
 from typing_extensions import deprecated
@@ -1045,14 +1046,37 @@ class GrowthBook(object):
 
     def _on_feature_update(self, features_data: Dict[str, Any]) -> None:
         """Callback to handle automatic feature updates from FeatureRepository"""
-        # savedGroups/contextualBandits must be assigned before set_features(),
-        # which is what re-syncs them into the shared global evaluation context.
-        if features_data and "savedGroups" in features_data:
-            self._saved_groups = features_data["savedGroups"]
-        if features_data and "contextualBandits" in features_data:
-            self._contextual_bandits = features_data["contextualBandits"]
-        if features_data and "features" in features_data:
-            self.set_features(features_data["features"])
+        if features_data:
+            self._ingest_payload(features_data)
+
+    def _ingest_payload(self, data: Dict[str, Any]) -> None:
+        """Apply the sections present in a (decrypted) SDK payload.
+
+        Sections absent from the payload are preserved (JS setPayload
+        semantics), and the evaluation context is republished even for
+        map-only payloads so a savedGroups/contextualBandits update takes
+        effect without waiting for the next features update."""
+        if "savedGroups" in data:
+            self._saved_groups = data["savedGroups"]
+        if "contextualBandits" in data:
+            self._contextual_bandits = data["contextualBandits"]
+        if "features" in data:
+            self.set_features(data["features"])
+        elif "savedGroups" in data or "contextualBandits" in data:
+            self._publish_global_context()
+
+    def _publish_global_context(self) -> None:
+        # Swap in a complete snapshot with a single reference rebind
+        # (atomic under the GIL) so concurrent lock-free evals never observe
+        # features from one payload generation combined with savedGroups or
+        # contextualBandits from another. In-flight evals keep the previous
+        # coherent snapshot; the async client works the same way.
+        self._global_ctx = replace(
+            self._global_ctx,
+            features=self._features,
+            saved_groups=self._saved_groups,
+            contextual_bandits=self._contextual_bandits,
+        )
 
     def set_payload(self, payload: Dict[str, Any]) -> None:
         """Set features, saved groups, and contextual bandits from a full
@@ -1080,14 +1104,8 @@ class GrowthBook(object):
             cache_key_attributes=self._cacheKeyAttributes,
             force_refresh=force_refresh,
         )
-        if response is not None and "savedGroups" in response:
-            self._saved_groups = response["savedGroups"]
-
-        if response is not None and "contextualBandits" in response:
-            self._contextual_bandits = response["contextualBandits"]
-
-        if response is not None and "features" in response.keys():
-            self.set_features(response["features"])
+        if response is not None:
+            self._ingest_payload(response)
 
     async def load_features_async(self, force_refresh: bool = False) -> None:
         if not self._client_key:
@@ -1106,12 +1124,7 @@ class GrowthBook(object):
         )
 
         if features is not None:
-            if "savedGroups" in features:
-                self._saved_groups = features["savedGroups"]
-            if "contextualBandits" in features:
-                self._contextual_bandits = features["contextualBandits"]
-            if "features" in features:
-                self.set_features(features["features"])
+            self._ingest_payload(features)
 
     def _features_event_handler(self, features: str) -> None:
         decoded = json.loads(features)
@@ -1122,12 +1135,7 @@ class GrowthBook(object):
         key = self._api_host + "::" + self._client_key
 
         if data is not None:
-            if "savedGroups" in data:
-                self._saved_groups = data["savedGroups"]
-            if "contextualBandits" in data:
-                self._contextual_bandits = data["contextualBandits"]
-            if "features" in data:
-                self.set_features(data["features"])
+            self._ingest_payload(data)
             feature_repo.save_in_cache(key, data, self._cache_ttl)
 
     def _dispatch_sse_event(self, event_data: Dict[str, Any]) -> None:
@@ -1196,14 +1204,7 @@ class GrowthBook(object):
                         rules=feature.get("rules", []),
                         defaultValue=feature.get("defaultValue", None),
                     )
-            # Update the global context with the new features and saved
-            # groups. The maps go first: evals in other threads key off the
-            # features dict, so if they observe a torn update it must be old
-            # features with new maps (harmless) rather than new features
-            # whose savedGroups/contextualBandits refs aren't loaded yet.
-            self._global_ctx.saved_groups = self._saved_groups
-            self._global_ctx.contextual_bandits = self._contextual_bandits
-            self._global_ctx.features = self._features
+            self._publish_global_context()
             self.refresh_sticky_buckets()
         finally:
             self._is_updating_features = False
