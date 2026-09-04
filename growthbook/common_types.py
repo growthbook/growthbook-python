@@ -622,6 +622,18 @@ def snapshot_user_context(user: "UserContext") -> "UserContext":
     )
 
 
+def tracking_dedupe_key(experiment: "Experiment[Any]", result: "Result[Any]") -> str:
+    """Identity of one exposure for tracking dedupe (JS getExperimentDedupeKey,
+    Go TrackingData.DedupeKey). Delimited so distinct exposures cannot collide
+    on field boundaries (unlike the JS SDK's plain concatenation)."""
+    return "\x00".join((
+        result.hashAttribute,
+        str(result.hashValue),
+        experiment.key,
+        str(result.variationId),
+    ))
+
+
 def tracking_user_context(user: "UserContext") -> "UserContext":
     """Exposure-time snapshot of a user context for tracking and
     feature-usage callbacks (JS SDK: getTrackingUserContext).

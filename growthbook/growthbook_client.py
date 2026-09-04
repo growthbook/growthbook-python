@@ -37,6 +37,7 @@ from .common_types import (
     build_remote_eval_payload,
     features_from_dict,
     snapshot_user_context,
+    tracking_dedupe_key,
     tracking_user_context,
     validate_remote_eval_options,
 )
@@ -759,12 +760,7 @@ class GrowthBookClient:
             return
 
         # Create unique key for this tracking event
-        key = (
-            result.hashAttribute
-            + str(result.hashValue)
-            + experiment.key
-            + str(result.variationId)
-        )
+        key = tracking_dedupe_key(experiment, result)
 
         with self._tracked_lock:
             if not self._tracked.get(key):

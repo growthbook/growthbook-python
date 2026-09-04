@@ -38,6 +38,7 @@ from .common_types import (
     FeatureRule,
     build_remote_eval_payload,
     features_from_dict,
+    tracking_dedupe_key,
     tracking_user_context,
     validate_remote_eval_options,
 )
@@ -1522,12 +1523,7 @@ class GrowthBook(object):
     def _track(self, experiment: Experiment[Any], result: Result[Any], user_context: UserContext) -> None:
         if not self._trackingCallback:
             return None
-        key = (
-            result.hashAttribute
-            + str(result.hashValue)
-            + experiment.key
-            + str(result.variationId)
-        )
+        key = tracking_dedupe_key(experiment, result)
         if not self._tracked.get(key):
             try:
                 # Snapshot so the logged attributes are exactly the ones used
