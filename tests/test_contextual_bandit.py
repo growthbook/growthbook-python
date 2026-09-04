@@ -455,6 +455,7 @@ def test_malformed_bandit_payload_degrades_gracefully():
         leaf_weights([1, 0, 0]),     # wrong length for 2 variations
         leaf_weights([1, "x"]),      # non-numeric entry
         leaf_weights([0.9, 0.9]),    # sum outside bucketing tolerance
+        leaf_weights([10**1000, 0]),  # overflows float conversion — must not crash
     ):
         gb = GrowthBook(attributes={"id": "1"}, features=CB_FEATURES, contextualBandits=bad_map)
         res = gb.eval_feature("bandit-feature")
@@ -1028,6 +1029,10 @@ def test_bucket_ranges_reject_invalid_weight_vectors():
         [float("inf"), 1.0],
         [float("nan"), 1.0],
         [0.5, "x"],
+        # Arbitrary-precision ints overflow math.isfinite / float summation;
+        # validation must stay total instead of raising OverflowError.
+        [10**1000, 0],
+        [10**1000, 0.5],
     ):
         assert getBucketRanges(2, 1, bad) == equal, bad
     # Valid vectors are untouched

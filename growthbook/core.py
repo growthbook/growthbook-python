@@ -531,15 +531,22 @@ def _is_valid_weight_vector(weights: Any, num_variations: int) -> bool:
     corpus exercises none of them)."""
     if not isinstance(weights, list) or len(weights) != num_variations:
         return False
-    if not all(
-        isinstance(w, (int, float))
-        and not isinstance(w, bool)
-        and math.isfinite(w)
-        and w >= 0
-        for w in weights
-    ):
+    try:
+        if not all(
+            isinstance(w, (int, float))
+            and not isinstance(w, bool)
+            and math.isfinite(w)
+            and w >= 0
+            for w in weights
+        ):
+            return False
+        return WEIGHT_SUM_MIN <= sum(weights) <= WEIGHT_SUM_MAX
+    except OverflowError:
+        # math.isfinite (and mixed int/float summation) raise for
+        # arbitrary-precision ints too large for a float, e.g. 10**1000.
+        # Validation must be total over payload data: such vectors are
+        # invalid, never a crash.
         return False
-    return WEIGHT_SUM_MIN <= sum(weights) <= WEIGHT_SUM_MAX
 
 
 def _normalized_weights(numVariations: int, weights: Any) -> List[float]:
