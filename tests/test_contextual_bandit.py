@@ -596,9 +596,10 @@ def test_failed_bandit_decryption_preserves_previous_map():
 
 
 def test_remote_eval_tracks_preserve_bandit_fields():
-    """rule.tracks entries from the remote-eval proxy must reach the tracking
-    callback with their contextual bandit fields intact — the JS SDK passes
-    the proxy result through verbatim."""
+    """Valid rule.tracks entries from the remote-eval proxy must reach the
+    tracking callback with their contextual bandit fields intact (the JS SDK
+    passes the proxy result through verbatim; Python additionally validates —
+    see test_remote_eval_tracks_drop_invalid_bandit_fields)."""
     tracked = []
 
     def on_view(experiment, result, user_context):
@@ -644,6 +645,64 @@ def test_remote_eval_tracks_preserve_bandit_fields():
     assert tracked[0].leafId == 8
     assert tracked[0].variationWeights == [0.2, 0.8]
     assert tracked[0].banditVersion == 7
+    gb.destroy()
+
+
+@pytest.mark.parametrize(
+    "extras,expected",
+    [
+        # Invalid leafId drops all bandit metadata.
+        ({"leafId": "8", "variationWeights": [0.2, 0.8], "banditVersion": 7},
+         (None, None, None)),
+        # Invalid weight vector drops all bandit metadata.
+        ({"leafId": 8, "variationWeights": [1.2, -0.2], "banditVersion": 7},
+         (None, None, None)),
+        # Invalid banditVersion drops just that field.
+        ({"leafId": 8, "variationWeights": [0.2, 0.8], "banditVersion": True},
+         (8, [0.2, 0.8], None)),
+    ],
+)
+def test_remote_eval_tracks_drop_invalid_bandit_fields(extras, expected):
+    """Proxy rule.tracks metadata is payload data and gets the same validity
+    rules as local evaluation, so remote-eval exposures can't feed corrupt
+    identifiers or propensities into bandit training either."""
+    tracked = []
+
+    def on_view(experiment, result, user_context):
+        tracked.append(result)
+
+    result_data = {
+        "variationId": 1,
+        "inExperiment": True,
+        "hashUsed": True,
+        "hashAttribute": "id",
+        "hashValue": "1",
+        "value": "treatment",
+        **extras,
+    }
+    gb = GrowthBook(
+        attributes={"id": "1"},
+        on_experiment_viewed=on_view,
+        features={
+            "remote-feature": {
+                "defaultValue": "x",
+                "rules": [{
+                    "force": "treatment",
+                    "tracks": [{
+                        "experiment": {
+                            "key": "bandit-exp",
+                            "variations": ["control", "treatment"],
+                        },
+                        "result": result_data,
+                    }],
+                }],
+            }
+        },
+    )
+    gb.eval_feature("remote-feature")
+    assert len(tracked) == 1
+    r = tracked[0]
+    assert (r.leafId, r.variationWeights, r.banditVersion) == expected
     gb.destroy()
 
 

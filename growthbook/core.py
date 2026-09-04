@@ -606,6 +606,20 @@ def _fire_rule_tracks(
         try:
             # Experiment accepts **_ignored, so passing the raw proxy dict is safe.
             experiment = Experiment(**exp_data)
+            # Contextual bandit exposure metadata evaluated by the proxy is
+            # payload data like any other: hold it to the same validity rules
+            # as local evaluation (the JS SDK passes it through verbatim). An
+            # invalid leafId or weight vector drops all bandit metadata; an
+            # invalid banditVersion drops just that field.
+            leaf_id = res_data.get("leafId")
+            variation_weights = res_data.get("variationWeights")
+            bandit_version = res_data.get("banditVersion")
+            if not _is_valid_bandit_id(leaf_id) or not _is_valid_weight_vector(
+                variation_weights, len(experiment.variations)
+            ):
+                leaf_id = variation_weights = bandit_version = None
+            elif not _is_valid_bandit_id(bandit_version):
+                bandit_version = None
             result = Result(
                 variationId=res_data.get("variationId", 0),
                 inExperiment=res_data.get("inExperiment", False),
@@ -617,12 +631,9 @@ def _fire_rule_tracks(
                 meta=meta,
                 bucket=res_data.get("bucket"),
                 stickyBucketUsed=res_data.get("stickyBucketUsed", False),
-                # Contextual bandit exposure metadata evaluated by the proxy.
-                # The JS SDK passes the proxy result through verbatim, so
-                # these must survive the reconstruction too.
-                leafId=res_data.get("leafId"),
-                variationWeights=res_data.get("variationWeights"),
-                banditVersion=res_data.get("banditVersion"),
+                leafId=leaf_id,
+                variationWeights=variation_weights,
+                banditVersion=bandit_version,
             )
             tracking_cb(experiment, result, eval_context.user)
         except Exception:
