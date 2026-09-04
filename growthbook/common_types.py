@@ -603,6 +603,25 @@ def snapshot_attributes(attributes: Dict[str, Any]) -> Dict[str, Any]:
     return {k: copy_value(v) for k, v in attributes.items()}
 
 
+def snapshot_user_context(user: "UserContext") -> "UserContext":
+    """Call-time snapshot of every mutable evaluation input on a UserContext.
+
+    The single freeze operation used wherever a context's data outlives the
+    caller's synchronous control flow: evaluations that await (remote-eval
+    fetch, sticky-bucket I/O) and remote-eval cache preloads, whose POST body
+    can be serialized by a background SWR refresh long after the caller has
+    moved on. Without it, a later caller mutation could change the request
+    body while the cache key still describes the original attribute state."""
+    return replace(
+        user,
+        attributes=snapshot_attributes(user.attributes),
+        groups=snapshot_attributes(user.groups),
+        forced_variations=snapshot_attributes(user.forced_variations),
+        forced_features=snapshot_attributes(user.forced_features),
+        overrides=snapshot_attributes(user.overrides),
+    )
+
+
 def tracking_user_context(user: "UserContext") -> "UserContext":
     """Exposure-time snapshot of a user context for tracking and
     feature-usage callbacks (JS SDK: getTrackingUserContext).

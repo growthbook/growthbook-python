@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import inspect
 import json
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 import random
 import logging
 from types import TracebackType
@@ -36,7 +36,7 @@ from .common_types import (
     Experiment,
     build_remote_eval_payload,
     features_from_dict,
-    snapshot_attributes,
+    snapshot_user_context,
     tracking_user_context,
     validate_remote_eval_options,
 )
@@ -1161,6 +1161,12 @@ class GrowthBookClient:
         network requests."""
         if not self.options.remote_eval or not self._features_repository:
             return
+        # Same call-time freeze as create_evaluation_context: the cache key is
+        # computed from these values immediately, but an SWR background
+        # refresh serializes the POST body later — an unfrozen context mutated
+        # in between would cache the new attributes' response under the old
+        # attributes' key.
+        user_context = snapshot_user_context(user_context)
         await self._features_repository.fetch_remote_eval(
             self.options.api_host or "https://cdn.growthbook.io",
             self.options.client_key or "",
@@ -1234,14 +1240,7 @@ class GrowthBookClient:
         # read-your-writes still lands on it.
         caller_context = user_context
         if self.options.remote_eval or self.options.sticky_bucket_service is not None:
-            user_context = replace(
-                user_context,
-                attributes=snapshot_attributes(user_context.attributes),
-                groups=snapshot_attributes(user_context.groups),
-                forced_variations=snapshot_attributes(user_context.forced_variations),
-                forced_features=snapshot_attributes(user_context.forced_features),
-                overrides=snapshot_attributes(user_context.overrides),
-            )
+            user_context = snapshot_user_context(user_context)
 
         if self.options.remote_eval and self._features_repository:
             # Per-user POST + cache: features come from the proxy filtered for
