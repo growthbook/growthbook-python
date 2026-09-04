@@ -498,6 +498,44 @@ is_enabled = gb.is_on("my-feature")  # -> Tracked automatically
 
 The tracking plugin provides batching, error handling, and works alongside your existing tracking callbacks. See the [plugin documentation](https://docs.growthbook.io/lib/python#tracking-plugins) for more details.
 
+#### Deferred Tracking
+
+When your server evaluates features but the analytics context lives on the client (server-side rendering, an API returning evaluated flags), buffer the exposures instead of tracking them server-side and forward them to a client SDK, which fires them through its own tracking callback.
+
+On the sync client, opt in with `defer_tracking=True`:
+
+```python
+gb = GrowthBook(attributes={"id": "user-1"}, features=features, defer_tracking=True)
+gb.is_on("my-feature")
+
+# JSON-ready entries in the JS SDK's TrackingData shape:
+# [{"experiment": {...}, "result": {...}, "user": {"attributes": {...}, "url": ""}}]
+calls = gb.get_deferred_tracking_calls()
+# ...send json.dumps(calls) to the client...
+gb.clear_deferred_tracking_calls()
+```
+
+The buffer lives as long as the instance: when one instance serves many users, read and clear it per request (or use one instance per request) so exposures are never forwarded to the wrong client.
+
+The receiving JavaScript SDK hydrates and fires them:
+
+```js
+gb.setDeferredTrackingCalls(callsFromServer);
+gb.fireDeferredTrackingCalls();
+```
+
+On the async client, pass a per-request `TrackingBuffer` — the explicit buffer is the opt-in, and because the caller owns it, concurrent requests never mix exposures:
+
+```python
+from growthbook import TrackingBuffer
+
+buffer = TrackingBuffer()
+await client.eval_feature("my-feature", user_context, tracking_buffer=buffer)
+calls = buffer.get_calls()
+```
+
+Buffering is independent of `on_experiment_viewed`: when both are configured, the buffer records first and the callback still fires. Entries are deduped per unique assignment and snapshotted at exposure time, and include prerequisite and passthrough exposures.
+
 ## Using Features
 
 There are 3 main methods for interacting with features.
