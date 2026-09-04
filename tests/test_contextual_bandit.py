@@ -424,3 +424,33 @@ def test_sync_refresh_swaps_a_coherent_snapshot():
     # The old snapshot is untouched — in-flight evals stay coherent.
     assert before.contextual_bandits == CB_MAP
     gb.destroy()
+
+
+def test_malformed_bandit_payload_degrades_gracefully():
+    """Malformed definitions/leaves must never crash evaluation: a matched
+    leaf missing weights or leafId falls back to aggregate weights (leaf -1),
+    like a definition of the wrong shape. Only a null definition is treated
+    as a dangling ref (plain experiment, no metadata)."""
+    missing_weights = {
+        "cb-bandit": {"banditVersion": 7, "contexts": [{"leafId": 1, "condition": {}}]}
+    }
+    missing_leaf_id = {
+        "cb-bandit": {"contexts": [{"condition": {}, "weights": [1, 0]}]}
+    }
+    for bad_map in (missing_weights, missing_leaf_id, {"cb-bandit": [1, 2]}, {"cb-bandit": {}}):
+        gb = GrowthBook(attributes={"id": "1"}, features=CB_FEATURES, contextualBandits=bad_map)
+        res = gb.eval_feature("bandit-feature")
+        assert res.experimentResult.leafId == -1
+        assert res.experimentResult.variationWeights == [0.5, 0.5]
+        gb.destroy()
+
+    # banditVersion still reported when the definition carries one
+    gb = GrowthBook(attributes={"id": "1"}, features=CB_FEATURES, contextualBandits=missing_weights)
+    assert gb.eval_feature("bandit-feature").experimentResult.banditVersion == 7
+    gb.destroy()
+
+    gb = GrowthBook(attributes={"id": "1"}, features=CB_FEATURES, contextualBandits={"cb-bandit": None})
+    res = gb.eval_feature("bandit-feature")
+    assert res.experimentResult is not None
+    assert res.experimentResult.leafId is None
+    gb.destroy()

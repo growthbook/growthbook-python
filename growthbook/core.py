@@ -610,8 +610,12 @@ def _build_contextual_bandit_experiment(
     No match / empty contexts / errored selection: bucketing keeps the rule's
     server-computed marginal weights and the fallback leafId -1 is reported.
     Dangling ref: run as a plain experiment with no bandit metadata at all."""
-    cb_definition = evalContext.global_ctx.contextual_bandits.get(contextual_bandit_ref)
-    if not cb_definition:
+    # Typed as Any: the map is payload data, so the definition shape is only
+    # a promise — the guards below must survive malformed entries at runtime.
+    cb_definition: Any = evalContext.global_ctx.contextual_bandits.get(contextual_bandit_ref)
+    # An empty-dict definition counts as found (JS `!cbDefinition` semantics):
+    # it takes the fallback-leaf path below, not the dangling-ref return.
+    if not cb_definition and not isinstance(cb_definition, dict):
         # debug, not warning: this fires on EVERY evaluation of the feature,
         # and a payload-skew window makes it reachable in normal operation.
         # The JS SDK logs these only in debug mode for the same reason.
@@ -621,6 +625,11 @@ def _build_contextual_bandit_experiment(
             feature_id,
         )
         return
+    if not isinstance(cb_definition, dict):
+        # Malformed payload entry: treat like a definition with no leaves so
+        # bucketing still degrades to the rule's aggregate weights instead of
+        # crashing the evaluation.
+        cb_definition = {}
 
     leaf = None
     contexts = cb_definition.get("contexts") or []
@@ -634,10 +643,20 @@ def _build_contextual_bandit_experiment(
                 exc_info=True,
             )
 
-    if leaf is not None:
-        weights = leaf["weights"]
+    weights = leaf.get("weights") if leaf is not None else None
+    leaf_id = leaf.get("leafId") if leaf is not None else None
+    if leaf is not None and (weights is None or leaf_id is None):
+        # A matched leaf missing its weights or id is a malformed payload;
+        # degrade to the aggregate-weights fallback rather than bucketing on
+        # partial data.
+        logger.debug(
+            "Contextual bandit leaf is malformed, feature %s falls back to aggregate weights",
+            feature_id,
+        )
+
+    if weights is not None and leaf_id is not None:
         experiment.weights = weights
-        cb: ContextualBanditAssignment = {"leafId": leaf["leafId"], "variationWeights": weights}
+        cb: ContextualBanditAssignment = {"leafId": leaf_id, "variationWeights": weights}
     else:
         logger.debug(
             "Contextual bandit: no matching leaf, feature %s uses aggregate weights", feature_id
