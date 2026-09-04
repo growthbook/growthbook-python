@@ -1008,10 +1008,18 @@ def run_experiment(experiment: Experiment[Any],
     # 2.5. If the experiment props have been overridden, merge them in
     if evalContext.user.overrides.get(experiment.key, None):
         experiment.update(evalContext.user.overrides[experiment.key])
+    # Explicit bucket ranges take precedence over weights entirely (step 9),
+    # so a contextual bandit experiment carrying ranges has no truthful
+    # propensity vector to report: drop the metadata rather than describe a
+    # distribution bucketing ignored. Bucketing itself is untouched (same
+    # assignment as the JS SDK); the server never emits ranges on contextual
+    # bandit rules, so this only fires on hand-crafted payloads.
+    if experiment.contextualBandit and experiment.ranges:
+        experiment.contextualBandit = None
     # Keep reported bandit propensities in sync with the weights actually
     # used for bucketing: an override may have replaced them, and
     # getBucketRanges normalizes unusable vectors to equal weights.
-    if experiment.contextualBandit and experiment.weights is not None:
+    elif experiment.contextualBandit and experiment.weights is not None:
         synced: ContextualBanditAssignment = {
             "leafId": experiment.contextualBandit["leafId"],
             "variationWeights": _normalized_weights(

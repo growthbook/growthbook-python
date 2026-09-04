@@ -502,6 +502,24 @@ def test_invalid_bandit_version_is_dropped_from_exposure():
         gb.destroy()
 
 
+def test_bandit_metadata_dropped_when_explicit_ranges_govern_bucketing():
+    """Explicit `ranges` on a rule take precedence over weights in bucketing,
+    so leaf propensities cannot describe the assignment: the bandit metadata
+    is dropped while the assignment itself stays untouched (same as the JS
+    SDK). The server never emits ranges on contextual bandit rules."""
+    features = json.loads(json.dumps(CB_FEATURES))
+    # Everyone lands in variation 1, regardless of the leaf's [1, 0] weights.
+    features["bandit-feature"]["rules"][0]["ranges"] = [[0, 0], [0, 1]]
+    gb = GrowthBook(attributes={"id": "1"}, features=features, contextualBandits=CB_MAP)
+    res = gb.eval_feature("bandit-feature")
+    assert res.value == "treatment"  # ranges decided, not the leaf's [1, 0]
+    er = res.experimentResult
+    assert er.leafId is None
+    assert er.variationWeights is None
+    assert er.banditVersion is None
+    gb.destroy()
+
+
 def test_sync_set_payload_accepts_encrypted_sections():
     """JS setPayload accepts encrypted payloads; the Python port decrypts
     encrypted sections with the configured decryption_key."""
