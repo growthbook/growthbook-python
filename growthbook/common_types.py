@@ -471,13 +471,19 @@ class UserContext:
     overrides: Dict[str, Any] = field(default_factory=dict)
     sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
     skip_all_experiments: bool = False
-    # Exposures buffered while no tracking callback is configured, keyed by
-    # tracking_dedupe_key, for callers that forward tracking elsewhere.
-    _deferred_tracking_calls: Dict[str, Dict[str, Any]] = field(
-        default_factory=dict, init=False, repr=False, compare=False
-    )
+    # Buffer exposures when no tracking callback is configured instead of
+    # dropping them (see get_deferred_tracking_calls). Opt-in: the buffer is
+    # unbounded for as long as this context lives.
+    defer_tracking: bool = False
+
+    def __post_init__(self) -> None:
+        # Not a dataclass field: excluded from asdict/replace/compare so
+        # contexts cloned per request start with an empty buffer.
+        self._deferred_tracking_calls: Dict[str, Dict[str, Any]] = {}
 
     def defer_tracking_call(self, experiment: "Experiment[Any]", result: "Result[Any]") -> None:
+        if not self.defer_tracking:
+            return
         key = tracking_dedupe_key(experiment, result)
         if key in self._deferred_tracking_calls:
             return
@@ -493,13 +499,18 @@ class UserContext:
         return list(self._deferred_tracking_calls.values())
 
     def set_deferred_tracking_calls(self, calls: List[Dict[str, Any]]) -> None:
-        self._deferred_tracking_calls = {}
+        """Replace the buffer, skipping entries that cannot be rebuilt."""
+        buffered: Dict[str, Dict[str, Any]] = {}
         for call in calls:
-            hydrated = tracking_call_from_dict(call)
+            try:
+                hydrated = tracking_call_from_dict(call)
+            except Exception:
+                continue
             if hydrated is None:
                 continue
             experiment, result = hydrated
-            self._deferred_tracking_calls[tracking_dedupe_key(experiment, result)] = call
+            buffered[tracking_dedupe_key(experiment, result)] = call
+        self._deferred_tracking_calls = buffered
 
     def clear_deferred_tracking_calls(self) -> None:
         self._deferred_tracking_calls = {}
@@ -513,13 +524,17 @@ def tracking_dedupe_key(experiment: "Experiment[Any]", result: "Result[Any]") ->
     )
 
 
-def tracking_call_from_dict(entry: Dict[str, Any]) -> Optional[Tuple["Experiment[Any]", "Result[Any]"]]:
+def tracking_call_from_dict(entry: Any) -> Optional[Tuple["Experiment[Any]", "Result[Any]"]]:
     """Rebuild an (experiment, result) pair from the JS-shaped TrackingData
     dict emitted by the remote-eval proxy and by get_deferred_tracking_calls.
     Returns None for entries missing the experiment key or variations."""
-    exp_data = entry.get("experiment") or {}
-    res_data = entry.get("result") or {}
-    if "key" not in exp_data or "variations" not in exp_data:
+    if not isinstance(entry, dict):
+        return None
+    exp_data = entry.get("experiment")
+    res_data = entry.get("result")
+    if not isinstance(exp_data, dict) or not isinstance(res_data, dict):
+        return None
+    if not isinstance(exp_data.get("key"), str) or not isinstance(exp_data.get("variations"), list):
         return None
     # The JS shape carries key/name/passthrough flat on the result; Python's
     # Result takes them via a nested `meta` dict.

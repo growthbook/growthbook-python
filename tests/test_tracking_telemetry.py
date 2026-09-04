@@ -1,5 +1,6 @@
 """Exposure and feature-usage reporting for prerequisite and passthrough
 evaluations, and the deferred tracking buffer used to forward exposures."""
+import dataclasses
 import json
 
 import pytest
@@ -42,6 +43,7 @@ FEATURES = {
             {"force": "fallthrough"},
         ],
     },
+    "unserializable": {"defaultValue": {1: "a", "b": 2}},
 }
 
 
@@ -105,8 +107,36 @@ def test_passthrough_assignment_is_tracked():
     gb.destroy()
 
 
-def test_deferred_tracking_buffers_when_no_callback():
+def test_subscriptions_see_prerequisite_experiments():
+    gb, _, _ = make_gb()
+    seen = []
+    gb.subscribe(lambda experiment, result: seen.append(experiment.key))
+    gb.eval_feature("child")
+    assert seen == ["parent-exp"]
+    assert "parent-exp" in gb.get_all_results()
+    gb.destroy()
+
+
+def test_unserializable_feature_values_do_not_break_evaluation():
+    gb, _, usage = make_gb()
+    assert gb.eval_feature("unserializable").value == {1: "a", "b": 2}
+    assert usage == ["unserializable"]
+    gb.destroy()
+
+    silent = GrowthBook(attributes={"id": "user-1"}, features=FEATURES)
+    assert silent.eval_feature("unserializable").value == {1: "a", "b": 2}
+    silent.destroy()
+
+
+def test_deferred_tracking_is_opt_in():
     gb = GrowthBook(attributes={"id": "user-1"}, features=FEATURES)
+    gb.eval_feature("child")
+    assert gb.get_deferred_tracking_calls() == []
+    gb.destroy()
+
+
+def test_deferred_tracking_buffers_when_no_callback():
+    gb = GrowthBook(attributes={"id": "user-1"}, features=FEATURES, defer_tracking=True)
     gb.eval_feature("child")
     gb.eval_feature("child")  # same assignment, deduped
 
@@ -124,6 +154,21 @@ def test_deferred_tracking_buffers_when_no_callback():
     gb.destroy()
 
 
+def test_replay_uses_the_buffered_user():
+    gb = GrowthBook(attributes={"id": "user-1"}, features=FEATURES, defer_tracking=True)
+    gb.eval_feature("child")
+    gb.set_attributes({"id": "user-2"})
+    gb.eval_feature("child")
+    gb.set_attributes({"id": "user-3"})
+
+    seen = []
+    gb.set_tracking_callback(
+        lambda experiment, result, user_context: seen.append((result.hashValue, user_context.attributes["id"]))
+    )
+    assert seen == [("user-1", "user-1"), ("user-2", "user-2")]
+    gb.destroy()
+
+
 def test_deferred_tracking_calls_can_be_hydrated_and_fired():
     fired = []
     gb = GrowthBook(
@@ -133,24 +178,63 @@ def test_deferred_tracking_calls_can_be_hydrated_and_fired():
         ),
     )
     gb.set_deferred_tracking_calls([
+        None,
+        {"experiment": {"key": 123, "variations": ["a"]}, "result": {}},
+        {"experiment": {"key": "no-variations", "variations": None}, "result": {}},
+        {"experiment": {"key": "no-result", "variations": ["a", "b"]}},
         {
             "experiment": {"key": "forwarded", "variations": ["a", "b"]},
             "result": {"variationId": 1, "inExperiment": True, "hashAttribute": "id", "hashValue": "user-1"},
         },
-        {"experiment": {"key": "missing-variations"}, "result": {}},
     ])
+    assert len(gb.get_deferred_tracking_calls()) == 1
     gb.fire_deferred_tracking_calls()
     assert fired == [("forwarded", 1)]
     assert gb.get_deferred_tracking_calls() == []
     gb.destroy()
 
 
+def test_replay_keeps_entries_the_callback_raised_on():
+    gb = GrowthBook(attributes={"id": "user-1"}, features=FEATURES, defer_tracking=True)
+    gb.eval_feature("child")
+    gb.eval_feature("ramped")
+    assert len(gb.get_deferred_tracking_calls()) == 2
+
+    def flaky(experiment, result, user_context):
+        if experiment.key == "ramp":
+            raise RuntimeError("analytics down")
+
+    gb.set_tracking_callback(flaky)
+    remaining = gb.get_deferred_tracking_calls()
+    assert [c["experiment"]["key"] for c in remaining] == ["ramp"]
+    gb.destroy()
+
+
 def test_no_buffering_when_callback_configured():
-    gb, tracked, _ = make_gb()
+    gb, tracked, _ = make_gb(defer_tracking=True)
     gb.eval_feature("child")
     assert tracked == [("parent-exp", 0)]
     assert gb.get_deferred_tracking_calls() == []
     gb.destroy()
+
+
+def test_user_context_buffer_is_not_a_dataclass_field():
+    ctx = UserContext(attributes={"id": "u"}, defer_tracking=True)
+    ctx.defer_tracking_call(Experiment(key="e", variations=["a", "b"]), _result())
+    assert len(ctx.get_deferred_tracking_calls()) == 1
+
+    rebuilt = UserContext(**dataclasses.asdict(ctx))
+    assert rebuilt.defer_tracking is True
+    assert rebuilt.get_deferred_tracking_calls() == []
+    assert dataclasses.replace(ctx).get_deferred_tracking_calls() == []
+
+
+def _result():
+    from growthbook.common_types import Result
+
+    return Result(
+        variationId=0, inExperiment=True, value="a", hashUsed=True, hashAttribute="id", hashValue="u", featureId=None
+    )
 
 
 @pytest.mark.asyncio
@@ -158,8 +242,8 @@ async def test_async_client_buffers_per_user_context():
     client = GrowthBookClient(Options(api_host="https://localhost.growthbook.io", client_key="test"))
     await client.set_features(FEATURES)
     try:
-        user1 = UserContext(attributes={"id": "user-1"})
-        user2 = UserContext(attributes={"id": "user-2"})
+        user1 = UserContext(attributes={"id": "user-1"}, defer_tracking=True)
+        user2 = UserContext(attributes={"id": "user-2"}, defer_tracking=True)
         res = await client.eval_feature("child", user1)
         assert res.value == "child-on"
 
@@ -182,7 +266,7 @@ async def test_async_client_tracks_prerequisites_through_callback():
     ))
     await client.set_features(FEATURES)
     try:
-        user = UserContext(attributes={"id": "user-1"})
+        user = UserContext(attributes={"id": "user-1"}, defer_tracking=True)
         await client.eval_feature("child", user)
         assert tracked == ["parent-exp"]
         assert usage == ["parent", "child"]

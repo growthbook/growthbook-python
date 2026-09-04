@@ -560,7 +560,10 @@ def _report_feature_usage(
     evalContext: EvaluationContext,
     feature_usage_cb: FeatureUsageCb,
 ) -> None:
-    stringified = json.dumps(result.value, sort_keys=True, default=str)
+    try:
+        stringified = json.dumps(result.value, sort_keys=True, default=str)
+    except (TypeError, ValueError):
+        stringified = repr(result.value)
     if evalContext.reported_features.get(key) == stringified:
         return
     evalContext.reported_features[key] = stringified
@@ -616,6 +619,7 @@ def _eval_feature(
             prereq_res = eval_prereqs(
                 parentConditions=rule.parentConditions,
                 evalContext=evalContext,
+                callback_subscription=callback_subscription,
                 tracking_cb=tracking_cb,
                 feature_usage_cb=feature_usage_cb,
             )
@@ -722,6 +726,7 @@ def _eval_feature(
 def eval_prereqs(
     parentConditions: List[Dict[str, Any]],
     evalContext: EvaluationContext,
+    callback_subscription: Optional[Callable[[Experiment[Any], Result[Any]], None]] = None,
     tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None,
     feature_usage_cb: Optional[FeatureUsageCb] = None,
 ) -> str:
@@ -738,6 +743,7 @@ def eval_prereqs(
         parentRes = eval_feature(
             key=parent_id,
             evalContext=evalContext,
+            callback_subscription=callback_subscription,
             tracking_cb=tracking_cb,
             feature_usage_cb=feature_usage_cb,
         )

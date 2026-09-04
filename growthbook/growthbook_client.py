@@ -1217,20 +1217,21 @@ class GrowthBookClient:
             key=key,
             evalContext=context,
             tracking_cb=self._track,
-            feature_usage_cb=self._report_feature_usage,
+            feature_usage_cb=self._feature_usage_cb(),
         )
 
-    def _report_feature_usage(self, key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
+    def _feature_usage_cb(self) -> Optional[Callable[[str, FeatureResult[Any], UserContext], None]]:
         if not self.options.on_feature_usage:
-            return
-        try:
-            self._run_user_callback(
-                self.options.on_feature_usage,
-                (key, result, user_context),
-                "feature usage",
-            )
-        except Exception:
-            logger.exception("Error in feature usage callback")
+            return None
+        cb = self.options.on_feature_usage
+
+        def report(key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
+            try:
+                self._run_user_callback(cb, (key, result, user_context), "feature usage")
+            except Exception:
+                logger.exception("Error in feature usage callback")
+
+        return report
 
     async def is_on(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is enabled with proper async context management"""
@@ -1253,7 +1254,7 @@ class GrowthBookClient:
             experiment=experiment,
             evalContext=context,
             tracking_cb=self._track,
-            feature_usage_cb=self._report_feature_usage,
+            feature_usage_cb=self._feature_usage_cb(),
         )
         # Fire subscriptions synchronously
         self._fire_subscriptions(experiment, result)

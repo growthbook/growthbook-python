@@ -880,6 +880,7 @@ class GrowthBook(object):
         stale_ttl: int = 300,  # 5 minutes default
         plugins: Optional[List["PluginLike"]] = None,
         skip_all_experiments: bool = False,
+        defer_tracking: bool = False,
         # Deprecated args (camelCase spellings fold into their snake_case
         # equivalents above; the snake_case value wins when both are given)
         trackingCallback: Optional[TrackingCallback] = None,
@@ -985,7 +986,8 @@ class GrowthBook(object):
             forced_features=self._forcedFeatures,
             overrides=self._overrides,
             sticky_bucket_assignment_docs=self._sticky_bucket_assignment_docs,
-            skip_all_experiments=self._skip_all_experiments
+            skip_all_experiments=self._skip_all_experiments,
+            defer_tracking=defer_tracking,
         )
 
         if features:
@@ -1391,16 +1393,21 @@ class GrowthBook(object):
                                  evalContext=self._get_eval_context(),
                                  callback_subscription=self._fireSubscriptions,
                                  tracking_cb=self._track,
-                                 feature_usage_cb=self._report_feature_usage,
+                                 feature_usage_cb=self._feature_usage_cb(),
                                  )
 
-    def _report_feature_usage(self, key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
+    def _feature_usage_cb(self) -> Optional[FeatureUsageCallback]:
         if not self._featureUsageCallback:
-            return
-        try:
-            self._featureUsageCallback(key, result, user_context)
-        except Exception:
-            pass
+            return None
+        cb = self._featureUsageCallback
+
+        def report(key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
+            try:
+                cb(key, result, user_context)
+            except Exception:
+                pass
+
+        return report
 
     @deprecated("getAllResults is deprecated, use get_all_results instead")
     def getAllResults(self) -> Dict[str, Dict[str, Any]]:
@@ -1432,7 +1439,7 @@ class GrowthBook(object):
         result = run_experiment(experiment=experiment,
                                 evalContext=self._get_eval_context(),
                                 tracking_cb=self._track,
-                                feature_usage_cb=self._report_feature_usage,
+                                feature_usage_cb=self._feature_usage_cb(),
                                 )
 
         self._fireSubscriptions(experiment, result)
@@ -1470,18 +1477,29 @@ class GrowthBook(object):
         self._user_ctx.set_deferred_tracking_calls(calls)
 
     def fire_deferred_tracking_calls(self) -> None:
-        """Send buffered exposures through the tracking callback and empty
-        the buffer. No-op without a tracking callback."""
-        if not self._trackingCallback:
+        """Send buffered exposures through the tracking callback. Entries the
+        callback raises on stay buffered; the rest are removed. No-op without
+        a tracking callback."""
+        callback = self._trackingCallback
+        if not callback:
             return
-        calls = self._user_ctx.get_deferred_tracking_calls()
-        self._user_ctx.clear_deferred_tracking_calls()
-        for call in calls:
+        failed: List[Dict[str, Any]] = []
+        for call in self._user_ctx.get_deferred_tracking_calls():
             hydrated = tracking_call_from_dict(call)
             if hydrated is None:
                 continue
             experiment, result = hydrated
-            self._track(experiment, result, self._user_ctx)
+            # Replay with the user the exposure was buffered for, not whoever
+            # the instance currently represents.
+            user = call.get("user") or {}
+            snapshot = UserContext(attributes=dict(user.get("attributes") or {}), url=user.get("url") or "")
+            try:
+                callback(experiment=experiment, result=result, user_context=snapshot)
+                self._tracked[tracking_dedupe_key(experiment, result)] = True
+            except Exception as e:
+                logger.exception(e)
+                failed.append(call)
+        self._user_ctx.set_deferred_tracking_calls(failed)
 
     def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
         attributes = set()
