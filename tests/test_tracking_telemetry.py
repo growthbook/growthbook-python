@@ -155,6 +155,27 @@ def test_dedupe_key_fields_cannot_collide_across_boundaries():
     assert len(gb.get_deferred_tracking_calls()) == 2
     gb.destroy()
 
+
+def test_legacy_core_callback_kwargs_still_work():
+    # Pre-3.1 direct consumers of growthbook.core passed callbacks as kwargs;
+    # they are deprecated but still copied onto the EvaluationContext.
+    from growthbook.core import eval_feature as core_eval_feature
+
+    gb = GrowthBook(attributes={"id": "user-1"}, features=FEATURES)
+    tracked, seen = [], []
+    with pytest.warns(DeprecationWarning):
+        res = core_eval_feature(
+            "child",
+            gb._get_eval_context(),
+            callback_subscription=lambda experiment, result: seen.append(experiment.key),
+            tracking_cb=lambda experiment, result, user: tracked.append(experiment.key),
+        )
+    assert res.value == "child-on"
+    assert tracked == ["parent-exp"]
+    assert seen == ["parent-exp"]
+    gb.destroy()
+
+
 def test_subscriptions_see_prerequisite_experiments():
     gb, _, _ = make_gb()
     seen = []

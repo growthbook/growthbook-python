@@ -3,10 +3,11 @@ import logging
 import math
 import re
 import json
+import warnings
 from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
-from typing import Optional, Any, Set, Tuple, List, Dict, cast
+from typing import Callable, Optional, Any, Set, Tuple, List, Dict, cast
 from typing_extensions import TypeGuard
 from .common_types import (
     ContextualBanditAssignment,
@@ -16,6 +17,7 @@ from .common_types import (
     Experiment,
     Filter,
     Result,
+    UserContext,
     VariationMeta,
 )
 
@@ -784,18 +786,51 @@ def _report_feature_usage(
     cb(key, result, evalContext.user)
 
 
+def _adopt_legacy_callbacks(
+    evalContext: EvaluationContext,
+    callback_subscription: Optional[Any],
+    tracking_cb: Optional[Any],
+) -> None:
+    """Copy the pre-3.1 keyword arguments onto the EvaluationContext.
+
+    Deprecated compatibility shim: callbacks belong on the context (so
+    prerequisite evaluations inherit them); direct growthbook.core consumers
+    that still pass them as kwargs keep working through a minor release."""
+    if tracking_cb is not None:
+        warnings.warn(
+            "the tracking_cb argument is deprecated; set EvaluationContext.tracking_cb",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        evalContext.tracking_cb = tracking_cb
+    if callback_subscription is not None:
+        warnings.warn(
+            "the callback_subscription argument is deprecated; "
+            "set EvaluationContext.callback_subscription",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        evalContext.callback_subscription = callback_subscription
+
+
 def eval_feature(
     key: str,
     evalContext: Optional[EvaluationContext] = None,
+    callback_subscription: Optional[Callable[[Experiment[Any], Result[Any]], None]] = None,
+    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None,
 ) -> FeatureResult[Any]:
     """Core feature evaluation logic as a standalone function.
 
     Tracking, subscription, and feature-usage callbacks are read from the
     EvaluationContext so recursive evaluations (prerequisites) report through
-    them too."""
+    them too. The callback keyword arguments are deprecated shims (see
+    _adopt_legacy_callbacks)."""
 
     if evalContext is None:
         raise ValueError("evalContext is required - eval_feature")
+
+    if callback_subscription is not None or tracking_cb is not None:
+        _adopt_legacy_callbacks(evalContext, callback_subscription, tracking_cb)
 
     result = _eval_feature(key, evalContext)
     if evalContext.feature_usage_cb is not None:
@@ -1047,7 +1082,11 @@ def _get_sticky_bucket_variation(
 def run_experiment(experiment: Experiment[Any],
                    featureId: Optional[str] = None,
                    evalContext: Optional[EvaluationContext] = None,
+                   tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None,
                 ) -> Result[Any]:
+    if evalContext is not None and tracking_cb is not None:
+        # Deprecated compatibility shim (see _adopt_legacy_callbacks).
+        _adopt_legacy_callbacks(evalContext, None, tracking_cb)
     if evalContext is None:
         raise ValueError("evalContext is required - run_experiment")
     # 1. If experiment has less than 2 variations, return immediately
