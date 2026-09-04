@@ -655,3 +655,47 @@ class TestLogEvent(unittest.TestCase):
 
         payload2 = _build_event_payload("e", {}, {"id": "raw-id"}, "", "x")
         self.assertEqual(payload2["device_id"], "raw-id")
+
+class TestExperimentEventContext(unittest.TestCase):
+    """Experiment-viewed ingestor events must carry the exposure-time user
+    context (the attributes used for bucketing/leaf routing), matching the JS
+    plugin's use of userContext. The instance fallback only covers the sync
+    client's legacy two-argument invocation."""
+
+    def _make_plugin_and_events(self):
+        from growthbook.plugins.growthbook_tracking import GrowthBookTrackingPlugin
+
+        plugin = GrowthBookTrackingPlugin(ingestor_host="https://test.growthbook.io")
+        events = []
+        plugin._add_event_to_batch = events.append
+        return plugin, events
+
+    def _result_stub(self):
+        return MagicMock(
+            variationId=1, inExperiment=True, hashUsed=True,
+            hashAttribute="id", hashValue="u1", key="1",
+        )
+
+    def test_event_uses_exposure_time_user_context(self):
+        plugin, events = self._make_plugin_and_events()
+        user_context = MagicMock(
+            attributes={"id": "u1", "country": "US"}, url="https://app.example.com"
+        )
+        plugin._track_experiment_viewed(
+            Experiment(key="exp", variations=[0, 1]), self._result_stub(), user_context
+        )
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["context_json"], {"country": "US"})
+        self.assertEqual(events[0]["device_id"], "u1")
+        self.assertEqual(events[0]["url"], "https://app.example.com")
+
+    def test_event_falls_back_to_instance_attributes(self):
+        plugin, events = self._make_plugin_and_events()
+        plugin._gb_instance = MagicMock(
+            _attributes={"id": "u2"}, _url="https://legacy.example.com"
+        )
+        plugin._track_experiment_viewed(
+            Experiment(key="exp", variations=[0, 1]), self._result_stub(), None
+        )
+        self.assertEqual(events[0]["device_id"], "u2")
+        self.assertEqual(events[0]["url"], "https://legacy.example.com")

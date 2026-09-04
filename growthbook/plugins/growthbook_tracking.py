@@ -173,7 +173,7 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
 
     def _setup_experiment_tracking(self, gb_instance: Any) -> None:
         def tracking_wrapper(experiment: Any, result: Any, user_context: Any = None) -> None:
-            self._track_experiment_viewed(experiment, result)
+            self._track_experiment_viewed(experiment, result, user_context)
             if self.additional_callback:
                 self._safe_execute(self.additional_callback, experiment, result, user_context)
 
@@ -218,11 +218,25 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
 
         gb_instance.eval_feature = eval_feature_wrapper
 
-    def _track_experiment_viewed(self, experiment: Any, result: Any) -> None:
+    def _track_experiment_viewed(
+        self, experiment: Any, result: Any, user_context: Any = None
+    ) -> None:
         try:
-            attrs: Dict[str, Any] = {}
-            if self._gb_instance is not None:
-                attrs = getattr(self._gb_instance, "_attributes", {}) or {}
+            # Prefer the exposure-time user context both clients pass to the
+            # tracking callback (the JS plugin does the same via userContext).
+            # The instance fallback only exists for the sync client's legacy
+            # two-argument invocation paths; the async client has no
+            # _attributes, so without user_context its events had none.
+            attrs: Dict[str, Any] = (
+                getattr(user_context, "attributes", None)
+                or getattr(self._gb_instance, "_attributes", None)
+                or {}
+            )
+            url: str = (
+                getattr(user_context, "url", None)
+                or getattr(self._gb_instance, "_url", None)
+                or ""
+            )
 
             payload = _build_event_payload(
                 event_name="$$experiment_viewed",
@@ -236,7 +250,7 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
                     "hash_value": result.hashValue,
                 },
                 attributes=attrs,
-                url=getattr(self._gb_instance, "_url", "") if self._gb_instance else "",
+                url=url,
                 sdk_version=self._get_sdk_version(),
             )
             self._add_event_to_batch(payload)
