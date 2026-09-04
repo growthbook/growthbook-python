@@ -883,7 +883,6 @@ class GrowthBook(object):
         sticky_bucket_service: Optional[AbstractStickyBucketService] = None,
         sticky_bucket_identifier_attributes: Optional[List[str]] = None,
         saved_groups: Optional[Dict[str, Any]] = None,
-        contextual_bandits: Optional[Dict[str, Any]] = None,
         remote_eval: bool = False,
         cache_key_attributes: Optional[List[str]] = None,
         streaming: bool = False,
@@ -892,6 +891,9 @@ class GrowthBook(object):
         stale_ttl: int = 300,  # 5 minutes default
         plugins: Optional[List["PluginLike"]] = None,
         skip_all_experiments: bool = False,
+        # New in 3.1.0 — appended after the 3.0.0 parameters so existing
+        # positional call sites keep their meaning.
+        contextual_bandits: Optional[Dict[str, Any]] = None,
         # Deprecated args (camelCase spellings fold into their snake_case
         # equivalents above; the snake_case value wins when both are given)
         trackingCallback: Optional[TrackingCallback] = None,
@@ -903,9 +905,9 @@ class GrowthBook(object):
         http_connect_timeout: Optional[int] = None,
         http_read_timeout: Optional[int] = None,
         savedGroups: Optional[Dict[str, Any]] = None,
-        contextualBandits: Optional[Dict[str, Any]] = None,
         remoteEval: bool = False,
         cacheKeyAttributes: Optional[List[str]] = None,
+        contextualBandits: Optional[Dict[str, Any]] = None,
     ) -> None:
         remote_eval = remote_eval or remoteEval
         saved_groups = saved_groups if saved_groups is not None else savedGroups
