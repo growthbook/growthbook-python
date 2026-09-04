@@ -59,7 +59,7 @@ if TYPE_CHECKING:
     # Only present in urllib3 2.x; the runtime dependency allows 1.x too.
     from urllib3.response import BaseHTTPResponse
 
-from .core import _getHashValue, eval_feature as core_eval_feature, run_experiment
+from .core import _eval_feature_and_report, _getHashValue, run_experiment
 
 logger = logging.getLogger("growthbook")
 
@@ -1483,7 +1483,9 @@ class GrowthBook(object):
         return self._build_eval_context()
 
     def eval_feature(self, key: str) -> FeatureResult[Any]:
-        return core_eval_feature(key=key, evalContext=self._get_eval_context())
+        # The internal entry point skips the public wrapper's deprecated-kwarg
+        # shim — the callbacks are already wired on the context.
+        return _eval_feature_and_report(key, self._get_eval_context())
 
     def _feature_usage(self, key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
         if not self._featureUsageCallback:

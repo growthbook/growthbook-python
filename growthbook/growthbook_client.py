@@ -19,7 +19,7 @@ from datetime import datetime
 from growthbook import FeatureRepository, feature_repo
 from contextlib import asynccontextmanager
 
-from .core import eval_feature as core_eval_feature, run_experiment
+from .core import _eval_feature_and_report, run_experiment
 from .common_types import (
     T,
     AsyncEventLogger,
@@ -1324,7 +1324,9 @@ class GrowthBookClient:
         evaluation produces (deferred tracking); the caller owns the buffer,
         so requests never mix."""
         context = await self.create_evaluation_context(user_context, tracking_buffer)
-        return core_eval_feature(key=key, evalContext=context)
+        # The internal entry point skips the public wrapper's deprecated-kwarg
+        # shim — the callbacks are already wired on the context.
+        return _eval_feature_and_report(key, context)
 
     def _feature_usage(self, key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
         if not self.options.on_feature_usage:
