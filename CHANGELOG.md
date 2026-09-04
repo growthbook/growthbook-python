@@ -7,8 +7,10 @@
 * Contextual bandit support in both clients, at behavioral parity with the JavaScript SDK:
   * Consumes the `contextualBandits` payload section (and `encryptedContextualBandits`), evaluates `contextualBanditRef`/`contextualVariations` rules with per-leaf weight substitution, and reports `leafId`, `variationWeights`, and `banditVersion` on experiment results for exposure logging.
   * New `set_payload()` on `GrowthBook` and `GrowthBookClient` for seeding full SDK payloads; only the sections present are overwritten, and encrypted sections are decrypted with the configured `decryption_key` (JS `setPayload` semantics).
-  * Payload refreshes missing a section (`savedGroups`, `contextualBandits`) preserve the previous value at every layer instead of wiping it; refreshes publish one coherent evaluation snapshot atomically in the synchronous client, matching the async client.
-  * Malformed bandit definitions or leaves degrade to the rule's aggregate weights instead of raising during evaluation.
+  * Payload refreshes missing a section (`savedGroups`, `contextualBandits`) preserve the previous value at every layer instead of wiping it; the synchronous client serializes payload writers and publishes one coherent evaluation snapshot per update (evaluations stay lock-free), matching the async client.
+  * Malformed bandit definitions or leaves degrade to the rule's aggregate weights instead of raising during evaluation; reported `variationWeights` always match the weights bucketing actually used, and leaf vectors with negative, non-finite, or boolean entries are rejected.
+  * Contextual bandit exposure metadata survives remote evaluation: `rule.tracks` results from the proxy keep `leafId`, `variationWeights`, and `banditVersion` when replayed through the tracking callback.
+  * The async client freezes user attributes (including nested containers) before its first await, so mutating a `UserContext` during in-flight I/O cannot change leaf routing, remote payloads, or what tracking reports; tracking snapshots copy nested containers in both clients.
 
 ### Bug Fixes
 
