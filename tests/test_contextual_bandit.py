@@ -727,6 +727,120 @@ def test_concurrent_payload_writers_publish_coherent_generations():
     gb.destroy()
 
 
+# Leaf routing on both a top-level and a nested attribute, for the
+# mutation-freezing tests below.
+CB_NESTED_FEATURES = {
+    "bandit-feature": {
+        "defaultValue": "default",
+        "rules": [
+            {
+                "key": "bandit-exp",
+                "seed": "bandit-exp",
+                "hashAttribute": "id",
+                "hashVersion": 2,
+                "coverage": 1,
+                "contextualVariations": ["control", "treatment"],
+                "weights": [0.5, 0.5],
+                "contextualBanditRef": "cb-bandit",
+            }
+        ],
+    }
+}
+CB_NESTED_MAP = {
+    "cb-bandit": {
+        "banditVersion": 7,
+        "contexts": [
+            {
+                "leafId": 1,
+                "condition": {"country": "US", "profile.tier": "pro"},
+                "weights": [1, 0],
+            },
+            {"leafId": 2, "condition": {}, "weights": [0, 1]},
+        ],
+    }
+}
+
+
+@pytest.mark.asyncio
+async def test_async_eval_freezes_attributes_before_awaits():
+    """Attributes are snapshotted at the async eval boundary, before the
+    first await: a caller (or another task) mutating the UserContext while
+    sticky-bucket I/O is pending must not change leaf routing or what the
+    tracking callback reports — for top-level or nested keys."""
+    tracked = []
+
+    def on_view(experiment, result, user_context):
+        tracked.append((result, user_context))
+
+    EnhancedFeatureRepository._instances = {}
+    with patch(
+        "growthbook.FeatureRepository.load_features_async",
+        new_callable=AsyncMock,
+        return_value={
+            "features": CB_NESTED_FEATURES,
+            "savedGroups": {},
+            "contextualBandits": CB_NESTED_MAP,
+        },
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh",
+        new_callable=AsyncMock,
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh",
+        new_callable=AsyncMock,
+    ):
+        async with GrowthBookClient(
+            Options(
+                api_host="https://localhost.growthbook.io",
+                client_key="test-key",
+                on_experiment_viewed=on_view,
+            )
+        ) as client:
+            caller_attrs = {"id": "1", "country": "US", "profile": {"tier": "pro"}}
+            user_context = UserContext(attributes=caller_attrs)
+
+            async def mutating_refresh(attributes):
+                # Simulates a concurrent task mutating the caller's context
+                # while the eval awaits sticky-bucket I/O.
+                caller_attrs["country"] = "DE"
+                caller_attrs["profile"]["tier"] = "basic"
+                return {}
+
+            client._refresh_sticky_buckets = mutating_refresh
+
+            result = await client.eval_feature("bandit-feature", user_context)
+            # Routed with the attributes the call started with, not the
+            # mutated ones (which match only the catch-all leaf 2).
+            assert result.value == "control"
+            assert result.experimentResult.leafId == 1
+
+    (tracked_result, tracked_user) = tracked[0]
+    assert tracked_result.leafId == 1
+    assert tracked_user.attributes["country"] == "US"
+    assert tracked_user.attributes["profile"]["tier"] == "pro"
+
+
+def test_tracking_snapshot_preserves_nested_attributes():
+    """Deferred tracking callbacks must see the nested attribute values used
+    at exposure time, even after the caller mutates them (the snapshot copies
+    containers recursively, not just the top level)."""
+    tracked = []
+
+    def on_view(experiment, result, user_context):
+        tracked.append(user_context)
+
+    attrs = {"id": "1", "country": "US", "profile": {"tier": "pro"}}
+    gb = GrowthBook(
+        attributes=attrs,
+        features=CB_NESTED_FEATURES,
+        contextualBandits=CB_NESTED_MAP,
+        on_experiment_viewed=on_view,
+    )
+    assert gb.eval_feature("bandit-feature").experimentResult.leafId == 1
+    attrs["profile"]["tier"] = "basic"
+    assert tracked[0].attributes["profile"]["tier"] == "pro"
+    gb.destroy()
+
+
 def test_bandit_metadata_reports_weights_bucketing_uses():
     """Invalid vectors on the fallback and override paths are normalized the
     same way getBucketRanges normalizes them, so Result.variationWeights can

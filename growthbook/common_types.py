@@ -587,15 +587,30 @@ AsyncEventLogger = Callable[
 ]
 
 
+def snapshot_attributes(attributes: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursive copy of a JSON-compatible attributes dict (dicts and lists
+    are copied, scalars shared). Freezes the values used for bucketing and
+    contextual bandit leaf routing so later caller mutations — including
+    nested ones — can't change what an in-flight evaluation or a deferred
+    callback observes."""
+    def copy_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: copy_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [copy_value(v) for v in value]
+        return value
+
+    return {k: copy_value(v) for k, v in attributes.items()}
+
+
 def tracking_user_context(user: "UserContext") -> "UserContext":
     """Exposure-time snapshot of a user context for tracking and
     feature-usage callbacks (JS SDK: getTrackingUserContext).
 
-    The attributes dict is shallow-copied so callbacks — including ones that
-    defer processing — always see the values that were used for bucketing
-    and contextual bandit leaf routing, even if the caller mutates
-    attributes afterwards."""
-    return replace(user, attributes=dict(user.attributes))
+    Attributes are copied recursively (the JS SDK only shallow-spreads;
+    Python's threaded callers make nested mutation of a deferred callback's
+    payload a realistic hazard, so this diverges deliberately)."""
+    return replace(user, attributes=snapshot_attributes(user.attributes))
 
 
 @dataclass

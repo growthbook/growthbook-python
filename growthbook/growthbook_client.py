@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import inspect
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import random
 import logging
 from types import TracebackType
@@ -36,6 +36,7 @@ from .common_types import (
     Experiment,
     build_remote_eval_payload,
     features_from_dict,
+    snapshot_attributes,
     tracking_user_context,
     validate_remote_eval_options,
 )
@@ -1222,6 +1223,16 @@ class GrowthBookClient:
         if global_context is None:
             raise RuntimeError("GrowthBook client not properly initialized")
 
+        # Freeze the caller's attributes BEFORE the first await: sticky bucket
+        # and remote-eval I/O yield the event loop, so another task or thread
+        # mutating the UserContext mid-evaluation must not change the remote
+        # payload, leaf routing, or what tracking reports. The caller's own
+        # context object is kept aside for read-your-writes on sticky docs.
+        caller_context = user_context
+        user_context = replace(
+            user_context, attributes=snapshot_attributes(user_context.attributes)
+        )
+
         if self.options.remote_eval and self._features_repository:
             # Per-user POST + cache: features come from the proxy filtered for
             # this UserContext, not from self._global_context.features.
@@ -1252,8 +1263,10 @@ class GrowthBookClient:
         # place when an experiment assigns a new sticky bucket, which is what
         # gives read-your-writes semantics while persistence happens
         # asynchronously (same mechanism as the JS SDK's
-        # stickyBucketAssignmentDocs).
+        # stickyBucketAssignmentDocs). Assigned to the caller's context too so
+        # callers keep observing assignments through the object they passed.
         user_context.sticky_bucket_assignment_docs = sticky_assignments
+        caller_context.sticky_bucket_assignment_docs = sticky_assignments
 
         return EvaluationContext(
             user=user_context,
@@ -1276,7 +1289,9 @@ class GrowthBookClient:
             try:
                 self._run_user_callback(
                     self.options.on_feature_usage,
-                    (key, result, tracking_user_context(user_context)),
+                    # context.user carries the attributes snapshot frozen at
+                    # the eval boundary — the exact values used for routing.
+                    (key, result, context.user),
                     "feature usage",
                 )
             except Exception:
