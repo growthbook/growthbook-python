@@ -611,6 +611,34 @@ Behaviors to be aware of:
 
 With `GrowthBookClient`, the `on_experiment_viewed` and `on_feature_usage` options — and callbacks registered via `client.subscribe()` — may be either regular functions or coroutines. Coroutine callbacks are scheduled on the event loop without blocking evaluation, and a tracking callback that raises is retried on the next evaluation of the same experiment/user pair.
 
+## Contextual Bandits
+
+Contextual bandit experiments (GrowthBook Enterprise) learn which variation works best for each kind of user. All learning happens server-side: GrowthBook trains a model that partitions users into leaves and computes per-leaf variation weights. The SDK routes each user to the first leaf whose condition matches their attributes and buckets them with that leaf's weights — there is no model or sampling client-side.
+
+Support is automatic once features are loaded from the GrowthBook API. Payloads for contextual bandit experiments contain:
+
+- A top-level `contextualBandits` map (or `encryptedContextualBandits`, decrypted with your `decryption_key` like the other encrypted sections) holding each bandit's `banditVersion` and its per-leaf `condition`/`weights`.
+- Feature rules carrying `contextualBanditRef` (which bandit to use) and `contextualVariations` (the variation values).
+
+Payloads can also be seeded or updated manually. `set_payload` (both clients) overwrites only the sections present, so a payload without `contextualBandits` preserves the current map — the same semantics background refreshes use:
+
+```python
+gb.set_payload({
+    "features": {...},
+    "contextualBandits": {...},  # omitted sections are preserved
+})
+```
+
+When a user is exposed through a contextual bandit rule, the experiment `Result` (including the result passed to `on_experiment_viewed`) carries three extra fields:
+
+- **leafId** — the matched leaf (`-1` when no leaf matched and the rule's aggregate weights were used)
+- **variationWeights** — the weight vector actually used for bucketing (the assignment propensities)
+- **banditVersion** — the version of the bandit model that produced the weights
+
+Log these to your data warehouse in your tracking callback — along with the `user_context` attributes used at exposure time — so GrowthBook can train the bandit and attribute exposures to the right model version. Because weights change as the bandit learns, users may be re-bucketed during the experiment; sticky bucketing is disabled server-side for these rules and analysis attributes each user to their first exposure.
+
+Older SDK versions ignore contextual bandit rules entirely and serve the feature's default value.
+
 ## Inline Experiments
 
 Instead of declaring all features up-front and referencing them by ids in your code, you can also just run an experiment directly. This is done with the `run` method:

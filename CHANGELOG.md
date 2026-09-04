@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+* Contextual bandit support in both clients, at behavioral parity with the JavaScript SDK:
+  * Consumes the `contextualBandits` payload section (and `encryptedContextualBandits`), evaluates `contextualBanditRef`/`contextualVariations` rules with per-leaf weight substitution, and reports `leafId`, `variationWeights`, and `banditVersion` on experiment results for exposure logging.
+  * New `set_payload()` on `GrowthBook` and `GrowthBookClient` for seeding full SDK payloads; only the sections present are overwritten, and encrypted sections are decrypted with the configured `decryption_key` (JS `setPayload` semantics).
+  * Payload refreshes missing a section (`savedGroups`, `contextualBandits`) preserve the previous value at every layer instead of wiping it; refreshes publish one coherent evaluation snapshot atomically in the synchronous client, matching the async client.
+  * Malformed bandit definitions or leaves degrade to the rule's aggregate weights instead of raising during evaluation.
+
+### Bug Fixes
+
+* `savedGroups` from a feature refresh were applied to the evaluation context one refresh late in the synchronous client.
+* The built-in tracking plugin now sends the exposure-time user context attributes with experiment events (previously async client events had none).
+
 ## [3.0.0](https://github.com/growthbook/growthbook-python/compare/v2.4.0...v3.0.0) (2026-08-26)
 
 
