@@ -1440,6 +1440,7 @@ class GrowthBook(object):
                                 evalContext=self._get_eval_context(),
                                 tracking_cb=self._track,
                                 feature_usage_cb=self._feature_usage_cb(),
+                                callback_subscription=self._fireSubscriptions,
                                 )
 
         self._fireSubscriptions(experiment, result)
@@ -1481,7 +1482,9 @@ class GrowthBook(object):
                 buffer.pop(key, None)
                 continue
             experiment, result = hydrated
-            user = call.get("user") or {}
+            user = call.get("user")
+            if not isinstance(user, dict):
+                user = {}
             attributes = user.get("attributes")
             snapshot = UserContext(
                 attributes=dict(attributes) if isinstance(attributes, dict) else {},

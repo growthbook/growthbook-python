@@ -1255,6 +1255,7 @@ class GrowthBookClient:
             evalContext=context,
             tracking_cb=self._track,
             feature_usage_cb=self._feature_usage_cb(),
+            callback_subscription=self._fire_subscriptions,
         )
         # Fire subscriptions synchronously
         self._fire_subscriptions(experiment, result)

@@ -83,10 +83,13 @@ def test_experiment_level_prerequisite_is_tracked():
         weights=[1, 0],
         parentConditions=[{"id": "parent", "condition": {"value": "on"}}],
     )
+    seen = []
+    gb.subscribe(lambda experiment, result: seen.append(experiment.key))
     res = gb.run(exp)
     assert res.inExperiment and res.value == "x"
     assert tracked == [("parent-exp", 0), ("direct", 0)]
     assert usage == ["parent"]
+    assert seen == ["parent-exp", "direct"]
     gb.destroy()
 
 
@@ -189,13 +192,18 @@ def test_hydration_skips_malformed_entries():
         {"experiment": {"key": "no-variations", "variations": None}, "result": {}},
         {"experiment": {"key": "no-result", "variations": ["a", "b"]}},
         {
+            "experiment": {"key": "bad-user", "variations": ["a", "b"]},
+            "result": {"variationId": 0, "inExperiment": True, "hashAttribute": "id", "hashValue": "user-1"},
+            "user": "not-a-dict",
+        },
+        {
             "experiment": {"key": "forwarded", "variations": ["a", "b"]},
             "result": {"variationId": 1, "inExperiment": True, "hashAttribute": "id", "hashValue": "user-1"},
         },
     ])
-    assert len(gb.get_deferred_tracking_calls()) == 1
+    assert len(gb.get_deferred_tracking_calls()) == 2
     gb.fire_deferred_tracking_calls()
-    assert fired == [("forwarded", 1)]
+    assert fired == [("bad-user", 0), ("forwarded", 1)]
     assert gb.get_deferred_tracking_calls() == []
     gb.destroy()
 

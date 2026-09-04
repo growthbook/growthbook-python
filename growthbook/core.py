@@ -695,6 +695,7 @@ def _eval_feature(
             evalContext=evalContext,
             tracking_cb=tracking_cb,
             feature_usage_cb=feature_usage_cb,
+            callback_subscription=callback_subscription,
         )
 
         if callback_subscription:
@@ -840,6 +841,7 @@ def run_experiment(experiment: Experiment[Any],
                    evalContext: Optional[EvaluationContext] = None,
                    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None,
                    feature_usage_cb: Optional[FeatureUsageCb] = None,
+                   callback_subscription: Optional[Callable[[Experiment[Any], Result[Any]], None]] = None,
                 ) -> Result[Any]:
     if evalContext is None:
         raise ValueError("evalContext is required - run_experiment")
@@ -957,6 +959,7 @@ def run_experiment(experiment: Experiment[Any],
             prereq_res = eval_prereqs(
                 parentConditions=experiment.parentConditions,
                 evalContext=evalContext,
+                callback_subscription=callback_subscription,
                 tracking_cb=tracking_cb,
                 feature_usage_cb=feature_usage_cb,
             )
