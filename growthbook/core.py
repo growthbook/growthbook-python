@@ -594,6 +594,12 @@ def _fire_rule_tracks(
                 meta=meta,
                 bucket=res_data.get("bucket"),
                 stickyBucketUsed=res_data.get("stickyBucketUsed", False),
+                # Contextual bandit exposure metadata evaluated by the proxy.
+                # The JS SDK passes the proxy result through verbatim, so
+                # these must survive the reconstruction too.
+                leafId=res_data.get("leafId"),
+                variationWeights=res_data.get("variationWeights"),
+                banditVersion=res_data.get("banditVersion"),
             )
             tracking_cb(experiment, result, eval_context.user)
         except Exception:

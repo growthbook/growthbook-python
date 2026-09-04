@@ -548,6 +548,128 @@ def test_failed_bandit_decryption_preserves_previous_map():
     gb.destroy()
 
 
+def test_remote_eval_tracks_preserve_bandit_fields():
+    """rule.tracks entries from the remote-eval proxy must reach the tracking
+    callback with their contextual bandit fields intact — the JS SDK passes
+    the proxy result through verbatim."""
+    tracked = []
+
+    def on_view(experiment, result, user_context):
+        tracked.append(result)
+
+    gb = GrowthBook(
+        attributes={"id": "1"},
+        on_experiment_viewed=on_view,
+        features={
+            "remote-feature": {
+                "defaultValue": "x",
+                "rules": [
+                    {
+                        "force": "treatment",
+                        "tracks": [
+                            {
+                                "experiment": {
+                                    "key": "bandit-exp",
+                                    "variations": ["control", "treatment"],
+                                },
+                                "result": {
+                                    "variationId": 1,
+                                    "inExperiment": True,
+                                    "hashUsed": True,
+                                    "hashAttribute": "id",
+                                    "hashValue": "1",
+                                    "value": "treatment",
+                                    "key": "1",
+                                    "featureId": "remote-feature",
+                                    "leafId": 8,
+                                    "variationWeights": [0.2, 0.8],
+                                    "banditVersion": 7,
+                                },
+                            }
+                        ],
+                    }
+                ],
+            }
+        },
+    )
+    assert gb.eval_feature("remote-feature").value == "treatment"
+    assert len(tracked) == 1
+    assert tracked[0].leafId == 8
+    assert tracked[0].variationWeights == [0.2, 0.8]
+    assert tracked[0].banditVersion == 7
+    gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_async_remote_eval_tracks_preserve_bandit_fields():
+    tracked = []
+
+    def on_view(experiment, result, user_context):
+        tracked.append(result)
+
+    EnhancedFeatureRepository._instances = {}
+    with patch(
+        "growthbook.FeatureRepository.load_features_async",
+        new_callable=AsyncMock,
+        return_value={"features": {}, "savedGroups": {}},
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh",
+        new_callable=AsyncMock,
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh",
+        new_callable=AsyncMock,
+    ):
+        async with GrowthBookClient(
+            Options(
+                api_host="https://localhost.growthbook.io",
+                client_key="test-key",
+                on_experiment_viewed=on_view,
+            )
+        ) as client:
+            await client.set_payload(
+                {
+                    "features": {
+                        "remote-feature": {
+                            "defaultValue": "x",
+                            "rules": [
+                                {
+                                    "force": "treatment",
+                                    "tracks": [
+                                        {
+                                            "experiment": {
+                                                "key": "bandit-exp",
+                                                "variations": ["control", "treatment"],
+                                            },
+                                            "result": {
+                                                "variationId": 1,
+                                                "inExperiment": True,
+                                                "hashUsed": True,
+                                                "hashAttribute": "id",
+                                                "hashValue": "1",
+                                                "value": "treatment",
+                                                "key": "1",
+                                                "leafId": 8,
+                                                "variationWeights": [0.2, 0.8],
+                                                "banditVersion": 7,
+                                            },
+                                        }
+                                    ],
+                                }
+                            ],
+                        }
+                    }
+                }
+            )
+            result = await client.eval_feature(
+                "remote-feature", UserContext(attributes={"id": "1"})
+            )
+            assert result.value == "treatment"
+    assert len(tracked) == 1
+    assert tracked[0].leafId == 8
+    assert tracked[0].variationWeights == [0.2, 0.8]
+    assert tracked[0].banditVersion == 7
+
+
 def test_bandit_metadata_reports_weights_bucketing_uses():
     """Invalid vectors on the fallback and override paths are normalized the
     same way getBucketRanges normalizes them, so Result.variationWeights can
