@@ -6,6 +6,7 @@ Pure evaluate-and-expect tracking/usage semantics live in cases.json
 ("trackingCalls", a Python-local extension run by both clients' suites).
 """
 import asyncio
+import datetime
 import json
 import threading
 
@@ -106,17 +107,17 @@ def test_unserializable_feature_values_do_not_break_evaluation():
     gb.destroy()
 
 
-def test_snapshot_failure_drops_the_exposure_not_the_evaluation():
-    # A variation that deepcopy cannot handle makes the buffer's record-time
-    # snapshot raise; the exposure is dropped (logged), evaluation and the
-    # tracking callback are unaffected.
+def test_non_json_exposures_are_dropped_not_the_batch():
+    # The buffer's record-time JSON round-trip drops exposures it cannot
+    # serialize (logged); evaluation and the tracking callback are unaffected,
+    # and every retained entry stays json.dumps-ready. Two failure modes: a
+    # non-JSON variation value, and a non-JSON user attribute (datetime).
     lock = threading.Lock()
-    features = {
-        "locked": {
-            "defaultValue": "off",
-            "rules": [{"key": "locked-exp", "coverage": 1,
-                       "variations": [lock, "off"], "weights": [1, 0]}],
-        },
+    features = dict(FEATURES)
+    features["locked"] = {
+        "defaultValue": "off",
+        "rules": [{"key": "locked-exp", "coverage": 1,
+                   "variations": [lock, "off"], "weights": [1, 0]}],
     }
     tracked = []
     gb = GrowthBook(
@@ -126,6 +127,15 @@ def test_snapshot_failure_drops_the_exposure_not_the_evaluation():
     assert gb.eval_feature("locked").value is lock
     assert tracked == ["locked-exp"]
     assert gb.get_deferred_tracking_calls() == []
+
+    gb.set_attributes({"id": "user-1", "signup": datetime.datetime(2026, 1, 1)})
+    gb.eval_feature("parent")  # user snapshot now unserializable -> dropped
+    gb.set_attributes({"id": "user-2"})
+    gb.eval_feature("parent")  # clean exposure still buffered
+
+    calls = gb.get_deferred_tracking_calls()
+    assert [c["user"]["attributes"]["id"] for c in calls] == ["user-2"]
+    json.dumps(calls)  # the batch is never poisoned
     gb.destroy()
 
 

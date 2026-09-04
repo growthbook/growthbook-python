@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import json
 import logging
 import threading
 from copy import deepcopy
@@ -666,10 +667,12 @@ class TrackingBuffer:
 
     Entries use the JS SDK's TrackingData shape —
     ``{"experiment": {...}, "result": {...}, "user": {"attributes", "url"}}``
-    — snapshotted at record time so nothing the caller mutates afterwards can
-    reach the buffer. Deduped by tracking_dedupe_key, first exposure wins,
-    insertion-ordered. Thread-safe: the async client may share one buffer
-    across concurrent evaluations of the same request."""
+    — JSON round-tripped at record time, so nothing the caller mutates
+    afterwards can reach the buffer and every stored entry is guaranteed
+    json.dumps-ready (an exposure carrying a non-JSON value is dropped and
+    logged, never the batch). Deduped by tracking_dedupe_key, first exposure
+    wins, insertion-ordered. Thread-safe: the async client may share one
+    buffer across concurrent evaluations of the same request."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
@@ -682,17 +685,21 @@ class TrackingBuffer:
             # (first exposure wins). This only skips building the entry twice.
             return
         try:
-            # Deep-snapshot at record time: to_dict() aliases nested mutables
-            # (variations, condition, attribute values), so a shallow entry
-            # would let later caller mutations reach the buffer.
-            entry = deepcopy({
+            # JSON round-trip at record time (Go SDK: detachTrackingData).
+            # It snapshots — to_dict() aliases nested mutables (variations,
+            # condition, attribute values), so a shallow entry would let later
+            # caller mutations reach the buffer — AND it guarantees the
+            # json.dumps-ready contract per entry, so one exposure carrying a
+            # non-JSON value (datetime, NaN, custom object) is dropped here
+            # with a log instead of poisoning the whole forwarded batch at the
+            # caller's json.dumps. Telemetry must never break evaluation.
+            entry = json.loads(json.dumps({
                 "experiment": experiment.to_dict(),
                 "result": result.to_dict(),
                 "user": {"attributes": user.attributes, "url": user.url},
-            })
+            }, allow_nan=False))
         except Exception:
-            # Telemetry must never break evaluation: drop this exposure.
-            logger.exception("Failed to snapshot deferred tracking call")
+            logger.exception("Dropped deferred tracking call that cannot be JSON-serialized")
             return
         with self._lock:
             self._calls.setdefault(key, entry)
