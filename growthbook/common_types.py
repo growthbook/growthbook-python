@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import (
     TYPE_CHECKING,
     Any,
@@ -56,6 +56,33 @@ class Filter(TypedDict, total=False):
     hashVersion: int
     attribute: str
 
+
+# Contextual bandit payload types. The server ships a top-level
+# "contextualBandits" map keyed by bandit id; each entry holds per-leaf
+# weight vectors computed server-side (Thompson sampling within decision-tree
+# leaves). The SDK only picks the first leaf whose condition matches and
+# buckets with that leaf's weights — no model evaluation happens client-side.
+
+class ContextualBanditContext(TypedDict, total=False):
+    leafId: Required[int]
+    condition: Dict[str, Any]
+    weights: Required[List[float]]
+
+
+class ContextualBanditDefinition(TypedDict, total=False):
+    banditVersion: int
+    contexts: List[ContextualBanditContext]
+
+
+# Assignment metadata attached to an Experiment/Result for a contextual
+# bandit rule. banditVersion is omitted (never None) when the definition
+# doesn't carry one — serialization must match the JS SDK byte-for-byte.
+class ContextualBanditAssignment(TypedDict, total=False):
+    leafId: Required[int]
+    variationWeights: Required[List[float]]
+    banditVersion: int
+
+
 class Experiment(Generic[T]):
     def __init__(
         self,
@@ -85,6 +112,7 @@ class Experiment(Generic[T]):
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
         customFields: Optional[Dict[str, Any]] = None,
+        contextualBandit: Optional[ContextualBanditAssignment] = None,
         # NoReturn makes literal unknown kwargs a checker error (like TS excess
         # property checks) while **dict payload splats (typed Any) still pass;
         # at runtime unknown payload keys are swallowed as before.
@@ -113,6 +141,7 @@ class Experiment(Generic[T]):
         # Custom Fields defined for the experiment in the GrowthBook UI.
         # Arrives from the API as a flat dict (e.g. {"cfl_abc123": "value"}).
         self.customFields = customFields or {}
+        self.contextualBandit = contextualBandit
 
         self.fallbackAttribute = None
         if not self.disableStickyBucketing:
@@ -156,6 +185,8 @@ class Experiment(Generic[T]):
             obj["parentConditions"] = self.parentConditions
         if self.customFields:
             obj["customFields"] = self.customFields
+        if self.contextualBandit is not None:
+            obj["contextualBandit"] = self.contextualBandit
 
         return obj
 
@@ -194,6 +225,9 @@ class Result(Generic[T]):
         meta: Optional[VariationMeta] = None,
         bucket: Optional[float] = None,
         stickyBucketUsed: bool = False,
+        leafId: Optional[int] = None,
+        variationWeights: Optional[List[float]] = None,
+        banditVersion: Optional[int] = None,
     ) -> None:
         self.variationId = variationId
         self.inExperiment = inExperiment
@@ -204,6 +238,11 @@ class Result(Generic[T]):
         self.featureId = featureId or None
         self.bucket = bucket
         self.stickyBucketUsed = stickyBucketUsed
+        # Contextual bandit exposure metadata; set only for real hashed
+        # exposures of a contextual bandit rule.
+        self.leafId = leafId
+        self.variationWeights = variationWeights
+        self.banditVersion = banditVersion
 
         self.key = str(variationId)
         self.name = ""
@@ -236,6 +275,14 @@ class Result(Generic[T]):
             obj["name"] = self.name
         if self.passthrough:
             obj["passthrough"] = True
+        # The fallback leafId is -1, so these must be gated on None, not
+        # truthiness.
+        if self.leafId is not None:
+            obj["leafId"] = self.leafId
+        if self.variationWeights is not None:
+            obj["variationWeights"] = self.variationWeights
+        if self.banditVersion is not None:
+            obj["banditVersion"] = self.banditVersion
 
         return obj
 
@@ -312,6 +359,8 @@ class FeatureRule(object):
         minBucketVersion: Optional[int] = None,
         parentConditions: Optional[List[Dict[str, Any]]] = None,
         tracks: Optional[List[Dict[str, Any]]] = None,
+        contextualBanditRef: Optional[str] = None,
+        contextualVariations: Optional[List[Any]] = None,
         # See Experiment.__init__: checker-strict, runtime-permissive.
         **_ignored: NoReturn,
     ) -> None:
@@ -344,6 +393,11 @@ class FeatureRule(object):
         # Remote-eval rules carry pre-evaluated experiment tracking events on
         # the force branch; see _fireRuleTracks in core.py.
         self.tracks = tracks
+        # Contextual bandit rules carry their variations under
+        # contextualVariations (capability-gated key) so bandit-unaware SDKs
+        # skip the rule instead of bucketing on stale weights.
+        self.contextualBanditRef = contextualBanditRef
+        self.contextualVariations = contextualVariations
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {}
@@ -393,6 +447,10 @@ class FeatureRule(object):
             data["parentConditions"] = self.parentConditions
         if self.tracks:
             data["tracks"] = self.tracks
+        if self.contextualBanditRef:
+            data["contextualBanditRef"] = self.contextualBanditRef
+        if self.contextualVariations is not None:
+            data["contextualVariations"] = self.contextualVariations
 
         return data
 
@@ -529,6 +587,51 @@ AsyncEventLogger = Callable[
 ]
 
 
+def snapshot_attributes(attributes: Dict[str, Any]) -> Dict[str, Any]:
+    """Recursive copy of a JSON-compatible attributes dict (dicts and lists
+    are copied, scalars shared). Freezes the values used for bucketing and
+    contextual bandit leaf routing so later caller mutations — including
+    nested ones — can't change what an in-flight evaluation or a deferred
+    callback observes."""
+    def copy_value(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {k: copy_value(v) for k, v in value.items()}
+        if isinstance(value, list):
+            return [copy_value(v) for v in value]
+        return value
+
+    return {k: copy_value(v) for k, v in attributes.items()}
+
+
+def snapshot_user_context(user: "UserContext") -> "UserContext":
+    """Call-time snapshot of every mutable evaluation input on a UserContext.
+
+    The single freeze operation used wherever a context's data outlives the
+    caller's synchronous control flow: evaluations that await (remote-eval
+    fetch, sticky-bucket I/O) and remote-eval cache preloads, whose POST body
+    can be serialized by a background SWR refresh long after the caller has
+    moved on. Without it, a later caller mutation could change the request
+    body while the cache key still describes the original attribute state."""
+    return replace(
+        user,
+        attributes=snapshot_attributes(user.attributes),
+        groups=snapshot_attributes(user.groups),
+        forced_variations=snapshot_attributes(user.forced_variations),
+        forced_features=snapshot_attributes(user.forced_features),
+        overrides=snapshot_attributes(user.overrides),
+    )
+
+
+def tracking_user_context(user: "UserContext") -> "UserContext":
+    """Exposure-time snapshot of a user context for tracking and
+    feature-usage callbacks (JS SDK: getTrackingUserContext).
+
+    Attributes are copied recursively (the JS SDK only shallow-spreads;
+    Python's threaded callers make nested mutation of a deferred callback's
+    payload a realistic hazard, so this diverges deliberately)."""
+    return replace(user, attributes=snapshot_attributes(user.attributes))
+
+
 @dataclass
 class Options:
     url: Optional[str] = None
@@ -573,6 +676,10 @@ class GlobalContext:
     options: Options
     features: Dict[str, "Feature"] = field(default_factory=dict)
     saved_groups: Dict[str, Any] = field(default_factory=dict)
+    # Payload "contextualBandits" map ({bandit id -> definition}), kept as
+    # dicts (not materialized into classes) like saved_groups; the TypedDict
+    # value type documents the wire shape for readers and checkers.
+    contextual_bandits: Dict[str, ContextualBanditDefinition] = field(default_factory=dict)
 
 @dataclass
 class EvaluationContext:

@@ -1,20 +1,9 @@
 {
   "_doc": "Skiplist for the corpus freshness check. Two buckets:\n  * \"missing\" \u2014 case names JS has and Python deliberately doesn't. Use when JS adds a case for a feature Python doesn't (yet) support.\n  * \"drift\"   \u2014 case names where Python deliberately keeps a different body from JS. Use sparingly \u2014 body-drift on a shared case is usually a bug.\nExtras (Python has, JS doesn't) are reported but never fail CI, so they don't need an entry here.\nAdd a brief reason in `_reasons` whenever you add an entry so future maintainers know why.",
-  "missing": {
-    "feature": [
-      "CB rule with empty contexts (explore) buckets on marginal weights with fallback leaf -1",
-      "CB rule with no contexts key falls back to marginal weights (fallback leaf -1)",
-      "CB rule with empty contexts uses marginal weights (fallback leaf -1)",
-      "CB rule with empty contexts is overridden by forced variation like a normal experiment"
-    ]
-  },
+  "missing": {},
   "drift": {},
   "_reasons": {
     "_example_missing": "evalCondition::case name -> short reason (e.g. 'tests $someOperator that Python doesn't implement yet').",
-    "_example_drift": "evalCondition::case name -> short reason (e.g. 'JS shipped a behavioral change in case X; Python intentionally kept the prior expectation pending review').",
-    "feature::CB rule with empty contexts (explore) buckets on marginal weights with fallback leaf -1": "contextual bandit rules (spec 0.8.0: contextualBandits payload + contextualVariations) are not implemented in the Python SDK yet",
-    "feature::CB rule with no contexts key falls back to marginal weights (fallback leaf -1)": "contextual bandit rules (spec 0.8.0: contextualBandits payload + contextualVariations) are not implemented in the Python SDK yet",
-    "feature::CB rule with empty contexts uses marginal weights (fallback leaf -1)": "contextual bandit rules (spec 0.8.0: contextualBandits payload + contextualVariations) are not implemented in the Python SDK yet",
-    "feature::CB rule with empty contexts is overridden by forced variation like a normal experiment": "contextual bandit rules (spec 0.8.0: contextualBandits payload + contextualVariations) are not implemented in the Python SDK yet"
+    "_example_drift": "evalCondition::case name -> short reason (e.g. 'JS shipped a behavioral change in case X; Python intentionally kept the prior expectation pending review')."
   }
 }

@@ -63,6 +63,7 @@ gb.set_event_logger(async_logger)  # expect-error
 # Typo'd keyword arguments are no longer silently swallowed by checkers.
 Experiment(key="t", variations=[1, 2], weigths=[0.5, 0.5])  # expect-error
 FeatureRule(force="on", coverege=0.5)  # expect-error
+FeatureRule(contextualVariatons=["a", "b"])  # expect-error
 
 # Wrong argument types to public methods.
 GrowthBook(attributes="not-a-dict")  # expect-error

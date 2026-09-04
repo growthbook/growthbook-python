@@ -994,6 +994,47 @@ async def test_async_preload_warms_cache():
 
 
 @pytest.mark.asyncio
+async def test_async_preload_snapshots_context_against_swr_cache_poisoning():
+    """preload_remote_eval computes the cache key immediately, but an SWR
+    background refresh serializes the POST body later. Without the same
+    call-time snapshot create_evaluation_context takes, mutating the
+    UserContext after preload returns would POST the NEW attributes and cache
+    that response under the OLD attributes' key. Deterministic probe: the
+    mocked proxy derives the flag value from the attributes it receives, so a
+    poisoned cache is directly observable."""
+    bodies = []
+    posted = asyncio.Event()
+
+    async def post_handler(api_host, client_key, payload):
+        # Serialize NOW — this is what the wire would carry at POST time.
+        attrs = json.loads(json.dumps(payload))["attributes"]
+        bodies.append(attrs)
+        posted.set()
+        return {
+            "features": {"flag1": {"defaultValue": attrs["tier"] == "pro"}},
+            "savedGroups": {},
+        }
+
+    # stale_ttl=0: every cache hit is in the SWR window and schedules a
+    # background refetch.
+    client = await _make_async_client(post_handler, cache_ttl=60, stale_ttl=0)
+    uc = UserContext(attributes={"id": "u1", "tier": "pro"})
+
+    await client.preload_remote_eval(uc)  # miss -> foreground POST ("pro")
+    posted.clear()
+    await client.preload_remote_eval(uc)  # SWR hit -> schedules background POST
+    uc.attributes["tier"] = "free"        # caller mutates AFTER preload returned
+    await posted.wait()
+
+    assert len(bodies) == 2
+    # The background POST must describe the attributes its cache key was
+    # computed from, not the mutated ones.
+    assert bodies[1]["tier"] == "pro"
+    # End-to-end: the cache entry for the "pro" context still answers as "pro".
+    assert await client.is_on("flag1", UserContext(attributes={"id": "u1", "tier": "pro"})) is True
+
+
+@pytest.mark.asyncio
 async def test_async_sse_features_updated_flushes_cache():
     calls = []
 

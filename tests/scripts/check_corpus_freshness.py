@@ -62,6 +62,7 @@ DEFAULT_JS_URL = (
 KEYS_TO_DIFF = (
     "evalCondition",
     "feature",
+    "contextualBandit",
     "run",
     "hash",
     "getBucketRange",

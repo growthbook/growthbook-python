@@ -28,7 +28,12 @@ from .growthbook import (
     feature_repo,
 )
 
-from .common_types import AbstractAsyncStickyBucketService
+from .common_types import (
+    AbstractAsyncStickyBucketService,
+    ContextualBanditAssignment,
+    ContextualBanditContext,
+    ContextualBanditDefinition,
+)
 
 from .growthbook_client import (
     GrowthBookClient,
@@ -63,6 +68,9 @@ __all__ = [
     "Feature",
     "FeatureResult",
     "FeatureRule",
+    "ContextualBanditAssignment",
+    "ContextualBanditContext",
+    "ContextualBanditDefinition",
     # Typing helpers
     "JSONValue",
     "TrackingCallback",

@@ -7,10 +7,26 @@ from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
 from typing import Callable, Optional, Any, Set, Tuple, List, Dict, cast
-from .common_types import EvaluationContext, FeatureResult, Experiment, Filter, Result, UserContext, VariationMeta
+from typing_extensions import TypeGuard
+from .common_types import (
+    ContextualBanditAssignment,
+    ContextualBanditContext,
+    EvaluationContext,
+    FeatureResult,
+    Experiment,
+    Filter,
+    Result,
+    UserContext,
+    VariationMeta,
+)
 
 
 logger = logging.getLogger("growthbook.core")
+
+# leafId reported when a contextual bandit rule falls back to its marginal
+# weights (no leaf condition matched, empty contexts, or leaf selection
+# errored). Matches CONTEXTUAL_BANDIT_FALLBACK_LEAF_ID in the JS SDK.
+CONTEXTUAL_BANDIT_FALLBACK_LEAF_ID = -1
 
 def evalCondition(attributes: Dict[str, Any], condition: Dict[str, Any], savedGroups: Optional[Dict[str, Any]] = None) -> bool:
     for key, value in condition.items():
@@ -495,6 +511,54 @@ def getEqualWeights(numVariations: int) -> List[float]:
     return [1 / numVariations for _ in range(numVariations)]
 
 
+# Weight vectors whose sum falls outside this tolerance are replaced with
+# equal weights at bucketing time.
+WEIGHT_SUM_MIN = 0.99
+WEIGHT_SUM_MAX = 1.01
+
+
+def _is_valid_weight_vector(weights: Any, num_variations: int) -> bool:
+    """The single weight-vector validity rule, shared by bucketing and every
+    contextual bandit path: a list with one finite, non-negative real number
+    per variation (booleans excluded), summing to ~1. Anything else is
+    replaced with equal weights wherever weights are consumed, so bucket
+    ranges can never be inverted and reported bandit propensities always
+    describe the vector actually used.
+
+    Deliberately stricter than the JS SDK, which checks only length and sum
+    and will bucket on inverted ranges for e.g. [1.2, -0.2] — corrupt for
+    assignments and bandit training alike. The divergence exists only for
+    invalid payloads the server never produces (the shared conformance
+    corpus exercises none of them)."""
+    if not isinstance(weights, list) or len(weights) != num_variations:
+        return False
+    try:
+        if not all(
+            isinstance(w, (int, float))
+            and not isinstance(w, bool)
+            and math.isfinite(w)
+            and w >= 0
+            for w in weights
+        ):
+            return False
+        return WEIGHT_SUM_MIN <= sum(weights) <= WEIGHT_SUM_MAX
+    except OverflowError:
+        # math.isfinite (and mixed int/float summation) raise for
+        # arbitrary-precision ints too large for a float, e.g. 10**1000.
+        # Validation must be total over payload data: such vectors are
+        # invalid, never a crash.
+        return False
+
+
+def _normalized_weights(numVariations: int, weights: Any) -> List[float]:
+    """The weight vector bucketing (and bandit metadata) will actually use:
+    the input when it passes _is_valid_weight_vector, equal weights
+    otherwise."""
+    if _is_valid_weight_vector(weights, numVariations):
+        return cast(List[float], weights)
+    return getEqualWeights(numVariations)
+
+
 def getBucketRanges(
     numVariations: int, coverage: float = 1, weights: Optional[List[float]] = None
 ) -> List[Tuple[float, float]]:
@@ -502,12 +566,7 @@ def getBucketRanges(
         coverage = 0
     if coverage > 1:
         coverage = 1
-    if weights is None:
-        weights = getEqualWeights(numVariations)
-    if len(weights) != numVariations:
-        weights = getEqualWeights(numVariations)
-    if sum(weights) < 0.99 or sum(weights) > 1.01:
-        weights = getEqualWeights(numVariations)
+    weights = _normalized_weights(numVariations, weights)
 
     cumulative: float = 0
     ranges = []
@@ -547,6 +606,20 @@ def _fire_rule_tracks(
         try:
             # Experiment accepts **_ignored, so passing the raw proxy dict is safe.
             experiment = Experiment(**exp_data)
+            # Contextual bandit exposure metadata evaluated by the proxy is
+            # payload data like any other: hold it to the same validity rules
+            # as local evaluation (the JS SDK passes it through verbatim). An
+            # invalid leafId or weight vector drops all bandit metadata; an
+            # invalid banditVersion drops just that field.
+            leaf_id = res_data.get("leafId")
+            variation_weights = res_data.get("variationWeights")
+            bandit_version = res_data.get("banditVersion")
+            if not _is_valid_bandit_id(leaf_id) or not _is_valid_weight_vector(
+                variation_weights, len(experiment.variations)
+            ):
+                leaf_id = variation_weights = bandit_version = None
+            elif not _is_valid_bandit_id(bandit_version):
+                bandit_version = None
             result = Result(
                 variationId=res_data.get("variationId", 0),
                 inExperiment=res_data.get("inExperiment", False),
@@ -558,10 +631,123 @@ def _fire_rule_tracks(
                 meta=meta,
                 bucket=res_data.get("bucket"),
                 stickyBucketUsed=res_data.get("stickyBucketUsed", False),
+                leafId=leaf_id,
+                variationWeights=variation_weights,
+                banditVersion=bandit_version,
             )
             tracking_cb(experiment, result, eval_context.user)
         except Exception:
             logger.exception("Failed to fire rule.tracks tracking event")
+
+
+def _get_contextual_bandit_leaf(
+    contexts: List[ContextualBanditContext],
+    evalContext: EvaluationContext,
+) -> Optional[ContextualBanditContext]:
+    """Return the first leaf whose condition matches the user's attributes.
+
+    Leaf conditions use the regular targeting condition syntax; an empty
+    condition matches everyone (the catch-all leaf)."""
+    for context in contexts:
+        if evalCondition(
+            evalContext.user.attributes,
+            context.get("condition") or {},
+            evalContext.global_ctx.saved_groups,
+        ):
+            return context
+    return None
+
+
+def _is_valid_bandit_id(value: Any) -> TypeGuard[int]:
+    """The validity rule for the payload's bandit identifiers (leafId,
+    banditVersion): server-assigned integers, booleans excluded. Invalid
+    identifiers are treated as absent, so exposure callbacks never feed
+    corrupt leaf/model ids into bandit attribution and training."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _build_contextual_bandit_experiment(
+    experiment: Experiment[Any],
+    contextual_bandit_ref: str,
+    feature_id: str,
+    evalContext: EvaluationContext,
+) -> None:
+    """Resolve a rule's contextualBanditRef and substitute the matched leaf's
+    weight vector onto the experiment, mirroring the JS SDK.
+
+    Matched leaf: experiment.weights are replaced with the leaf's weights.
+    No match / empty contexts / errored selection: bucketing keeps the rule's
+    server-computed marginal weights and the fallback leafId -1 is reported.
+    Dangling ref: run as a plain experiment with no bandit metadata at all."""
+    # Typed as Any: the map is payload data, so the definition shape is only
+    # a promise — the guards below must survive malformed entries at runtime.
+    cb_definition: Any = evalContext.global_ctx.contextual_bandits.get(contextual_bandit_ref)
+    # An empty-dict definition counts as found (JS `!cbDefinition` semantics):
+    # it takes the fallback-leaf path below, not the dangling-ref return.
+    if not cb_definition and not isinstance(cb_definition, dict):
+        # debug, not warning: this fires on EVERY evaluation of the feature,
+        # and a payload-skew window makes it reachable in normal operation.
+        # The JS SDK logs these only in debug mode for the same reason.
+        logger.debug(
+            "Contextual bandit %s not found in payload, feature %s falls back to aggregate weights",
+            contextual_bandit_ref,
+            feature_id,
+        )
+        return
+    if not isinstance(cb_definition, dict):
+        # Malformed payload entry: treat like a definition with no leaves so
+        # bucketing still degrades to the rule's aggregate weights instead of
+        # crashing the evaluation.
+        cb_definition = {}
+
+    leaf = None
+    contexts = cb_definition.get("contexts") or []
+    if contexts:
+        try:
+            leaf = _get_contextual_bandit_leaf(contexts, evalContext)
+        except Exception:
+            logger.debug(
+                "Contextual bandit leaf selection failed, feature %s falls back to aggregate weights",
+                feature_id,
+                exc_info=True,
+            )
+
+    weights = leaf.get("weights") if leaf is not None else None
+    leaf_id = leaf.get("leafId") if leaf is not None else None
+    if weights is not None and not _is_valid_weight_vector(weights, len(experiment.variations)):
+        weights = None
+    if leaf_id is not None and not _is_valid_bandit_id(leaf_id):
+        leaf_id = None
+    if leaf is not None and (weights is None or leaf_id is None):
+        # A matched leaf missing its id (or carrying a non-integer one), or
+        # whose weight vector fails the shared validity rule, is a malformed
+        # payload; degrade to the aggregate-weights fallback rather than
+        # reporting propensities that differ from the weights actually used.
+        logger.debug(
+            "Contextual bandit leaf is malformed, feature %s falls back to aggregate weights",
+            feature_id,
+        )
+
+    if weights is not None and leaf_id is not None:
+        experiment.weights = weights
+        cb: ContextualBanditAssignment = {"leafId": leaf_id, "variationWeights": weights}
+    else:
+        logger.debug(
+            "Contextual bandit: no matching leaf, feature %s uses aggregate weights", feature_id
+        )
+        cb = {
+            "leafId": CONTEXTUAL_BANDIT_FALLBACK_LEAF_ID,
+            # getBucketRanges applies the same normalization, so the reported
+            # propensities always match the vector bucketing will use.
+            "variationWeights": _normalized_weights(
+                len(experiment.variations), experiment.weights
+            ),
+        }
+
+    bandit_version = cb_definition.get("banditVersion")
+    if _is_valid_bandit_id(bandit_version):
+        cb["banditVersion"] = bandit_version
+    experiment.contextualBandit = cb
 
 
 def eval_feature(
@@ -641,13 +827,21 @@ def eval_feature(
                 _fire_rule_tracks(rule.tracks, evalContext, tracking_cb)
             return FeatureResult(rule.force, "force", ruleId=rule.id)
 
-        if rule.variations is None:
+        # Contextual bandit rules carry their variations under
+        # contextualVariations; a rule with neither is skipped (this is what
+        # lets bandit-unaware SDKs degrade to the default value).
+        rule_variations = (
+            rule.contextualVariations
+            if rule.contextualVariations is not None
+            else rule.variations
+        )
+        if rule_variations is None:
             logger.warning("Skip invalid rule, feature %s", key)
             continue
 
         exp = Experiment(
             key=rule.key or key,
-            variations=rule.variations,
+            variations=rule_variations,
             coverage=rule.coverage,
             weights=rule.weights,
             hashAttribute=rule.hashAttribute,
@@ -666,7 +860,16 @@ def eval_feature(
             minBucketVersion=rule.minBucketVersion,
         )
 
+        if rule.contextualBanditRef:
+            _build_contextual_bandit_experiment(exp, rule.contextualBanditRef, key, evalContext)
+
         result = run_experiment(experiment=exp, featureId=key, evalContext=evalContext, tracking_cb=tracking_cb)
+
+        # Bandit metadata is only meaningful for real hashed exposures; strip
+        # it from the experiment for forced/QA/coverage-miss outcomes so it
+        # doesn't leak into the returned FeatureResult.
+        if exp.contextualBandit is not None and not (result.hashUsed and result.inExperiment):
+            exp.contextualBandit = None
 
         if callback_subscription:
             callback_subscription(exp, result)
@@ -816,6 +1019,27 @@ def run_experiment(experiment: Experiment[Any],
     # 2.5. If the experiment props have been overridden, merge them in
     if evalContext.user.overrides.get(experiment.key, None):
         experiment.update(evalContext.user.overrides[experiment.key])
+    # Explicit bucket ranges take precedence over weights entirely (step 9),
+    # so a contextual bandit experiment carrying ranges has no truthful
+    # propensity vector to report: drop the metadata rather than describe a
+    # distribution bucketing ignored. Bucketing itself is untouched (same
+    # assignment as the JS SDK); the server never emits ranges on contextual
+    # bandit rules, so this only fires on hand-crafted payloads.
+    if experiment.contextualBandit and experiment.ranges:
+        experiment.contextualBandit = None
+    # Keep reported bandit propensities in sync with the weights actually
+    # used for bucketing: an override may have replaced them, and
+    # getBucketRanges normalizes unusable vectors to equal weights.
+    elif experiment.contextualBandit and experiment.weights is not None:
+        synced: ContextualBanditAssignment = {
+            "leafId": experiment.contextualBandit["leafId"],
+            "variationWeights": _normalized_weights(
+                len(experiment.variations), experiment.weights
+            ),
+        }
+        if "banditVersion" in experiment.contextualBandit:
+            synced["banditVersion"] = experiment.contextualBandit["banditVersion"]
+        experiment.contextualBandit = synced
     # 3. If experiment is forced via a querystring in the url
     qs = getQueryStringOverride(
         experiment.key, evalContext.user.url, len(experiment.variations)
@@ -1040,7 +1264,11 @@ def run_experiment(experiment: Experiment[Any],
                         "assignment doc was not persisted"
                     )
 
-    # 14. Fire the tracking callback if set
+    # 14. Fire the tracking callback if set. The clients' _track wrappers
+    # snapshot the user context (tracking_user_context) before invoking the
+    # user's callback, so the logged attributes are exactly the ones used
+    # for bucketing; snapshotting there instead of here keeps evals
+    # allocation-free when no tracking callback is configured.
     if tracking_cb:
         tracking_cb(experiment, result, evalContext.user)
 
@@ -1096,6 +1324,17 @@ def _getExperimentResult(
                                                     fallbackAttr=experiment.fallbackAttribute,
                                                     eval_context=evalContext)
 
+    # Contextual bandit exposure metadata is only reported for real hashed
+    # assignments — never for forced variations, QA skips, or coverage misses.
+    leaf_id: Optional[int] = None
+    variation_weights: Optional[List[float]] = None
+    bandit_version: Optional[int] = None
+    cb = experiment.contextualBandit
+    if cb and hashUsed and inExperiment:
+        leaf_id = cb["leafId"]
+        variation_weights = cb["variationWeights"]
+        bandit_version = cb.get("banditVersion")
+
     return Result(
         featureId=featureId,
         inExperiment=inExperiment,
@@ -1106,5 +1345,8 @@ def _getExperimentResult(
         hashValue=hashValue,
         meta=meta,
         bucket=bucket,
-        stickyBucketUsed=stickyBucketUsed
+        stickyBucketUsed=stickyBucketUsed,
+        leafId=leaf_id,
+        variationWeights=variation_weights,
+        banditVersion=bandit_version
     )
