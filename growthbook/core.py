@@ -560,13 +560,9 @@ def _report_feature_usage(
     evalContext: EvaluationContext,
     feature_usage_cb: FeatureUsageCb,
 ) -> None:
-    try:
-        stringified = json.dumps(result.value, sort_keys=True, default=str)
-    except (TypeError, ValueError):
-        stringified = repr(result.value)
-    if evalContext.reported_features.get(key) == stringified:
+    if key in evalContext.reported_features:
         return
-    evalContext.reported_features[key] = stringified
+    evalContext.reported_features.add(key)
     feature_usage_cb(key, result, evalContext.user)
 
 
@@ -577,8 +573,7 @@ def eval_feature(
     tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None,
     feature_usage_cb: Optional[FeatureUsageCb] = None,
 ) -> FeatureResult[Any]:
-    """Core feature evaluation logic as a standalone function. Feature usage
-    is reported for every feature evaluated, prerequisites included."""
+    """Core feature evaluation logic as a standalone function"""
 
     if evalContext is None:
         raise ValueError("evalContext is required - eval_feature")

@@ -736,8 +736,8 @@ class GrowthBookClient:
 
     def _track(self, experiment: Experiment[Any], result: Result[Any], user_context: UserContext) -> None:
         """Thread-safe tracking implementation"""
+        user_context.defer_tracking_call(experiment, result)
         if not self.options.on_experiment_viewed:
-            user_context.defer_tracking_call(experiment, result)
             return
 
         key = tracking_dedupe_key(experiment, result)

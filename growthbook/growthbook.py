@@ -1450,8 +1450,8 @@ class GrowthBook(object):
         return lambda: self._subscriptions.remove(callback)
 
     def _track(self, experiment: Experiment[Any], result: Result[Any], user_context: UserContext) -> None:
+        user_context.defer_tracking_call(experiment, result)
         if not self._trackingCallback:
-            user_context.defer_tracking_call(experiment, result)
             return None
         key = tracking_dedupe_key(experiment, result)
         if not self._tracked.get(key):
@@ -1461,45 +1461,39 @@ class GrowthBook(object):
             except Exception as e:
                 logger.exception(e)
 
-    def set_tracking_callback(self, callback: Optional[TrackingCallback]) -> None:
-        """Set the tracking callback and fire any exposures buffered while
-        none was configured."""
-        self._trackingCallback = callback
-        self.fire_deferred_tracking_calls()
-
     def get_deferred_tracking_calls(self) -> List[Dict[str, Any]]:
-        """Exposures buffered while no tracking callback was configured, in
-        the JS SDK's TrackingData shape ({experiment, result, user}) — ready
-        to forward to a client SDK's set_deferred_tracking_calls."""
+        """Exposures buffered with defer_tracking, as {experiment, result, user} dicts."""
         return self._user_ctx.get_deferred_tracking_calls()
 
     def set_deferred_tracking_calls(self, calls: List[Dict[str, Any]]) -> None:
         self._user_ctx.set_deferred_tracking_calls(calls)
 
     def fire_deferred_tracking_calls(self) -> None:
-        """Send buffered exposures through the tracking callback. Entries the
-        callback raises on stay buffered; the rest are removed. No-op without
-        a tracking callback."""
+        """Send buffered exposures through the tracking callback, each with the
+        user it was buffered for. Entries the callback raises on stay buffered."""
         callback = self._trackingCallback
         if not callback:
             return
-        failed: List[Dict[str, Any]] = []
-        for call in self._user_ctx.get_deferred_tracking_calls():
+        buffer = self._user_ctx._deferred_tracking_calls
+        for key, call in list(buffer.items()):
             hydrated = tracking_call_from_dict(call)
             if hydrated is None:
+                buffer.pop(key, None)
                 continue
             experiment, result = hydrated
-            # Replay with the user the exposure was buffered for, not whoever
-            # the instance currently represents.
             user = call.get("user") or {}
-            snapshot = UserContext(attributes=dict(user.get("attributes") or {}), url=user.get("url") or "")
+            attributes = user.get("attributes")
+            snapshot = UserContext(
+                attributes=dict(attributes) if isinstance(attributes, dict) else {},
+                url=user.get("url") or "",
+            )
             try:
                 callback(experiment=experiment, result=result, user_context=snapshot)
-                self._tracked[tracking_dedupe_key(experiment, result)] = True
             except Exception as e:
                 logger.exception(e)
-                failed.append(call)
-        self._user_ctx.set_deferred_tracking_calls(failed)
+                continue
+            self._tracked[key] = True
+            buffer.pop(key, None)
 
     def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
         attributes = set()

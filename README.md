@@ -471,13 +471,21 @@ gb = GrowthBook(
 )
 ```
 
-The callback fires for every unique experiment assignment an evaluation makes — including assignments inside prerequisite features and passthrough (holdout / ramp control) variations — and `on_feature_usage` fires for every feature evaluated, prerequisites included, once per evaluation (a prerequisite consulted by several rules is reported once).
+The callback fires once for each experiment a user is assigned to during an evaluation. That includes experiments that decide a prerequisite feature and passthrough variations (the control arm of a holdout or ramp), not just the experiment that produced the final value. Likewise, `on_feature_usage` fires for every feature evaluated along the way, prerequisites included, once per evaluation.
 
 #### Deferred Tracking
 
-When the process evaluating features isn't the right place to send analytics from (for example, a server evaluating on behalf of client SDKs), pass `defer_tracking=True` and leave `on_experiment_viewed` unset: exposures are buffered instead of dropped. Read them with `get_deferred_tracking_calls()` — a list of `{"experiment", "result", "user"}` dicts in the same shape as the JavaScript SDK's deferred tracking calls, ready to forward to a client's `setDeferredTrackingCalls` — or replay them later with `set_tracking_callback(cb)`, which fires anything buffered. `set_deferred_tracking_calls(calls)` and `fire_deferred_tracking_calls()` cover the receiving side. The buffer keeps one entry per unique assignment and grows for as long as the instance lives, so use one instance (or `UserContext`) per request.
+Sometimes the process evaluating features isn't the right place to send analytics from — for example a server that evaluates on behalf of browser or mobile clients, which then report their own exposures. For that, turn on `defer_tracking`: each exposure is buffered as a `{"experiment", "result", "user"}` dict — the same shape the JavaScript SDK uses — so you can hand the list straight to a client's `setDeferredTrackingCalls`. Buffering is independent of `on_experiment_viewed`; if you configure both, exposures are reported through both channels, so pick one.
 
-With the async `GrowthBookClient`, the buffer lives on each `UserContext` you evaluate with: create it with `UserContext(attributes=..., defer_tracking=True)` and read `user_context.get_deferred_tracking_calls()` after evaluating, so one request's exposures never mix with another's.
+```python
+gb = GrowthBook(attributes={"id": user_id}, defer_tracking=True)
+gb.eval_feature("my-feature")
+exposures = gb.get_deferred_tracking_calls()  # forward these to the client
+```
+
+The buffer keeps one entry per unique assignment and lives as long as the instance does, so use one instance per request. With the async `GrowthBookClient`, the buffer lives on each `UserContext` instead: create it with `UserContext(attributes=..., defer_tracking=True)` and read `user_context.get_deferred_tracking_calls()` after evaluating, so one request's exposures never mix with another's.
+
+On the receiving side, a `GrowthBook` with `on_experiment_viewed` set can load forwarded exposures with `set_deferred_tracking_calls(calls)` and send them through its callback with `fire_deferred_tracking_calls()`; each exposure is delivered with the user it was recorded for.
 
 #### Built-in Tracking Plugin
 
