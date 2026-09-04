@@ -6,16 +6,12 @@
 // stdout: {label: [{experiment, variationId, hashAttribute, hashValue,
 //                   userAttributes}, ...]}
 //
-// SDK resolution (needs @growthbook/growthbook >= 1.7.0 for the user arg on
-// tracking callbacks): $GB_JS_SDK, an installed @growthbook/growthbook, or
-// the growthbook monorepo checkout next to this repo.
-const path = require("path");
+// SDK resolution: $GB_JS_SDK or an installed @growthbook/growthbook package,
+// >= 1.7.0 (older SDKs fire deferred calls without the user argument).
+// Deliberately NO fallback to a repo checkout's dist/ — a stale local build
+// artifact must fail loudly, not silently verify the wrong SDK.
 function loadSdk() {
-  const candidates = [
-    process.env.GB_JS_SDK,
-    "@growthbook/growthbook",
-    path.resolve(__dirname, "../../../growthbook/packages/sdk-js/dist/cjs/index.js"),
-  ].filter(Boolean);
+  const candidates = [process.env.GB_JS_SDK, "@growthbook/growthbook"].filter(Boolean);
   for (const candidate of candidates) {
     try {
       return { sdk: require(candidate), source: candidate };
@@ -23,7 +19,10 @@ function loadSdk() {
       /* try the next candidate */
     }
   }
-  throw new Error("No GrowthBook JS SDK found; set GB_JS_SDK");
+  throw new Error(
+    "No GrowthBook JS SDK found. `npm install @growthbook/growthbook` (>=1.7.0) " +
+      "or point GB_JS_SDK at one."
+  );
 }
 const { sdk, source } = loadSdk();
 const { GrowthBook } = sdk;
