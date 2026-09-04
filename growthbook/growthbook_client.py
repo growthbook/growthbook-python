@@ -1223,15 +1223,25 @@ class GrowthBookClient:
         if global_context is None:
             raise RuntimeError("GrowthBook client not properly initialized")
 
-        # Freeze the caller's attributes BEFORE the first await: sticky bucket
-        # and remote-eval I/O yield the event loop, so another task or thread
-        # mutating the UserContext mid-evaluation must not change the remote
-        # payload, leaf routing, or what tracking reports. The caller's own
-        # context object is kept aside for read-your-writes on sticky docs.
+        # Freeze the evaluation inputs BEFORE the first await, but only when
+        # this call can actually yield the event loop (remote-eval fetch or
+        # sticky-bucket I/O): only then can another task mutate the
+        # UserContext mid-evaluation and change the remote payload, leaf
+        # routing, or forced assignments. Plain CDN evaluations never yield,
+        # so they skip the copy entirely and stay allocation-free — deferred
+        # callbacks are protected separately by tracking_user_context at fire
+        # time. The caller's own context object is kept aside so sticky-doc
+        # read-your-writes still lands on it.
         caller_context = user_context
-        user_context = replace(
-            user_context, attributes=snapshot_attributes(user_context.attributes)
-        )
+        if self.options.remote_eval or self.options.sticky_bucket_service is not None:
+            user_context = replace(
+                user_context,
+                attributes=snapshot_attributes(user_context.attributes),
+                groups=snapshot_attributes(user_context.groups),
+                forced_variations=snapshot_attributes(user_context.forced_variations),
+                forced_features=snapshot_attributes(user_context.forced_features),
+                overrides=snapshot_attributes(user_context.overrides),
+            )
 
         if self.options.remote_eval and self._features_repository:
             # Per-user POST + cache: features come from the proxy filtered for
@@ -1289,9 +1299,10 @@ class GrowthBookClient:
             try:
                 self._run_user_callback(
                     self.options.on_feature_usage,
-                    # context.user carries the attributes snapshot frozen at
-                    # the eval boundary — the exact values used for routing.
-                    (key, result, context.user),
+                    # Fire-time snapshot: context.user may be the caller's own
+                    # context (plain CDN evals skip the boundary copy), and
+                    # this callback can run deferred on the event loop.
+                    (key, result, tracking_user_context(context.user)),
                     "feature usage",
                 )
             except Exception:

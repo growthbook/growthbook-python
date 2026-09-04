@@ -16,6 +16,7 @@ from unittest.mock import patch, AsyncMock
 from growthbook import (
     GrowthBook,
     GrowthBookClient,
+    InMemoryStickyBucketService,
     feature_repo,
 )
 from growthbook.growthbook_client import EnhancedFeatureRepository, FeatureCache
@@ -793,6 +794,9 @@ async def test_async_eval_freezes_attributes_before_awaits():
                 api_host="https://localhost.growthbook.io",
                 client_key="test-key",
                 on_experiment_viewed=on_view,
+                # Arms the boundary freeze: only evals that can yield
+                # (sticky/remote I/O) snapshot their inputs up front.
+                sticky_bucket_service=InMemoryStickyBucketService(),
             )
         ) as client:
             caller_attrs = {"id": "1", "country": "US", "profile": {"tier": "pro"}}
@@ -887,3 +891,77 @@ def test_bandit_metadata_reports_weights_bucketing_uses():
         assert res.experimentResult.leafId == -1, bad_weights
         assert res.experimentResult.variationWeights == [0.5, 0.5]
         gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_plain_cdn_eval_skips_the_boundary_copy():
+    """Without remote eval or a sticky bucket service, create_evaluation_context
+    has no await that can yield, so it must not pay for an input snapshot —
+    plain evaluations stay allocation-free (the eval context carries the
+    caller's own UserContext object)."""
+    EnhancedFeatureRepository._instances = {}
+    with patch(
+        "growthbook.FeatureRepository.load_features_async",
+        new_callable=AsyncMock,
+        return_value={"features": CB_FEATURES, "savedGroups": {}, "contextualBandits": CB_MAP},
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh",
+        new_callable=AsyncMock,
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh",
+        new_callable=AsyncMock,
+    ):
+        async with GrowthBookClient(
+            Options(api_host="https://localhost.growthbook.io", client_key="test-key")
+        ) as client:
+            user_context = UserContext(attributes={"id": "1"})
+            context = await client.create_evaluation_context(user_context)
+            assert context.user is user_context
+            result = await client.eval_feature("bandit-feature", user_context)
+            assert result.value == "control"
+
+
+@pytest.mark.asyncio
+async def test_async_eval_freezes_forced_inputs_before_awaits():
+    """The boundary snapshot covers every mutable evaluation input, not just
+    attributes: forced variations and overrides mutated while sticky I/O is
+    pending must not turn a hashed assignment into a forced one."""
+    EnhancedFeatureRepository._instances = {}
+    with patch(
+        "growthbook.FeatureRepository.load_features_async",
+        new_callable=AsyncMock,
+        return_value={"features": CB_FEATURES, "savedGroups": {}, "contextualBandits": CB_MAP},
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh",
+        new_callable=AsyncMock,
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh",
+        new_callable=AsyncMock,
+    ):
+        async with GrowthBookClient(
+            Options(
+                api_host="https://localhost.growthbook.io",
+                client_key="test-key",
+                sticky_bucket_service=InMemoryStickyBucketService(),
+            )
+        ) as client:
+            forced = {}
+            overrides = {}
+            user_context = UserContext(
+                attributes={"id": "1"}, forced_variations=forced, overrides=overrides
+            )
+
+            async def mutating_refresh(attributes):
+                forced["bandit-exp"] = 1
+                overrides["bandit-exp"] = {"force": 1}
+                return {}
+
+            client._refresh_sticky_buckets = mutating_refresh
+
+            result = await client.eval_feature("bandit-feature", user_context)
+            # The catch-all leaf sends everyone to variation 0; the mid-await
+            # forced inputs must not flip this eval to variation 1.
+            assert result.value == "control"
+            assert result.experimentResult.variationId == 0
+            assert result.experimentResult.hashUsed
+
