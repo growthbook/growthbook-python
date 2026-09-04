@@ -392,6 +392,14 @@ def test_handles_weird_experiment_values():
     gb.destroy()
 
 
+def test_experiment_to_dict_preserves_explicit_zero_coverage():
+    # `or 1` would coerce a real coverage of 0 to 1; None still reads as
+    # full coverage. Serialized dicts are forwarded (deferred tracking),
+    # so the distinction is externally visible.
+    assert Experiment(key="e", variations=[0, 1], coverage=0).to_dict()["coverage"] == 0
+    assert Experiment(key="e", variations=[0, 1]).to_dict()["coverage"] == 1
+
+
 def test_custom_fields_parsed_from_api_dict():
     # The API delivers experiment Custom Fields as a flat dict.
     exp = Experiment(

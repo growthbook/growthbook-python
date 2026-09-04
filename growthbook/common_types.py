@@ -159,7 +159,9 @@ class Experiment(Generic[T]):
             "variations": self.variations,
             "weights": self.weights,
             "active": self.active,
-            "coverage": self.coverage or 1,
+            # None means "no coverage set" and reads as full coverage, but an
+            # explicit 0 must survive serialization (`or` would coerce it to 1).
+            "coverage": self.coverage if self.coverage is not None else 1,
             "condition": self.condition,
             "namespace": self.namespace,
             "force": self.force,
