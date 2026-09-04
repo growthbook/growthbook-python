@@ -546,3 +546,51 @@ def test_failed_bandit_decryption_preserves_previous_map():
     gb.set_payload({"features": CB_FEATURES, "encryptedContextualBandits": "bad.cipher"})
     assert gb.eval_feature("bandit-feature").experimentResult.leafId == 1
     gb.destroy()
+
+
+def test_bandit_metadata_reports_weights_bucketing_uses():
+    """Invalid vectors on the fallback and override paths are normalized the
+    same way getBucketRanges normalizes them, so Result.variationWeights can
+    never differ from the weights actually used. Negative, non-finite, and
+    boolean leaf weights are rejected outright."""
+    # Fallback path: rule weights [0.9, 0.9] are invalid (sum 1.8), so
+    # bucketing uses equal weights — the metadata must say so too.
+    bad_marginals = {
+        "bandit-feature": {
+            "defaultValue": "default",
+            "rules": [
+                {
+                    "key": "bandit-exp",
+                    "seed": "bandit-exp",
+                    "hashAttribute": "id",
+                    "hashVersion": 2,
+                    "coverage": 1,
+                    "contextualVariations": ["control", "treatment"],
+                    "weights": [0.9, 0.9],
+                    "contextualBanditRef": "cb-bandit",
+                }
+            ],
+        }
+    }
+    gb = GrowthBook(
+        attributes={"id": "1"},
+        features=bad_marginals,
+        contextualBandits={"cb-bandit": {"contexts": []}},
+    )
+    res = gb.eval_feature("bandit-feature")
+    assert res.experimentResult.leafId == -1
+    assert res.experimentResult.variationWeights == [0.5, 0.5]
+    gb.destroy()
+
+    # Matched-leaf path: negative / non-finite / boolean entries are malformed.
+    for bad_weights in ([1.5, -0.5], [float("inf"), 1.0], [True, False]):
+        bad_map = {
+            "cb-bandit": {
+                "contexts": [{"leafId": 1, "condition": {}, "weights": bad_weights}]
+            }
+        }
+        gb = GrowthBook(attributes={"id": "1"}, features=CB_FEATURES, contextualBandits=bad_map)
+        res = gb.eval_feature("bandit-feature")
+        assert res.experimentResult.leafId == -1, bad_weights
+        assert res.experimentResult.variationWeights == [0.5, 0.5]
+        gb.destroy()
