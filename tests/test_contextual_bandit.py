@@ -442,6 +442,9 @@ def test_malformed_bandit_payload_degrades_gracefully():
     def leaf_weights(weights):
         return {"cb-bandit": {"contexts": [{"leafId": 1, "condition": {}, "weights": weights}]}}
 
+    def bad_leaf_id(leaf_id):
+        return {"cb-bandit": {"contexts": [{"leafId": leaf_id, "condition": {}, "weights": [1, 0]}]}}
+
     for bad_map in (
         missing_weights,
         missing_leaf_id,
@@ -456,6 +459,11 @@ def test_malformed_bandit_payload_degrades_gracefully():
         leaf_weights([1, "x"]),      # non-numeric entry
         leaf_weights([0.9, 0.9]),    # sum outside bucketing tolerance
         leaf_weights([10**1000, 0]),  # overflows float conversion — must not crash
+        # Non-integer leaf ids are corrupt attribution identifiers: the leaf
+        # is treated as malformed rather than reported to bandit training.
+        bad_leaf_id("1"),
+        bad_leaf_id(1.5),
+        bad_leaf_id(True),
     ):
         gb = GrowthBook(attributes={"id": "1"}, features=CB_FEATURES, contextualBandits=bad_map)
         res = gb.eval_feature("bandit-feature")
@@ -473,6 +481,25 @@ def test_malformed_bandit_payload_degrades_gracefully():
     assert res.experimentResult is not None
     assert res.experimentResult.leafId is None
     gb.destroy()
+
+
+def test_invalid_bandit_version_is_dropped_from_exposure():
+    """A non-integer banditVersion is a corrupt model identifier: it is
+    treated as absent (key omitted from the exposure metadata) while a valid
+    matched leaf keeps working normally."""
+    for bad_version in ("seven", 7.5, True):
+        bad_map = {
+            "cb-bandit": {
+                "banditVersion": bad_version,
+                "contexts": [{"leafId": 1, "condition": {}, "weights": [1, 0]}],
+            }
+        }
+        gb = GrowthBook(attributes={"id": "1"}, features=CB_FEATURES, contextualBandits=bad_map)
+        er = gb.eval_feature("bandit-feature").experimentResult
+        assert er.leafId == 1
+        assert er.variationWeights == [1, 0]
+        assert er.banditVersion is None, bad_version
+        gb.destroy()
 
 
 def test_sync_set_payload_accepts_encrypted_sections():

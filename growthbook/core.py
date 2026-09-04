@@ -7,6 +7,7 @@ from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
 from typing import Callable, Optional, Any, Set, Tuple, List, Dict, cast
+from typing_extensions import TypeGuard
 from .common_types import (
     ContextualBanditAssignment,
     ContextualBanditContext,
@@ -646,6 +647,14 @@ def _get_contextual_bandit_leaf(
     return None
 
 
+def _is_valid_bandit_id(value: Any) -> TypeGuard[int]:
+    """The validity rule for the payload's bandit identifiers (leafId,
+    banditVersion): server-assigned integers, booleans excluded. Invalid
+    identifiers are treated as absent, so exposure callbacks never feed
+    corrupt leaf/model ids into bandit attribution and training."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _build_contextual_bandit_experiment(
     experiment: Experiment[Any],
     contextual_bandit_ref: str,
@@ -696,9 +705,11 @@ def _build_contextual_bandit_experiment(
     leaf_id = leaf.get("leafId") if leaf is not None else None
     if weights is not None and not _is_valid_weight_vector(weights, len(experiment.variations)):
         weights = None
+    if leaf_id is not None and not _is_valid_bandit_id(leaf_id):
+        leaf_id = None
     if leaf is not None and (weights is None or leaf_id is None):
-        # A matched leaf missing its id, or whose weight vector fails the
-        # shared validity rule (see _is_valid_weight_vector), is a malformed
+        # A matched leaf missing its id (or carrying a non-integer one), or
+        # whose weight vector fails the shared validity rule, is a malformed
         # payload; degrade to the aggregate-weights fallback rather than
         # reporting propensities that differ from the weights actually used.
         logger.debug(
@@ -723,7 +734,7 @@ def _build_contextual_bandit_experiment(
         }
 
     bandit_version = cb_definition.get("banditVersion")
-    if bandit_version is not None:
+    if _is_valid_bandit_id(bandit_version):
         cb["banditVersion"] = bandit_version
     experiment.contextualBandit = cb
 
