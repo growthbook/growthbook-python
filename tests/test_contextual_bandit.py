@@ -670,6 +670,63 @@ async def test_async_remote_eval_tracks_preserve_bandit_fields():
     assert tracked[0].banditVersion == 7
 
 
+def test_concurrent_payload_writers_publish_coherent_generations():
+    """Two writers (e.g. set_payload and a background refresh) must not
+    interleave section writes: every published snapshot pairs features and
+    contextualBandits from the same payload generation. Deterministic: writer
+    A is held mid-ingest while writer B runs; without writer serialization, A
+    would then publish its features with B's bandit map."""
+    import threading
+
+    gen_a = {
+        "features": {"gen": {"defaultValue": "A"}},
+        "contextualBandits": {"gen": {"banditVersion": 1, "contexts": []}},
+    }
+    gen_b = {
+        "features": {"gen": {"defaultValue": "B"}},
+        "contextualBandits": {"gen": {"banditVersion": 2, "contexts": []}},
+    }
+
+    gb = GrowthBook(attributes={"id": "1"})
+    published = []
+    orig_publish = gb._publish_global_context
+
+    def recording_publish():
+        orig_publish()
+        ctx = gb._global_ctx
+        feature = ctx.features.get("gen")
+        bandit = ctx.contextual_bandits.get("gen") or {}
+        published.append((feature.defaultValue if feature else None, bandit.get("banditVersion")))
+
+    gb._publish_global_context = recording_publish
+
+    gate = threading.Event()
+    held = threading.Event()
+    orig_set_features = gb.set_features
+
+    def slow_set_features(features):
+        if not held.is_set():
+            held.set()
+            gate.wait(timeout=5)
+        orig_set_features(features)
+
+    gb.set_features = slow_set_features
+
+    writer_a = threading.Thread(target=gb.set_payload, args=(gen_a,))
+    writer_b = threading.Thread(target=gb.set_payload, args=(gen_b,))
+    writer_a.start()
+    assert held.wait(timeout=5)
+    writer_b.start()
+    gate.set()
+    writer_a.join(timeout=5)
+    writer_b.join(timeout=5)
+
+    assert published, "writers must have published"
+    for pair in published:
+        assert pair in (("A", 1), ("B", 2)), f"mixed payload generation published: {pair}"
+    gb.destroy()
+
+
 def test_bandit_metadata_reports_weights_bucketing_uses():
     """Invalid vectors on the fallback and override paths are normalized the
     same way getBucketRanges normalizes them, so Result.variationWeights can

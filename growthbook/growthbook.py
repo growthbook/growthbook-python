@@ -997,6 +997,10 @@ class GrowthBook(object):
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Callable[[Experiment[Any], Result[Any]], None]] = set()
         self._is_updating_features = False
+        # Serializes payload writers (set_features/set_payload/refreshes).
+        # Re-entrant because _ingest_payload calls set_features while holding
+        # it. Evals stay lock-free — they read the published snapshot.
+        self._payload_lock = threading.RLock()
         self._event_logger: Optional[EventLogger] = None
 
         # support plugins
@@ -1079,15 +1083,20 @@ class GrowthBook(object):
         Sections absent from the payload are preserved (JS setPayload
         semantics), and the evaluation context is republished even for
         map-only payloads so a savedGroups/contextualBandits update takes
-        effect without waiting for the next features update."""
-        if "savedGroups" in data:
-            self._saved_groups = data["savedGroups"]
-        if "contextualBandits" in data:
-            self._contextual_bandits = data["contextualBandits"]
-        if "features" in data:
-            self.set_features(data["features"])
-        elif "savedGroups" in data or "contextualBandits" in data:
-            self._publish_global_context()
+        effect without waiting for the next features update.
+
+        Writers are serialized: without the lock, two concurrent updates
+        (e.g. set_payload and a background refresh) could interleave their
+        section writes and publish a snapshot mixing payload generations."""
+        with self._payload_lock:
+            if "savedGroups" in data:
+                self._saved_groups = data["savedGroups"]
+            if "contextualBandits" in data:
+                self._contextual_bandits = data["contextualBandits"]
+            if "features" in data:
+                self.set_features(data["features"])
+            elif "savedGroups" in data or "contextualBandits" in data:
+                self._publish_global_context()
 
     def _publish_global_context(self) -> None:
         # Swap in a complete snapshot with a single reference rebind
@@ -1222,17 +1231,18 @@ class GrowthBook(object):
         # Prevent infinite recursion during feature updates
         self._is_updating_features = True
         try:
-            self._features = {}
-            for key, feature in features.items():
-                if isinstance(feature, Feature):
-                    self._features[key] = feature
-                else:
-                    self._features[key] = Feature(
-                        rules=feature.get("rules", []),
-                        defaultValue=feature.get("defaultValue", None),
-                    )
-            self._publish_global_context()
-            self.refresh_sticky_buckets()
+            with self._payload_lock:
+                self._features = {}
+                for key, feature in features.items():
+                    if isinstance(feature, Feature):
+                        self._features[key] = feature
+                    else:
+                        self._features[key] = Feature(
+                            rules=feature.get("rules", []),
+                            defaultValue=feature.get("defaultValue", None),
+                        )
+                self._publish_global_context()
+                self.refresh_sticky_buckets()
         finally:
             self._is_updating_features = False
 
