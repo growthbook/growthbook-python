@@ -13831,5 +13831,268 @@
         }
       ]
     ]
+  ],
+
+  "trackingCalls": [
+    [
+      "experiment rule assignment fires the tracking callback",
+      {
+        "attributes": {
+          "id": "user-1"
+        },
+        "features": {
+          "parent": {
+            "defaultValue": "off",
+            "rules": [
+              {
+                "key": "parent-exp",
+                "coverage": 1,
+                "variations": [
+                  "on",
+                  "off"
+                ],
+                "weights": [
+                  1,
+                  0
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "parent",
+      [
+        [
+          "parent-exp",
+          0
+        ]
+      ],
+      [
+        "parent"
+      ]
+    ],
+    [
+      "prerequisite experiment assignment is tracked",
+      {
+        "attributes": {
+          "id": "user-1"
+        },
+        "features": {
+          "parent": {
+            "defaultValue": "off",
+            "rules": [
+              {
+                "key": "parent-exp",
+                "coverage": 1,
+                "variations": [
+                  "on",
+                  "off"
+                ],
+                "weights": [
+                  1,
+                  0
+                ]
+              }
+            ]
+          },
+          "child": {
+            "defaultValue": "child-default",
+            "rules": [
+              {
+                "parentConditions": [
+                  {
+                    "id": "parent",
+                    "condition": {
+                      "value": "on"
+                    }
+                  }
+                ],
+                "force": "child-on"
+              }
+            ]
+          }
+        }
+      },
+      "child",
+      [
+        [
+          "parent-exp",
+          0
+        ]
+      ],
+      [
+        "parent",
+        "child"
+      ]
+    ],
+    [
+      "prerequisite tracked even when the gate fails",
+      {
+        "attributes": {
+          "id": "user-1"
+        },
+        "features": {
+          "parent": {
+            "defaultValue": "off",
+            "rules": [
+              {
+                "key": "parent-exp",
+                "coverage": 1,
+                "variations": [
+                  "on",
+                  "off"
+                ],
+                "weights": [
+                  1,
+                  0
+                ]
+              }
+            ]
+          },
+          "child-gated": {
+            "defaultValue": "child-default",
+            "rules": [
+              {
+                "parentConditions": [
+                  {
+                    "id": "parent",
+                    "condition": {
+                      "value": "nope"
+                    },
+                    "gate": true
+                  }
+                ],
+                "force": "never"
+              }
+            ]
+          }
+        }
+      },
+      "child-gated",
+      [
+        [
+          "parent-exp",
+          0
+        ]
+      ],
+      [
+        "parent",
+        "child-gated"
+      ]
+    ],
+    [
+      "prerequisite consulted by several rules is tracked once",
+      {
+        "attributes": {
+          "id": "user-1"
+        },
+        "features": {
+          "parent": {
+            "defaultValue": "off",
+            "rules": [
+              {
+                "key": "parent-exp",
+                "coverage": 1,
+                "variations": [
+                  "on",
+                  "off"
+                ],
+                "weights": [
+                  1,
+                  0
+                ]
+              }
+            ]
+          },
+          "child-twice": {
+            "defaultValue": "child-default",
+            "rules": [
+              {
+                "parentConditions": [
+                  {
+                    "id": "parent",
+                    "condition": {
+                      "value": "nope"
+                    }
+                  }
+                ],
+                "force": "r1"
+              },
+              {
+                "parentConditions": [
+                  {
+                    "id": "parent",
+                    "condition": {
+                      "value": "on"
+                    }
+                  }
+                ],
+                "force": "r2"
+              }
+            ]
+          }
+        }
+      },
+      "child-twice",
+      [
+        [
+          "parent-exp",
+          0
+        ]
+      ],
+      [
+        "parent",
+        "child-twice"
+      ]
+    ],
+    [
+      "passthrough assignment is tracked before falling through",
+      {
+        "attributes": {
+          "id": "user-1"
+        },
+        "features": {
+          "ramped": {
+            "defaultValue": "default",
+            "rules": [
+              {
+                "key": "ramp",
+                "coverage": 1,
+                "variations": [
+                  "treatment",
+                  "default"
+                ],
+                "weights": [
+                  0,
+                  1
+                ],
+                "meta": [
+                  {
+                    "key": "0"
+                  },
+                  {
+                    "key": "1",
+                    "passthrough": true
+                  }
+                ]
+              },
+              {
+                "force": "fallthrough"
+              }
+            ]
+          }
+        }
+      },
+      "ramped",
+      [
+        [
+          "ramp",
+          1
+        ]
+      ],
+      [
+        "ramped"
+      ]
+    ]
   ]
 }

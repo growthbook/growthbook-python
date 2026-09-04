@@ -1,8 +1,9 @@
-"""Exposure reporting for prerequisite and passthrough evaluations, and the
-deferred tracking buffer used to forward exposures to a client SDK.
+"""Tracking behaviors the cases.json `trackingCalls` extension can't express:
+run()-level prerequisites, subscriptions, and the deferred tracking buffer's
+client API (opt-in, snapshot isolation, per-request async ownership).
 
-No cases.json coverage exists for tracking behavior in any SDK (the shared
-spec asserts values/sources only), so these live as a standalone module.
+Pure evaluate-and-expect tracking/usage semantics live in cases.json
+("trackingCalls", a Python-local extension run by both clients' suites).
 """
 import asyncio
 import json
@@ -11,7 +12,7 @@ import threading
 import pytest
 
 from growthbook import GrowthBook, TrackingBuffer
-from growthbook.common_types import Experiment, Options, Result, UserContext
+from growthbook.common_types import Experiment, Options, UserContext
 from growthbook.growthbook_client import GrowthBookClient
 
 # Weights of [1, 0] / [0, 1] make every assignment deterministic.
@@ -80,26 +81,6 @@ def make_gb(**kwargs):
     return gb, tracked, usage
 
 
-def test_prerequisite_experiment_assignment_is_tracked():
-    gb, tracked, usage = make_gb()
-    res = gb.eval_feature("child")
-    assert res.value == "child-on"
-    assert tracked == [("parent-exp", 0)]
-    assert usage == ["parent", "child"]
-    gb.destroy()
-
-
-def test_prerequisite_tracked_even_when_gate_fails():
-    # The prerequisite experiment is evaluated (and its exposure fired)
-    # before the gate decision — matches the JS SDK.
-    gb, tracked, usage = make_gb()
-    res = gb.eval_feature("child-gated")
-    assert res.value is None and res.source == "prerequisite"
-    assert tracked == [("parent-exp", 0)]
-    assert usage == ["parent", "child-gated"]
-    gb.destroy()
-
-
 def test_experiment_level_prerequisite_is_tracked():
     gb, tracked, usage = make_gb()
     exp = Experiment(
@@ -115,23 +96,6 @@ def test_experiment_level_prerequisite_is_tracked():
     assert tracked == [("parent-exp", 0), ("direct", 0)]
     assert usage == ["parent"]
     assert seen == ["parent-exp", "direct"]
-    gb.destroy()
-
-
-def test_prerequisite_consulted_by_several_rules_is_reported_once():
-    gb, tracked, usage = make_gb()
-    res = gb.eval_feature("child-twice")
-    assert res.value == "r2"
-    assert tracked == [("parent-exp", 0)]
-    assert usage == ["parent", "child-twice"]
-    gb.destroy()
-
-
-def test_passthrough_assignment_is_tracked():
-    gb, tracked, _ = make_gb()
-    res = gb.eval_feature("ramped")
-    assert res.value == "fallthrough"
-    assert tracked == [("ramp", 1)]
     gb.destroy()
 
 
@@ -175,25 +139,6 @@ def test_subscriptions_see_prerequisite_experiments():
     gb.destroy()
 
 
-@pytest.mark.asyncio
-async def test_async_client_tracks_prerequisites_through_callback():
-    tracked, usage = [], []
-    client = GrowthBookClient(Options(
-        api_host="https://localhost.growthbook.io",
-        client_key="test",
-        on_experiment_viewed=lambda experiment, result, user_context: tracked.append(experiment.key),
-        on_feature_usage=lambda key, result, user_context: usage.append(key),
-    ))
-    await client.set_features(FEATURES)
-    try:
-        res = await client.eval_feature("child", UserContext(attributes={"id": "user-1"}))
-        assert res.value == "child-on"
-        assert tracked == ["parent-exp"]
-        assert usage == ["parent", "child"]
-    finally:
-        await client.close()
-
-
 def test_deferred_tracking_is_opt_in():
     gb = GrowthBook(attributes={"id": "user-1"}, features=FEATURES)
     gb.eval_feature("child")
@@ -212,6 +157,9 @@ def test_deferred_tracking_buffers_without_a_callback():
     assert calls[0]["result"]["variationId"] == 0
     assert calls[0]["user"] == {"attributes": {"id": "user-1"}, "url": ""}
     json.dumps(calls)  # forwardable as-is
+
+    gb.clear_deferred_tracking_calls()
+    assert gb.get_deferred_tracking_calls() == []
     gb.destroy()
 
 
@@ -255,7 +203,8 @@ def test_passthrough_and_gated_prerequisite_exposures_land_in_buffer():
 
 
 def test_rule_tracks_exposures_land_in_buffer():
-    # Pre-evaluated exposures attached by the remote-eval proxy buffer too.
+    # Pre-evaluated exposures attached by the remote-eval proxy buffer too,
+    # and contextual bandit metadata survives the hydrate -> record round trip.
     features = {
         "remote": {
             "defaultValue": None,
@@ -266,6 +215,7 @@ def test_rule_tracks_exposures_land_in_buffer():
                     "result": {
                         "variationId": 1, "inExperiment": True, "value": "b",
                         "hashUsed": True, "hashAttribute": "id", "hashValue": "user-1",
+                        "leafId": 3, "variationWeights": [0.2, 0.8], "banditVersion": 7,
                     },
                 }],
             }],
@@ -273,32 +223,12 @@ def test_rule_tracks_exposures_land_in_buffer():
     }
     gb = GrowthBook(attributes={"id": "user-1"}, features=features, defer_tracking=True)
     assert gb.eval_feature("remote").value == "server-value"
-    calls = gb.get_deferred_tracking_calls()
-    assert [c["experiment"]["key"] for c in calls] == ["proxy-exp"]
-    gb.destroy()
-
-
-def test_clear_deferred_tracking_calls():
-    gb = GrowthBook(attributes={"id": "user-1"}, features=FEATURES, defer_tracking=True)
-    gb.eval_feature("child")
-    assert gb.get_deferred_tracking_calls()
-    gb.clear_deferred_tracking_calls()
-    assert gb.get_deferred_tracking_calls() == []
-    gb.destroy()
-
-
-def test_tracking_buffer_keeps_bandit_result_fields():
-    buffer = TrackingBuffer()
-    result = Result(
-        variationId=1, inExperiment=True, value="b", hashUsed=True,
-        hashAttribute="id", hashValue="u", featureId="f",
-        leafId=3, variationWeights=[0.2, 0.8], banditVersion=7,
-    )
-    buffer.record(Experiment(key="e", variations=["a", "b"]), result, UserContext(attributes={"id": "u"}))
-    (call,) = buffer.get_calls()
+    (call,) = gb.get_deferred_tracking_calls()
+    assert call["experiment"]["key"] == "proxy-exp"
     assert call["result"]["leafId"] == 3
     assert call["result"]["variationWeights"] == [0.2, 0.8]
     assert call["result"]["banditVersion"] == 7
+    gb.destroy()
 
 
 @pytest.mark.asyncio

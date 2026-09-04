@@ -181,6 +181,27 @@ def test_contextual_bandit(contextualBandit_data):
     gb.destroy()
 
 
+def test_tracking_calls(trackingCalls_data):
+    # trackingCalls is a Python-local cases.json extension pending upstream
+    # adoption — no SDK's shared spec asserts tracking/usage callbacks today.
+    # The corpus freshness checker lists it in KEYS_TO_DIFF: its cases show
+    # up as never-failing extras now, and get drift-checked automatically
+    # once the JS corpus adopts the section.
+    _, ctx, key, expected_tracking, expected_usage = trackingCalls_data
+    tracked, usage = [], []
+    gb = GrowthBook(
+        on_experiment_viewed=lambda experiment, result, user_context: tracked.append(
+            [experiment.key, result.variationId]
+        ),
+        on_feature_usage=lambda k, result, user_context: usage.append(k),
+        **ctx,
+    )
+    gb.eval_feature(key)
+    assert tracked == expected_tracking
+    assert usage == expected_usage
+    gb.destroy()
+
+
 def test_run(run_data):
     _, ctx, exp, value, inExperiment, hashUsed = run_data
     gb = GrowthBook(**ctx)
