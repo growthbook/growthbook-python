@@ -437,7 +437,24 @@ def test_malformed_bandit_payload_degrades_gracefully():
     missing_leaf_id = {
         "cb-bandit": {"contexts": [{"condition": {}, "weights": [1, 0]}]}
     }
-    for bad_map in (missing_weights, missing_leaf_id, {"cb-bandit": [1, 2]}, {"cb-bandit": {}}):
+
+    def leaf_weights(weights):
+        return {"cb-bandit": {"contexts": [{"leafId": 1, "condition": {}, "weights": weights}]}}
+
+    for bad_map in (
+        missing_weights,
+        missing_leaf_id,
+        {"cb-bandit": [1, 2]},
+        {"cb-bandit": {}},
+        # Weight vectors that bucketing would reject (or crash on) are
+        # treated as malformed leaves, so reported propensities always match
+        # the weights actually used.
+        leaf_weights("ab"),          # not a list
+        leaf_weights(5),             # not sized
+        leaf_weights([1, 0, 0]),     # wrong length for 2 variations
+        leaf_weights([1, "x"]),      # non-numeric entry
+        leaf_weights([0.9, 0.9]),    # sum outside bucketing tolerance
+    ):
         gb = GrowthBook(attributes={"id": "1"}, features=CB_FEATURES, contextualBandits=bad_map)
         res = gb.eval_feature("bandit-feature")
         assert res.experimentResult.leafId == -1

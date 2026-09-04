@@ -510,6 +510,13 @@ def getEqualWeights(numVariations: int) -> List[float]:
     return [1 / numVariations for _ in range(numVariations)]
 
 
+# Weight vectors whose sum falls outside this tolerance are replaced with
+# equal weights at bucketing time (shared with the contextual bandit leaf
+# validation, which must reject exactly what bucketing would reject).
+WEIGHT_SUM_MIN = 0.99
+WEIGHT_SUM_MAX = 1.01
+
+
 def getBucketRanges(
     numVariations: int, coverage: float = 1, weights: Optional[List[float]] = None
 ) -> List[Tuple[float, float]]:
@@ -521,7 +528,7 @@ def getBucketRanges(
         weights = getEqualWeights(numVariations)
     if len(weights) != numVariations:
         weights = getEqualWeights(numVariations)
-    if sum(weights) < 0.99 or sum(weights) > 1.01:
+    if sum(weights) < WEIGHT_SUM_MIN or sum(weights) > WEIGHT_SUM_MAX:
         weights = getEqualWeights(numVariations)
 
     cumulative: float = 0
@@ -597,6 +604,20 @@ def _get_contextual_bandit_leaf(
     return None
 
 
+def _usable_bandit_weights(weights: Any, num_variations: int) -> bool:
+    """True only for a leaf weight vector that getBucketRanges will honor
+    as-is: a list of numbers, one per variation, summing to ~1. Anything else
+    would be silently replaced with equal weights at bucketing time (or crash
+    len()/sum() on non-list payloads), so reporting it as the assignment
+    propensities would be wrong — the caller degrades to the
+    aggregate-weights fallback instead."""
+    if not isinstance(weights, list) or len(weights) != num_variations:
+        return False
+    if not all(isinstance(w, (int, float)) for w in weights):
+        return False
+    return WEIGHT_SUM_MIN <= sum(weights) <= WEIGHT_SUM_MAX
+
+
 def _build_contextual_bandit_experiment(
     experiment: Experiment[Any],
     contextual_bandit_ref: str,
@@ -645,10 +666,13 @@ def _build_contextual_bandit_experiment(
 
     weights = leaf.get("weights") if leaf is not None else None
     leaf_id = leaf.get("leafId") if leaf is not None else None
+    if weights is not None and not _usable_bandit_weights(weights, len(experiment.variations)):
+        weights = None
     if leaf is not None and (weights is None or leaf_id is None):
-        # A matched leaf missing its weights or id is a malformed payload;
-        # degrade to the aggregate-weights fallback rather than bucketing on
-        # partial data.
+        # A matched leaf missing its id, or whose weight vector bucketing
+        # would reject (see _usable_bandit_weights), is a malformed payload;
+        # degrade to the aggregate-weights fallback rather than reporting
+        # propensities that differ from the weights actually used.
         logger.debug(
             "Contextual bandit leaf is malformed, feature %s falls back to aggregate weights",
             feature_id,
