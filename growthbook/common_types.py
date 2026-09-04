@@ -785,8 +785,10 @@ class EvaluationContext:
     feature_usage_cb: Optional[Callable[[str, "FeatureResult[Any]", UserContext], None]] = None
     # Feature keys already reported through feature_usage_cb during this
     # evaluation — one usage event per key per top-level eval call, however
-    # many times a prerequisite chain re-visits it.
-    reported_features: Set[str] = field(default_factory=set)
+    # many times a prerequisite chain re-visits it. Allocated lazily by
+    # _report_feature_usage: contexts are built on every evaluation, and evals
+    # with no usage callback must not pay for the set.
+    reported_features: Optional[Set[str]] = None
     # When set, every exposure produced by this evaluation (prerequisites and
     # passthrough included) is recorded here, before and independent of
     # tracking_cb.

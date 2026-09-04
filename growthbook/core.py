@@ -773,9 +773,14 @@ def _report_feature_usage(
     """Fire the context's feature-usage callback, once per feature key per
     evaluation, however many times a prerequisite chain re-visits it."""
     cb = evalContext.feature_usage_cb
-    if cb is None or key in evalContext.reported_features:
+    if cb is None:
         return
-    evalContext.reported_features.add(key)
+    reported = evalContext.reported_features
+    if reported is None:
+        reported = evalContext.reported_features = set()
+    if key in reported:
+        return
+    reported.add(key)
     cb(key, result, evalContext.user)
 
 
@@ -793,7 +798,8 @@ def eval_feature(
         raise ValueError("evalContext is required - eval_feature")
 
     result = _eval_feature(key, evalContext)
-    _report_feature_usage(key, result, evalContext)
+    if evalContext.feature_usage_cb is not None:
+        _report_feature_usage(key, result, evalContext)
     return result
 
 
