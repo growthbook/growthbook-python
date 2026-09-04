@@ -516,23 +516,38 @@ WEIGHT_SUM_MIN = 0.99
 WEIGHT_SUM_MAX = 1.01
 
 
+def _is_valid_weight_vector(weights: Any, num_variations: int) -> bool:
+    """The single weight-vector validity rule, shared by bucketing and every
+    contextual bandit path: a list with one finite, non-negative real number
+    per variation (booleans excluded), summing to ~1. Anything else is
+    replaced with equal weights wherever weights are consumed, so bucket
+    ranges can never be inverted and reported bandit propensities always
+    describe the vector actually used.
+
+    Deliberately stricter than the JS SDK, which checks only length and sum
+    and will bucket on inverted ranges for e.g. [1.2, -0.2] — corrupt for
+    assignments and bandit training alike. The divergence exists only for
+    invalid payloads the server never produces (the shared conformance
+    corpus exercises none of them)."""
+    if not isinstance(weights, list) or len(weights) != num_variations:
+        return False
+    if not all(
+        isinstance(w, (int, float))
+        and not isinstance(w, bool)
+        and math.isfinite(w)
+        and w >= 0
+        for w in weights
+    ):
+        return False
+    return WEIGHT_SUM_MIN <= sum(weights) <= WEIGHT_SUM_MAX
+
+
 def _normalized_weights(numVariations: int, weights: Any) -> List[float]:
-    """The weight vector bucketing will actually use: the input when it is a
-    valid list of the right length whose sum is within tolerance, equal
-    weights otherwise. Single source of truth shared by getBucketRanges and
-    the contextual bandit metadata paths, so reported propensities can never
-    differ from the weights used for bucketing."""
-    try:
-        if (
-            isinstance(weights, list)
-            and len(weights) == numVariations
-            and WEIGHT_SUM_MIN <= sum(weights) <= WEIGHT_SUM_MAX
-        ):
-            return weights
-    except TypeError:
-        # Non-numeric entries: fall through to equal weights, like the JS SDK
-        # (whose length/sum checks silently reject garbage instead of raising).
-        pass
+    """The weight vector bucketing (and bandit metadata) will actually use:
+    the input when it passes _is_valid_weight_vector, equal weights
+    otherwise."""
+    if _is_valid_weight_vector(weights, numVariations):
+        return cast(List[float], weights)
     return getEqualWeights(numVariations)
 
 
@@ -624,44 +639,6 @@ def _get_contextual_bandit_leaf(
     return None
 
 
-def _usable_bandit_weights(weights: Any, num_variations: int) -> bool:
-    """True only for a leaf weight vector that is safe to substitute for
-    bucketing: a list with one finite, non-negative number per variation
-    (booleans excluded), summing to ~1. Anything else is a malformed leaf
-    and the caller degrades to the aggregate-weights fallback, so reported
-    propensities always describe a sane vector."""
-    if not isinstance(weights, list) or len(weights) != num_variations:
-        return False
-    if not all(
-        isinstance(w, (int, float))
-        and not isinstance(w, bool)
-        and math.isfinite(w)
-        and w >= 0
-        for w in weights
-    ):
-        return False
-    return WEIGHT_SUM_MIN <= sum(weights) <= WEIGHT_SUM_MAX
-
-
-def _sanitize_bandit_experiment_weights(experiment: Experiment[Any]) -> List[float]:
-    """Strictly validate a bandit experiment's aggregate weights, clearing
-    them when unusable, and return the vector bucketing will use.
-
-    Contextual-only guard: ordinary experiments keep getBucketRanges'
-    looser length/sum normalization (JS parity), but a bandit rule must
-    never bucket on negative ranges or report them as propensities — an
-    unusable vector is cleared so bucketing and metadata both fall back to
-    equal weights."""
-    num_variations = len(experiment.variations)
-    if experiment.weights is not None and not _usable_bandit_weights(
-        experiment.weights, num_variations
-    ):
-        experiment.weights = None
-    if experiment.weights is None:
-        return getEqualWeights(num_variations)
-    return experiment.weights
-
-
 def _build_contextual_bandit_experiment(
     experiment: Experiment[Any],
     contextual_bandit_ref: str,
@@ -710,13 +687,13 @@ def _build_contextual_bandit_experiment(
 
     weights = leaf.get("weights") if leaf is not None else None
     leaf_id = leaf.get("leafId") if leaf is not None else None
-    if weights is not None and not _usable_bandit_weights(weights, len(experiment.variations)):
+    if weights is not None and not _is_valid_weight_vector(weights, len(experiment.variations)):
         weights = None
     if leaf is not None and (weights is None or leaf_id is None):
-        # A matched leaf missing its id, or whose weight vector bucketing
-        # would reject (see _usable_bandit_weights), is a malformed payload;
-        # degrade to the aggregate-weights fallback rather than reporting
-        # propensities that differ from the weights actually used.
+        # A matched leaf missing its id, or whose weight vector fails the
+        # shared validity rule (see _is_valid_weight_vector), is a malformed
+        # payload; degrade to the aggregate-weights fallback rather than
+        # reporting propensities that differ from the weights actually used.
         logger.debug(
             "Contextual bandit leaf is malformed, feature %s falls back to aggregate weights",
             feature_id,
@@ -731,9 +708,11 @@ def _build_contextual_bandit_experiment(
         )
         cb = {
             "leafId": CONTEXTUAL_BANDIT_FALLBACK_LEAF_ID,
-            # Unusable aggregate weights are cleared so bucketing and the
-            # reported propensities both degrade to equal weights.
-            "variationWeights": _sanitize_bandit_experiment_weights(experiment),
+            # getBucketRanges applies the same normalization, so the reported
+            # propensities always match the vector bucketing will use.
+            "variationWeights": _normalized_weights(
+                len(experiment.variations), experiment.weights
+            ),
         }
 
     bandit_version = cb_definition.get("banditVersion")
@@ -1012,12 +991,14 @@ def run_experiment(experiment: Experiment[Any],
     if evalContext.user.overrides.get(experiment.key, None):
         experiment.update(evalContext.user.overrides[experiment.key])
     # Keep reported bandit propensities in sync with the weights actually
-    # used for bucketing: an override may have replaced them, and an
-    # unusable override vector is cleared (equal weights for both).
+    # used for bucketing: an override may have replaced them, and
+    # getBucketRanges normalizes unusable vectors to equal weights.
     if experiment.contextualBandit and experiment.weights is not None:
         synced: ContextualBanditAssignment = {
             "leafId": experiment.contextualBandit["leafId"],
-            "variationWeights": _sanitize_bandit_experiment_weights(experiment),
+            "variationWeights": _normalized_weights(
+                len(experiment.variations), experiment.weights
+            ),
         }
         if "banditVersion" in experiment.contextualBandit:
             synced["banditVersion"] = experiment.contextualBandit["banditVersion"]

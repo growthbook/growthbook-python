@@ -969,8 +969,8 @@ async def test_async_eval_freezes_forced_inputs_before_awaits():
 def test_invalid_aggregate_and_override_weights_are_sanitized():
     """Aggregate (fallback) and override weight vectors get the same strict
     validation as matched leaves: negative or boolean entries would bucket on
-    nonsense ranges and report them as propensities, so the vector is cleared
-    and both bucketing and metadata use equal weights."""
+    nonsense ranges and report them as propensities, so both bucketing and
+    the reported metadata normalize them to equal weights."""
     for bad_weights in ([1.5, -0.5], [True, False]):
         features = {
             "bandit-feature": {
@@ -1011,3 +1011,24 @@ def test_invalid_aggregate_and_override_weights_are_sanitized():
     assert res.experimentResult is not None
     assert res.experimentResult.variationWeights == [0.5, 0.5]
     gb.destroy()
+
+
+def test_bucket_ranges_reject_invalid_weight_vectors():
+    """One weight-validation policy for every experiment: vectors bucketing
+    cannot honor sanely (negative, non-finite, boolean, or non-numeric
+    entries — not just wrong length/sum) normalize to equal weights, so
+    bucket ranges can never be inverted. Deliberately stricter than the JS
+    SDK, which checks only length and sum, on these invalid payloads."""
+    from growthbook.core import getBucketRanges
+
+    equal = getBucketRanges(2, 1, None)
+    for bad in (
+        [1.2, -0.2],
+        [True, False],
+        [float("inf"), 1.0],
+        [float("nan"), 1.0],
+        [0.5, "x"],
+    ):
+        assert getBucketRanges(2, 1, bad) == equal, bad
+    # Valid vectors are untouched
+    assert getBucketRanges(2, 1, [0.4, 0.6]) == [(0, 0.4), (0.4, 1.0)]
