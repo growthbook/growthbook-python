@@ -965,3 +965,49 @@ async def test_async_eval_freezes_forced_inputs_before_awaits():
             assert result.experimentResult.variationId == 0
             assert result.experimentResult.hashUsed
 
+
+def test_invalid_aggregate_and_override_weights_are_sanitized():
+    """Aggregate (fallback) and override weight vectors get the same strict
+    validation as matched leaves: negative or boolean entries would bucket on
+    nonsense ranges and report them as propensities, so the vector is cleared
+    and both bucketing and metadata use equal weights."""
+    for bad_weights in ([1.5, -0.5], [True, False]):
+        features = {
+            "bandit-feature": {
+                "defaultValue": "default",
+                "rules": [
+                    {
+                        "key": "bandit-exp",
+                        "seed": "bandit-exp",
+                        "hashAttribute": "id",
+                        "hashVersion": 2,
+                        "coverage": 1,
+                        "contextualVariations": ["control", "treatment"],
+                        "weights": bad_weights,
+                        "contextualBanditRef": "cb-bandit",
+                    }
+                ],
+            }
+        }
+        gb = GrowthBook(
+            attributes={"id": "1"},
+            features=features,
+            contextualBandits={"cb-bandit": {"contexts": []}},
+        )
+        res = gb.eval_feature("bandit-feature")
+        assert res.experimentResult.leafId == -1, bad_weights
+        assert res.experimentResult.variationWeights == [0.5, 0.5], bad_weights
+        gb.destroy()
+
+    # Override path: a context override replacing the weights with an
+    # unusable vector is cleared during the re-sync.
+    gb = GrowthBook(
+        attributes={"id": "1"},
+        features=CB_FEATURES,
+        contextualBandits=CB_MAP,
+        overrides={"bandit-exp": {"weights": [1.5, -0.5]}},
+    )
+    res = gb.eval_feature("bandit-feature")
+    assert res.experimentResult is not None
+    assert res.experimentResult.variationWeights == [0.5, 0.5]
+    gb.destroy()

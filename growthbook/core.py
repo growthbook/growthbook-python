@@ -643,6 +643,25 @@ def _usable_bandit_weights(weights: Any, num_variations: int) -> bool:
     return WEIGHT_SUM_MIN <= sum(weights) <= WEIGHT_SUM_MAX
 
 
+def _sanitize_bandit_experiment_weights(experiment: Experiment[Any]) -> List[float]:
+    """Strictly validate a bandit experiment's aggregate weights, clearing
+    them when unusable, and return the vector bucketing will use.
+
+    Contextual-only guard: ordinary experiments keep getBucketRanges'
+    looser length/sum normalization (JS parity), but a bandit rule must
+    never bucket on negative ranges or report them as propensities — an
+    unusable vector is cleared so bucketing and metadata both fall back to
+    equal weights."""
+    num_variations = len(experiment.variations)
+    if experiment.weights is not None and not _usable_bandit_weights(
+        experiment.weights, num_variations
+    ):
+        experiment.weights = None
+    if experiment.weights is None:
+        return getEqualWeights(num_variations)
+    return experiment.weights
+
+
 def _build_contextual_bandit_experiment(
     experiment: Experiment[Any],
     contextual_bandit_ref: str,
@@ -712,12 +731,9 @@ def _build_contextual_bandit_experiment(
         )
         cb = {
             "leafId": CONTEXTUAL_BANDIT_FALLBACK_LEAF_ID,
-            # Report what bucketing will actually use — getBucketRanges
-            # replaces invalid vectors with equal weights, so raw rule
-            # weights could misstate the propensities.
-            "variationWeights": _normalized_weights(
-                len(experiment.variations), experiment.weights
-            ),
+            # Unusable aggregate weights are cleared so bucketing and the
+            # reported propensities both degrade to equal weights.
+            "variationWeights": _sanitize_bandit_experiment_weights(experiment),
         }
 
     bandit_version = cb_definition.get("banditVersion")
@@ -996,14 +1012,12 @@ def run_experiment(experiment: Experiment[Any],
     if evalContext.user.overrides.get(experiment.key, None):
         experiment.update(evalContext.user.overrides[experiment.key])
     # Keep reported bandit propensities in sync with the weights actually
-    # used for bucketing: an override may have replaced them, and
-    # getBucketRanges replaces invalid vectors with equal weights.
-    if experiment.contextualBandit and experiment.weights:
+    # used for bucketing: an override may have replaced them, and an
+    # unusable override vector is cleared (equal weights for both).
+    if experiment.contextualBandit and experiment.weights is not None:
         synced: ContextualBanditAssignment = {
             "leafId": experiment.contextualBandit["leafId"],
-            "variationWeights": _normalized_weights(
-                len(experiment.variations), experiment.weights
-            ),
+            "variationWeights": _sanitize_bandit_experiment_weights(experiment),
         }
         if "banditVersion" in experiment.contextualBandit:
             synced["banditVersion"] = experiment.contextualBandit["banditVersion"]
