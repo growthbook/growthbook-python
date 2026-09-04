@@ -158,20 +158,28 @@ def test_dedupe_key_fields_cannot_collide_across_boundaries():
 
 def test_legacy_core_callback_kwargs_still_work():
     # Pre-3.1 direct consumers of growthbook.core passed callbacks as kwargs;
-    # they are deprecated but still copied onto the EvaluationContext.
+    # they are deprecated and invocation-scoped: installed on the context for
+    # the duration of the call (prerequisites inherit them), then the previous
+    # context fields are restored — a later call on the same context must not
+    # fire them.
     from growthbook.core import eval_feature as core_eval_feature
 
     gb = GrowthBook(attributes={"id": "user-1"}, features=FEATURES)
+    ctx = gb._get_eval_context()
     tracked, seen = [], []
     with pytest.warns(DeprecationWarning):
         res = core_eval_feature(
             "child",
-            gb._get_eval_context(),
+            ctx,
             callback_subscription=lambda experiment, result: seen.append(experiment.key),
             tracking_cb=lambda experiment, result, user: tracked.append(experiment.key),
         )
     assert res.value == "child-on"
     assert tracked == ["parent-exp"]
+    assert seen == ["parent-exp"]
+
+    assert core_eval_feature("ramped", ctx).value == "fallthrough"
+    assert tracked == ["parent-exp"]  # the ramp exposure did not leak to the legacy callback
     assert seen == ["parent-exp"]
     gb.destroy()
 

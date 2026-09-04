@@ -786,31 +786,12 @@ def _report_feature_usage(
     cb(key, result, evalContext.user)
 
 
-def _adopt_legacy_callbacks(
-    evalContext: EvaluationContext,
-    callback_subscription: Optional[Any],
-    tracking_cb: Optional[Any],
-) -> None:
-    """Copy the pre-3.1 keyword arguments onto the EvaluationContext.
-
-    Deprecated compatibility shim: callbacks belong on the context (so
-    prerequisite evaluations inherit them); direct growthbook.core consumers
-    that still pass them as kwargs keep working through a minor release."""
-    if tracking_cb is not None:
-        warnings.warn(
-            "the tracking_cb argument is deprecated; set EvaluationContext.tracking_cb",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        evalContext.tracking_cb = tracking_cb
-    if callback_subscription is not None:
-        warnings.warn(
-            "the callback_subscription argument is deprecated; "
-            "set EvaluationContext.callback_subscription",
-            DeprecationWarning,
-            stacklevel=3,
-        )
-        evalContext.callback_subscription = callback_subscription
+def _warn_legacy_callback(name: str) -> None:
+    warnings.warn(
+        f"the {name} argument is deprecated; set EvaluationContext.{name}",
+        DeprecationWarning,
+        stacklevel=4,
+    )
 
 
 def eval_feature(
@@ -823,15 +804,37 @@ def eval_feature(
 
     Tracking, subscription, and feature-usage callbacks are read from the
     EvaluationContext so recursive evaluations (prerequisites) report through
-    them too. The callback keyword arguments are deprecated shims (see
-    _adopt_legacy_callbacks)."""
+    them too. The callback keyword arguments are a deprecated,
+    invocation-scoped compatibility shim: they are installed on the context
+    for the duration of this call (so prerequisites inherit them) and the
+    previous context fields are restored afterwards, matching their pre-3.1
+    per-call behavior."""
 
     if evalContext is None:
         raise ValueError("evalContext is required - eval_feature")
 
-    if callback_subscription is not None or tracking_cb is not None:
-        _adopt_legacy_callbacks(evalContext, callback_subscription, tracking_cb)
+    if callback_subscription is None and tracking_cb is None:
+        # Inlined _eval_feature_and_report: this is the hot path, and the
+        # extra call frame is measurable at millions of evals per second.
+        result = _eval_feature(key, evalContext)
+        if evalContext.feature_usage_cb is not None:
+            _report_feature_usage(key, result, evalContext)
+        return result
 
+    previous = (evalContext.callback_subscription, evalContext.tracking_cb)
+    if callback_subscription is not None:
+        _warn_legacy_callback("callback_subscription")
+        evalContext.callback_subscription = callback_subscription
+    if tracking_cb is not None:
+        _warn_legacy_callback("tracking_cb")
+        evalContext.tracking_cb = tracking_cb
+    try:
+        return _eval_feature_and_report(key, evalContext)
+    finally:
+        evalContext.callback_subscription, evalContext.tracking_cb = previous
+
+
+def _eval_feature_and_report(key: str, evalContext: EvaluationContext) -> FeatureResult[Any]:
     result = _eval_feature(key, evalContext)
     if evalContext.feature_usage_cb is not None:
         _report_feature_usage(key, result, evalContext)
@@ -945,7 +948,7 @@ def _eval_feature(
         if rule.contextualBanditRef:
             _build_contextual_bandit_experiment(exp, rule.contextualBanditRef, key, evalContext)
 
-        result = run_experiment(experiment=exp, featureId=key, evalContext=evalContext)
+        result = _run_experiment(exp, key, evalContext)
 
         # Bandit metadata is only meaningful for real hashed exposures; strip
         # it from the experiment for forced/QA/coverage-miss outcomes so it
@@ -985,7 +988,7 @@ def eval_prereqs(parentConditions: List[Dict[str, Any]], evalContext: Evaluation
         if parent_id is None:
             continue  # Skip if no valid ID
             
-        parentRes = eval_feature(key=parent_id, evalContext=evalContext)
+        parentRes = _eval_feature_and_report(parent_id, evalContext)
 
         if parentRes.source == "cyclicPrerequisite":
             return "cyclic"
@@ -1084,11 +1087,24 @@ def run_experiment(experiment: Experiment[Any],
                    evalContext: Optional[EvaluationContext] = None,
                    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None,
                 ) -> Result[Any]:
-    if evalContext is not None and tracking_cb is not None:
-        # Deprecated compatibility shim (see _adopt_legacy_callbacks).
-        _adopt_legacy_callbacks(evalContext, None, tracking_cb)
     if evalContext is None:
         raise ValueError("evalContext is required - run_experiment")
+    if tracking_cb is None:
+        return _run_experiment(experiment, featureId, evalContext)
+    # Deprecated, invocation-scoped compatibility shim (see eval_feature).
+    _warn_legacy_callback("tracking_cb")
+    previous = evalContext.tracking_cb
+    evalContext.tracking_cb = tracking_cb
+    try:
+        return _run_experiment(experiment, featureId, evalContext)
+    finally:
+        evalContext.tracking_cb = previous
+
+
+def _run_experiment(experiment: Experiment[Any],
+                    featureId: Optional[str],
+                    evalContext: EvaluationContext,
+                ) -> Result[Any]:
     # 1. If experiment has less than 2 variations, return immediately
     if len(experiment.variations) < 2:
         logger.warning(
