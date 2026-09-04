@@ -454,3 +454,78 @@ def test_malformed_bandit_payload_degrades_gracefully():
     assert res.experimentResult is not None
     assert res.experimentResult.leafId is None
     gb.destroy()
+
+
+def test_sync_set_payload_accepts_encrypted_sections():
+    """JS setPayload accepts encrypted payloads; the Python port decrypts
+    encrypted sections with the configured decryption_key."""
+    key = "Zvwv/+uhpFDznZ6SX28Yjg=="
+    gb = GrowthBook(attributes={"id": "1"}, decryption_key=key)
+    gb.set_payload(
+        {
+            "encryptedFeatures": _encrypt(json.dumps(CB_FEATURES), key),
+            "encryptedContextualBandits": _encrypt(json.dumps(CB_MAP), key),
+        }
+    )
+    res = gb.eval_feature("bandit-feature")
+    assert res.value == "control"
+    assert res.experimentResult.leafId == 1
+    gb.destroy()
+
+
+@pytest.mark.asyncio
+async def test_async_set_payload_accepts_encrypted_sections():
+    key = "Zvwv/+uhpFDznZ6SX28Yjg=="
+    EnhancedFeatureRepository._instances = {}
+    with patch(
+        "growthbook.FeatureRepository.load_features_async",
+        new_callable=AsyncMock,
+        return_value={"features": {}, "savedGroups": {}},
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh",
+        new_callable=AsyncMock,
+    ), patch(
+        "growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh",
+        new_callable=AsyncMock,
+    ):
+        async with GrowthBookClient(
+            Options(
+                api_host="https://localhost.growthbook.io",
+                client_key="test-key",
+                decryption_key=key,
+            )
+        ) as client:
+            await client.set_payload(
+                {
+                    "encryptedFeatures": _encrypt(json.dumps(CB_FEATURES), key),
+                    "encryptedContextualBandits": _encrypt(json.dumps(CB_MAP), key),
+                }
+            )
+            result = await client.eval_feature(
+                "bandit-feature", UserContext(attributes={"id": "1"})
+            )
+            assert result.value == "control"
+            assert result.experimentResult.leafId == 1
+
+
+def test_failed_bandit_decryption_preserves_previous_map():
+    """An undecryptable contextualBandits section is dropped (encrypted key
+    removed, like JS decryptPayload) and, being absent, preserves the previous
+    coherent map instead of wiping it."""
+    key = "Zvwv/+uhpFDznZ6SX28Yjg=="
+    out = feature_repo.decrypt_response(
+        {"features": {}, "encryptedContextualBandits": "bad.cipher"}, key
+    )
+    assert out is not None
+    assert "encryptedContextualBandits" not in out
+    assert "contextualBandits" not in out
+
+    gb = GrowthBook(
+        attributes={"id": "1"},
+        decryption_key=key,
+        features=CB_FEATURES,
+        contextualBandits=CB_MAP,
+    )
+    gb.set_payload({"features": CB_FEATURES, "encryptedContextualBandits": "bad.cipher"})
+    assert gb.eval_feature("bandit-feature").experimentResult.leafId == 1
+    gb.destroy()

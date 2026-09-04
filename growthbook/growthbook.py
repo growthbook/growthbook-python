@@ -739,6 +739,25 @@ class FeatureRepository(object):
 
         return data
 
+    def decrypt_payload_sections(
+        self, payload: Dict[str, Any], decryption_key: str
+    ) -> Optional[Dict[str, Any]]:
+        """Decrypt any encrypted sections of an SDK payload, returning a copy
+        with the plaintext sections in place (JS setPayload accepts encrypted
+        payloads the same way). Payloads with no encrypted sections are
+        returned as-is; None means the features section failed to decrypt and
+        the payload should be discarded."""
+        if not any(
+            k in payload
+            for k in (
+                "encryptedFeatures",
+                "encryptedContextualBandits",
+                "encryptedSavedGroups",
+            )
+        ):
+            return payload
+        return self.decrypt_response(dict(payload), decryption_key)
+
     # Fetch features from the GrowthBook API
     def _fetch_features(
         self, api_host: str, client_key: str, decryption_key: str = ""
@@ -1084,11 +1103,14 @@ class GrowthBook(object):
         )
 
     def set_payload(self, payload: Dict[str, Any]) -> None:
-        """Set features, saved groups, and contextual bandits from a full
-        (decrypted) SDK payload, e.g. one fetched out-of-band from the
-        GrowthBook API. Mirrors the JS SDK's setPayload: only the sections
-        present in the payload are overwritten."""
-        self._on_feature_update(payload)
+        """Set features, saved groups, and contextual bandits from a full SDK
+        payload, e.g. one fetched out-of-band from the GrowthBook API.
+        Mirrors the JS SDK's setPayload: only the sections present in the
+        payload are overwritten, and encrypted sections are decrypted with
+        the configured decryption_key."""
+        data = feature_repo.decrypt_payload_sections(payload, self._decryption_key)
+        if data is not None:
+            self._on_feature_update(data)
 
     def load_features(self, force_refresh: bool = False) -> None:
         """Load features from the configured endpoint, populating the cache.

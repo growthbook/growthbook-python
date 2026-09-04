@@ -860,11 +860,19 @@ class GrowthBookClient:
         await self._feature_update_callback({"features": features})
 
     async def set_payload(self, payload: Dict[str, Any]) -> None:
-        """Set features, saved groups, and contextual bandits from a full
-        (decrypted) SDK payload, e.g. one fetched out-of-band from the
-        GrowthBook API. Mirrors the JS SDK's setPayload: only the sections
-        present in the payload are overwritten."""
-        await self._feature_update_callback(payload)
+        """Set features, saved groups, and contextual bandits from a full SDK
+        payload, e.g. one fetched out-of-band from the GrowthBook API.
+        Mirrors the JS SDK's setPayload: only the sections present in the
+        payload are overwritten, and encrypted sections are decrypted with
+        the configured decryption_key."""
+        # decrypt_payload_sections is stateless, so the module singleton is a
+        # safe stand-in when set_payload is called before initialize().
+        repo: FeatureRepository = self._features_repository or feature_repo
+        data = repo.decrypt_payload_sections(
+            payload, self.options.decryption_key or ""
+        )
+        if data is not None:
+            await self._feature_update_callback(data)
         
     
     async def _refresh_sticky_buckets(self, attributes: Dict[str, Any]) -> Dict[str, Any]:
