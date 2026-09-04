@@ -37,6 +37,7 @@ from .common_types import (
     AbstractAsyncStickyBucketService,
     FeatureRule,
     TrackingBuffer,
+    TrackingDedupeKey,
     build_remote_eval_payload,
     features_from_dict,
     tracking_dedupe_key,
@@ -1000,7 +1001,7 @@ class GrowthBook(object):
         self._forcedVariations = forced_variations if forced_variations is not None else (forcedVariations if forcedVariations is not None else {})
         self._forcedFeatures: Dict[str, Any] = forced_features or {}
 
-        self._tracked: Dict[str, Any] = {}
+        self._tracked: Dict[TrackingDedupeKey, Any] = {}
         self._deferred_buffer: Optional[TrackingBuffer] = TrackingBuffer() if defer_tracking else None
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Callable[[Experiment[Any], Result[Any]], None]] = set()

@@ -38,6 +38,7 @@ from .common_types import (
     features_from_dict,
     snapshot_user_context,
     TrackingBuffer,
+    TrackingDedupeKey,
     tracking_dedupe_key,
     tracking_user_context,
     validate_remote_eval_options,
@@ -647,7 +648,7 @@ class GrowthBookClient:
                 )
         
         # Thread-safe tracking state
-        self._tracked: Dict[str, bool] = {}  # Access only within async context
+        self._tracked: Dict[TrackingDedupeKey, bool] = {}  # Access only within async context
         self._tracked_lock = threading.Lock()
         
         # Thread-safe subscription management
@@ -791,7 +792,7 @@ class GrowthBookClient:
                 except Exception:
                     logger.exception("Error in tracking callback")
 
-    def _untrack(self, key: str) -> None:
+    def _untrack(self, key: TrackingDedupeKey) -> None:
         with self._tracked_lock:
             self._tracked.pop(key, None)
 

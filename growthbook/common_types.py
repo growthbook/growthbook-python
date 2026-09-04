@@ -629,16 +629,21 @@ def snapshot_user_context(user: "UserContext") -> "UserContext":
     )
 
 
-def tracking_dedupe_key(experiment: "Experiment[Any]", result: "Result[Any]") -> str:
-    """Identity of one exposure for tracking dedupe (JS getExperimentDedupeKey,
-    Go TrackingData.DedupeKey). Delimited so distinct exposures cannot collide
-    on field boundaries (unlike the JS SDK's plain concatenation)."""
-    return "\x00".join((
+# Identity of one exposure: (hashAttribute, hashValue, experiment key,
+# variation id). Same fields as JS getExperimentDedupeKey / Go
+# TrackingData.DedupeKey, but a tuple instead of a joined string so field
+# values containing a would-be delimiter can never make two distinct
+# exposures collide.
+TrackingDedupeKey = Tuple[str, str, str, str]
+
+
+def tracking_dedupe_key(experiment: "Experiment[Any]", result: "Result[Any]") -> TrackingDedupeKey:
+    return (
         result.hashAttribute,
         str(result.hashValue),
         experiment.key,
         str(result.variationId),
-    ))
+    )
 
 
 def tracking_user_context(user: "UserContext") -> "UserContext":
@@ -668,7 +673,7 @@ class TrackingBuffer:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._calls: Dict[str, Dict[str, Any]] = {}
+        self._calls: Dict[TrackingDedupeKey, Dict[str, Any]] = {}
 
     def record(self, experiment: "Experiment[Any]", result: "Result[Any]", user: "UserContext") -> None:
         key = tracking_dedupe_key(experiment, result)

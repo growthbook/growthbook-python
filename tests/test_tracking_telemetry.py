@@ -129,6 +129,22 @@ def test_snapshot_failure_drops_the_exposure_not_the_evaluation():
     gb.destroy()
 
 
+def test_dedupe_key_fields_cannot_collide_across_boundaries():
+    # Exposure identity is a field tuple: a value containing a would-be
+    # delimiter can never merge two distinct exposures (hashValue "a\0b" +
+    # key "c" vs hashValue "a" + key "b\0c").
+    tracked = []
+    gb = GrowthBook(
+        attributes={"id": "a\x00b"}, defer_tracking=True,
+        on_experiment_viewed=lambda experiment, result, user_context: tracked.append(experiment.key),
+    )
+    gb.run(Experiment(key="c", variations=[0, 1], weights=[1, 0]))
+    gb.set_attributes({"id": "a"})
+    gb.run(Experiment(key="b\x00c", variations=[0, 1], weights=[1, 0]))
+    assert tracked == ["c", "b\x00c"]
+    assert len(gb.get_deferred_tracking_calls()) == 2
+    gb.destroy()
+
 def test_subscriptions_see_prerequisite_experiments():
     gb, _, _ = make_gb()
     seen = []
