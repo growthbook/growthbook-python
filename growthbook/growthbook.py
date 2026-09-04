@@ -35,6 +35,8 @@ from .common_types import (
     AbstractStickyBucketService,
     AbstractAsyncStickyBucketService,
     FeatureRule,
+    tracking_call_from_dict,
+    tracking_dedupe_key,
     build_remote_eval_payload,
     features_from_dict,
     validate_remote_eval_options,
@@ -1251,6 +1253,7 @@ class GrowthBook(object):
         try:
             self._subscriptions.clear()
             self._tracked.clear()
+            self._user_ctx.clear_deferred_tracking_calls()
             self._assigned.clear()
             self._trackingCallback = None
             self._featureUsageCallback = None
@@ -1384,18 +1387,20 @@ class GrowthBook(object):
         return self._build_eval_context()
 
     def eval_feature(self, key: str) -> FeatureResult[Any]:
-        result = core_eval_feature(key=key, 
-                                   evalContext=self._get_eval_context(), 
-                                   callback_subscription=self._fireSubscriptions,
-                                   tracking_cb=self._track
-                                   )
-        # Call feature usage callback if provided
-        if self._featureUsageCallback:
-            try:
-                self._featureUsageCallback(key, result, self._user_ctx)
-            except Exception:
-                pass
-        return result
+        return core_eval_feature(key=key,
+                                 evalContext=self._get_eval_context(),
+                                 callback_subscription=self._fireSubscriptions,
+                                 tracking_cb=self._track,
+                                 feature_usage_cb=self._report_feature_usage,
+                                 )
+
+    def _report_feature_usage(self, key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
+        if not self._featureUsageCallback:
+            return
+        try:
+            self._featureUsageCallback(key, result, user_context)
+        except Exception:
+            pass
 
     @deprecated("getAllResults is deprecated, use get_all_results instead")
     def getAllResults(self) -> Dict[str, Dict[str, Any]]:
@@ -1426,7 +1431,8 @@ class GrowthBook(object):
         # result = self._run(experiment)
         result = run_experiment(experiment=experiment,
                                 evalContext=self._get_eval_context(),
-                                tracking_cb=self._track
+                                tracking_cb=self._track,
+                                feature_usage_cb=self._report_feature_usage,
                                 )
 
         self._fireSubscriptions(experiment, result)
@@ -1438,19 +1444,44 @@ class GrowthBook(object):
 
     def _track(self, experiment: Experiment[Any], result: Result[Any], user_context: UserContext) -> None:
         if not self._trackingCallback:
+            user_context.defer_tracking_call(experiment, result)
             return None
-        key = (
-            result.hashAttribute
-            + str(result.hashValue)
-            + experiment.key
-            + str(result.variationId)
-        )
+        key = tracking_dedupe_key(experiment, result)
         if not self._tracked.get(key):
             try:
                 self._trackingCallback(experiment=experiment, result=result, user_context=user_context)
                 self._tracked[key] = True
             except Exception as e:
                 logger.exception(e)
+
+    def set_tracking_callback(self, callback: Optional[TrackingCallback]) -> None:
+        """Set the tracking callback and fire any exposures buffered while
+        none was configured."""
+        self._trackingCallback = callback
+        self.fire_deferred_tracking_calls()
+
+    def get_deferred_tracking_calls(self) -> List[Dict[str, Any]]:
+        """Exposures buffered while no tracking callback was configured, in
+        the JS SDK's TrackingData shape ({experiment, result, user}) — ready
+        to forward to a client SDK's set_deferred_tracking_calls."""
+        return self._user_ctx.get_deferred_tracking_calls()
+
+    def set_deferred_tracking_calls(self, calls: List[Dict[str, Any]]) -> None:
+        self._user_ctx.set_deferred_tracking_calls(calls)
+
+    def fire_deferred_tracking_calls(self) -> None:
+        """Send buffered exposures through the tracking callback and empty
+        the buffer. No-op without a tracking callback."""
+        if not self._trackingCallback:
+            return
+        calls = self._user_ctx.get_deferred_tracking_calls()
+        self._user_ctx.clear_deferred_tracking_calls()
+        for call in calls:
+            hydrated = tracking_call_from_dict(call)
+            if hydrated is None:
+                continue
+            experiment, result = hydrated
+            self._track(experiment, result, self._user_ctx)
 
     def _derive_sticky_bucket_identifier_attributes(self) -> List[str]:
         attributes = set()

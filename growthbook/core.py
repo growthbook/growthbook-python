@@ -6,8 +6,17 @@ import json
 from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
-from typing import Callable, Optional, Any, Set, Tuple, List, Dict, cast
-from .common_types import EvaluationContext, FeatureResult, Experiment, Filter, Result, UserContext, VariationMeta
+from typing import Callable, Optional, Any, Set, Tuple, List, Dict
+from .common_types import (
+    EvaluationContext,
+    FeatureResult,
+    Experiment,
+    Filter,
+    Result,
+    UserContext,
+    VariationMeta,
+    tracking_call_from_dict,
+)
 
 
 logger = logging.getLogger("growthbook.core")
@@ -531,50 +540,60 @@ def _fire_rule_tracks(
     if not rule_tracks or not tracking_cb:
         return
     for entry in rule_tracks:
-        exp_data = entry.get("experiment") or {}
-        res_data = entry.get("result") or {}
-        # Experiment requires at minimum a key and variations list.
-        if "key" not in exp_data or "variations" not in exp_data:
-            logger.debug("Skipping rule.tracks entry: missing experiment key/variations")
-            continue
-        # The proxy emits Result in the JS shape: key/name/passthrough flat at
-        # the top level. Python's Result takes those via a nested `meta` dict.
-        # Re-pack if no explicit `meta` was provided.
-        meta: Optional[VariationMeta] = res_data.get("meta")
-        if meta is None:
-            flat = cast(VariationMeta, {k: res_data[k] for k in ("key", "name", "passthrough") if k in res_data})
-            meta = flat or None
         try:
-            # Experiment accepts **_ignored, so passing the raw proxy dict is safe.
-            experiment = Experiment(**exp_data)
-            result = Result(
-                variationId=res_data.get("variationId", 0),
-                inExperiment=res_data.get("inExperiment", False),
-                value=res_data.get("value"),
-                hashUsed=res_data.get("hashUsed", False),
-                hashAttribute=res_data.get("hashAttribute", "id"),
-                hashValue=res_data.get("hashValue", ""),
-                featureId=res_data.get("featureId"),
-                meta=meta,
-                bucket=res_data.get("bucket"),
-                stickyBucketUsed=res_data.get("stickyBucketUsed", False),
-            )
+            hydrated = tracking_call_from_dict(entry)
+            if hydrated is None:
+                logger.debug("Skipping rule.tracks entry: missing experiment key/variations")
+                continue
+            experiment, result = hydrated
             tracking_cb(experiment, result, eval_context.user)
         except Exception:
             logger.exception("Failed to fire rule.tracks tracking event")
+
+
+FeatureUsageCb = Callable[[str, FeatureResult[Any], UserContext], None]
+
+
+def _report_feature_usage(
+    key: str,
+    result: FeatureResult[Any],
+    evalContext: EvaluationContext,
+    feature_usage_cb: FeatureUsageCb,
+) -> None:
+    stringified = json.dumps(result.value, sort_keys=True, default=str)
+    if evalContext.reported_features.get(key) == stringified:
+        return
+    evalContext.reported_features[key] = stringified
+    feature_usage_cb(key, result, evalContext.user)
 
 
 def eval_feature(
     key: str,
     evalContext: Optional[EvaluationContext] = None,
     callback_subscription: Optional[Callable[[Experiment[Any], Result[Any]], None]] = None,
-    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None
+    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None,
+    feature_usage_cb: Optional[FeatureUsageCb] = None,
 ) -> FeatureResult[Any]:
-    """Core feature evaluation logic as a standalone function"""
+    """Core feature evaluation logic as a standalone function. Feature usage
+    is reported for every feature evaluated, prerequisites included."""
 
     if evalContext is None:
         raise ValueError("evalContext is required - eval_feature")
-    
+
+    result = _eval_feature(key, evalContext, callback_subscription, tracking_cb, feature_usage_cb)
+    if feature_usage_cb:
+        _report_feature_usage(key, result, evalContext, feature_usage_cb)
+    return result
+
+
+def _eval_feature(
+    key: str,
+    evalContext: EvaluationContext,
+    callback_subscription: Optional[Callable[[Experiment[Any], Result[Any]], None]],
+    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]],
+    feature_usage_cb: Optional[FeatureUsageCb],
+) -> FeatureResult[Any]:
+
     if key not in evalContext.global_ctx.features:
         logger.warning("Unknown feature %s", key)
         return FeatureResult(None, "unknownFeature")
@@ -594,7 +613,12 @@ def eval_feature(
         evalContext.stack.evaluated_features = evaluated_features.copy()
 
         if (rule.parentConditions):
-            prereq_res = eval_prereqs(parentConditions=rule.parentConditions, evalContext=evalContext)
+            prereq_res = eval_prereqs(
+                parentConditions=rule.parentConditions,
+                evalContext=evalContext,
+                tracking_cb=tracking_cb,
+                feature_usage_cb=feature_usage_cb,
+            )
             if prereq_res == "gate":
                 logger.debug("Top-level prerequisite failed, return None, feature %s", key)
                 return FeatureResult(None, "prerequisite")
@@ -666,7 +690,13 @@ def eval_feature(
             minBucketVersion=rule.minBucketVersion,
         )
 
-        result = run_experiment(experiment=exp, featureId=key, evalContext=evalContext, tracking_cb=tracking_cb)
+        result = run_experiment(
+            experiment=exp,
+            featureId=key,
+            evalContext=evalContext,
+            tracking_cb=tracking_cb,
+            feature_usage_cb=feature_usage_cb,
+        )
 
         if callback_subscription:
             callback_subscription(exp, result)
@@ -689,7 +719,12 @@ def eval_feature(
     logger.debug("Use default value for feature %s", key)
     return FeatureResult(feature.defaultValue, "defaultValue")
 
-def eval_prereqs(parentConditions: List[Dict[str, Any]], evalContext: EvaluationContext) -> str:
+def eval_prereqs(
+    parentConditions: List[Dict[str, Any]],
+    evalContext: EvaluationContext,
+    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None,
+    feature_usage_cb: Optional[FeatureUsageCb] = None,
+) -> str:
     evaluated_features = evalContext.stack.evaluated_features.copy()
 
     for parentCondition in parentConditions:
@@ -699,8 +734,13 @@ def eval_prereqs(parentConditions: List[Dict[str, Any]], evalContext: Evaluation
         parent_id = parentCondition.get("id")
         if parent_id is None:
             continue  # Skip if no valid ID
-            
-        parentRes = eval_feature(key=parent_id, evalContext=evalContext)
+
+        parentRes = eval_feature(
+            key=parent_id,
+            evalContext=evalContext,
+            tracking_cb=tracking_cb,
+            feature_usage_cb=feature_usage_cb,
+        )
 
         if parentRes.source == "cyclicPrerequisite":
             return "cyclic"
@@ -797,7 +837,8 @@ def _get_sticky_bucket_variation(
 def run_experiment(experiment: Experiment[Any],
                    featureId: Optional[str] = None,
                    evalContext: Optional[EvaluationContext] = None,
-                   tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None
+                   tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None,
+                   feature_usage_cb: Optional[FeatureUsageCb] = None,
                 ) -> Result[Any]:
     if evalContext is None:
         raise ValueError("evalContext is required - run_experiment")
@@ -912,7 +953,12 @@ def run_experiment(experiment: Experiment[Any],
 
         # 8.05 Exclude if parent conditions are not met
         if (experiment.parentConditions):
-            prereq_res = eval_prereqs(parentConditions=experiment.parentConditions, evalContext=evalContext)
+            prereq_res = eval_prereqs(
+                parentConditions=experiment.parentConditions,
+                evalContext=evalContext,
+                tracking_cb=tracking_cb,
+                feature_usage_cb=feature_usage_cb,
+            )
             if prereq_res == "gate" or prereq_res == "fail":
                 logger.debug("Skip experiment %s because of failing prerequisite", experiment.key)
                 return _getExperimentResult(experiment=experiment, featureId=featureId, evalContext=evalContext)

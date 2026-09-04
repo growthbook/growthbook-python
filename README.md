@@ -471,6 +471,14 @@ gb = GrowthBook(
 )
 ```
 
+The callback fires for every experiment assignment an evaluation makes — including assignments inside prerequisite features and passthrough (holdout / ramp control) variations — and `on_feature_usage` fires for every feature evaluated, prerequisites included.
+
+#### Deferred Tracking
+
+When the process evaluating features isn't the right place to send analytics from (for example, a server evaluating on behalf of client SDKs), leave `on_experiment_viewed` unset and the SDK buffers exposures instead. Read them with `get_deferred_tracking_calls()` — a list of `{"experiment", "result", "user"}` dicts in the same shape as the JavaScript SDK's deferred tracking calls, ready to forward to a client's `setDeferredTrackingCalls` — or replay them later with `set_tracking_callback(cb)`, which fires anything buffered. `set_deferred_tracking_calls(calls)` and `fire_deferred_tracking_calls()` cover the receiving side.
+
+With the async `GrowthBookClient`, the buffer lives on each `UserContext` you evaluate with: `user_context.get_deferred_tracking_calls()` after evaluating, so one request's exposures never mix with another's.
+
 #### Built-in Tracking Plugin
 
 For easier setup, you can use the built-in tracking plugin that automatically sends experiment and feature events to GrowthBook's data warehouse:

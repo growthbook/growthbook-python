@@ -33,6 +33,7 @@ from .common_types import (
     FeatureResult,
     FeatureRefreshStrategy,
     AbstractAsyncStickyBucketService,
+    tracking_dedupe_key,
     Experiment,
     build_remote_eval_payload,
     features_from_dict,
@@ -736,15 +737,10 @@ class GrowthBookClient:
     def _track(self, experiment: Experiment[Any], result: Result[Any], user_context: UserContext) -> None:
         """Thread-safe tracking implementation"""
         if not self.options.on_experiment_viewed:
+            user_context.defer_tracking_call(experiment, result)
             return
 
-        # Create unique key for this tracking event
-        key = (
-            result.hashAttribute
-            + str(result.hashValue)
-            + experiment.key
-            + str(result.variationId)
-        )
+        key = tracking_dedupe_key(experiment, result)
 
         with self._tracked_lock:
             if not self._tracked.get(key):
@@ -1217,18 +1213,24 @@ class GrowthBookClient:
         immutable feature snapshot, so concurrent evaluations never contend
         with each other or with feature updates."""
         context = await self.create_evaluation_context(user_context)
-        result = core_eval_feature(key=key, evalContext=context, tracking_cb=self._track)
-        # Call feature usage callback if provided
-        if self.options.on_feature_usage:
-            try:
-                self._run_user_callback(
-                    self.options.on_feature_usage,
-                    (key, result, user_context),
-                    "feature usage",
-                )
-            except Exception:
-                logger.exception("Error in feature usage callback")
-        return result
+        return core_eval_feature(
+            key=key,
+            evalContext=context,
+            tracking_cb=self._track,
+            feature_usage_cb=self._report_feature_usage,
+        )
+
+    def _report_feature_usage(self, key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
+        if not self.options.on_feature_usage:
+            return
+        try:
+            self._run_user_callback(
+                self.options.on_feature_usage,
+                (key, result, user_context),
+                "feature usage",
+            )
+        except Exception:
+            logger.exception("Error in feature usage callback")
 
     async def is_on(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is enabled with proper async context management"""
@@ -1250,7 +1252,8 @@ class GrowthBookClient:
         result = run_experiment(
             experiment=experiment,
             evalContext=context,
-            tracking_cb=self._track
+            tracking_cb=self._track,
+            feature_usage_cb=self._report_feature_usage,
         )
         # Fire subscriptions synchronously
         self._fire_subscriptions(experiment, result)
