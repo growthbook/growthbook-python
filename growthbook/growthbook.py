@@ -715,6 +715,10 @@ class FeatureRepository(object):
                 data['contextualBandits'] = json.loads(decrypted)
                 del data['encryptedContextualBandits']
             except Exception:
+                # Drop the undecryptable section (JS decryptPayload deletes the
+                # encrypted key either way); absent sections are preserved
+                # downstream, so the previous coherent map stays active.
+                del data['encryptedContextualBandits']
                 logger.warning(
                     "Failed to decrypt contextual bandits from GrowthBook API response"
                 )
@@ -728,6 +732,7 @@ class FeatureRepository(object):
                 del data['encryptedSavedGroups']
                 return data
             except Exception:
+                del data['encryptedSavedGroups']
                 logger.warning(
                     "Failed to decrypt saved groups from GrowthBook API response"
                 )
