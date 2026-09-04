@@ -916,9 +916,6 @@ class GrowthBook(object):
         stale_ttl: int = 300,  # 5 minutes default
         plugins: Optional[List["PluginLike"]] = None,
         skip_all_experiments: bool = False,
-        # New in 3.1.0 — appended after the 3.0.0 parameters so existing
-        # positional call sites keep their meaning.
-        contextual_bandits: Optional[Dict[str, Any]] = None,
         # Deprecated args (camelCase spellings fold into their snake_case
         # equivalents above; the snake_case value wins when both are given)
         trackingCallback: Optional[TrackingCallback] = None,
@@ -932,6 +929,9 @@ class GrowthBook(object):
         savedGroups: Optional[Dict[str, Any]] = None,
         remoteEval: bool = False,
         cacheKeyAttributes: Optional[List[str]] = None,
+        # New in 3.1.0 — appended after ALL 3.0.0 parameters (deprecated ones
+        # included) so every existing positional call site keeps its meaning.
+        contextual_bandits: Optional[Dict[str, Any]] = None,
         contextualBandits: Optional[Dict[str, Any]] = None,
     ) -> None:
         remote_eval = remote_eval or remoteEval
