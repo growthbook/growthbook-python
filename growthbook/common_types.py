@@ -697,6 +697,11 @@ class EvaluationContext:
     # a shared context field cannot be forgotten.
     tracking_cb: Optional[Callable[["Experiment[Any]", "Result[Any]", UserContext], None]] = None
     callback_subscription: Optional[Callable[["Experiment[Any]", "Result[Any]"], None]] = None
+    feature_usage_cb: Optional[Callable[[str, "FeatureResult[Any]", UserContext], None]] = None
+    # Feature keys already reported through feature_usage_cb during this
+    # evaluation — one usage event per key per top-level eval call, however
+    # many times a prerequisite chain re-visits it.
+    reported_features: Set[str] = field(default_factory=set)
 
 
 # ---------------------------------------------------------------------------

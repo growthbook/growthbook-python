@@ -751,18 +751,43 @@ def _build_contextual_bandit_experiment(
     experiment.contextualBandit = cb
 
 
+def _report_feature_usage(
+    key: str,
+    result: FeatureResult[Any],
+    evalContext: EvaluationContext,
+) -> None:
+    """Fire the context's feature-usage callback, once per feature key per
+    evaluation, however many times a prerequisite chain re-visits it."""
+    cb = evalContext.feature_usage_cb
+    if cb is None or key in evalContext.reported_features:
+        return
+    evalContext.reported_features.add(key)
+    cb(key, result, evalContext.user)
+
+
 def eval_feature(
     key: str,
     evalContext: Optional[EvaluationContext] = None,
 ) -> FeatureResult[Any]:
     """Core feature evaluation logic as a standalone function.
 
-    Tracking and subscription callbacks are read from the EvaluationContext
-    so recursive evaluations (prerequisites) report through them too."""
+    Tracking, subscription, and feature-usage callbacks are read from the
+    EvaluationContext so recursive evaluations (prerequisites) report through
+    them too."""
 
     if evalContext is None:
         raise ValueError("evalContext is required - eval_feature")
-    
+
+    result = _eval_feature(key, evalContext)
+    _report_feature_usage(key, result, evalContext)
+    return result
+
+
+def _eval_feature(
+    key: str,
+    evalContext: EvaluationContext,
+) -> FeatureResult[Any]:
+
     if key not in evalContext.global_ctx.features:
         logger.warning("Unknown feature %s", key)
         return FeatureResult(None, "unknownFeature")

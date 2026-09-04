@@ -52,44 +52,51 @@ FEATURES = {
             {"force": "fallthrough"},
         ],
     },
+    "unserializable": {"defaultValue": {1: "a", "b": 2}},
 }
 
 
 def make_gb(**kwargs):
-    tracked = []
+    tracked, usage = [], []
 
     def on_viewed(experiment, result, user_context):
         tracked.append((experiment.key, result.variationId))
+
+    def on_usage(key, result, user_context):
+        usage.append(key)
 
     gb = GrowthBook(
         attributes={"id": "user-1"},
         features=FEATURES,
         on_experiment_viewed=on_viewed,
+        on_feature_usage=on_usage,
         **kwargs,
     )
-    return gb, tracked
+    return gb, tracked, usage
 
 
 def test_prerequisite_experiment_assignment_is_tracked():
-    gb, tracked = make_gb()
+    gb, tracked, usage = make_gb()
     res = gb.eval_feature("child")
     assert res.value == "child-on"
     assert tracked == [("parent-exp", 0)]
+    assert usage == ["parent", "child"]
     gb.destroy()
 
 
 def test_prerequisite_tracked_even_when_gate_fails():
     # The prerequisite experiment is evaluated (and its exposure fired)
     # before the gate decision — matches the JS SDK.
-    gb, tracked = make_gb()
+    gb, tracked, usage = make_gb()
     res = gb.eval_feature("child-gated")
     assert res.value is None and res.source == "prerequisite"
     assert tracked == [("parent-exp", 0)]
+    assert usage == ["parent", "child-gated"]
     gb.destroy()
 
 
 def test_experiment_level_prerequisite_is_tracked():
-    gb, tracked = make_gb()
+    gb, tracked, usage = make_gb()
     exp = Experiment(
         key="direct",
         variations=["x", "y"],
@@ -101,28 +108,37 @@ def test_experiment_level_prerequisite_is_tracked():
     res = gb.run(exp)
     assert res.inExperiment and res.value == "x"
     assert tracked == [("parent-exp", 0), ("direct", 0)]
+    assert usage == ["parent"]
     assert seen == ["parent-exp", "direct"]
     gb.destroy()
 
 
-def test_prerequisite_consulted_by_several_rules_is_tracked_once():
-    gb, tracked = make_gb()
+def test_prerequisite_consulted_by_several_rules_is_reported_once():
+    gb, tracked, usage = make_gb()
     res = gb.eval_feature("child-twice")
     assert res.value == "r2"
     assert tracked == [("parent-exp", 0)]
+    assert usage == ["parent", "child-twice"]
     gb.destroy()
 
 
 def test_passthrough_assignment_is_tracked():
-    gb, tracked = make_gb()
+    gb, tracked, _ = make_gb()
     res = gb.eval_feature("ramped")
     assert res.value == "fallthrough"
     assert tracked == [("ramp", 1)]
     gb.destroy()
 
 
+def test_unserializable_feature_values_do_not_break_evaluation():
+    gb, _, usage = make_gb()
+    assert gb.eval_feature("unserializable").value == {1: "a", "b": 2}
+    assert usage == ["unserializable"]
+    gb.destroy()
+
+
 def test_subscriptions_see_prerequisite_experiments():
-    gb, _ = make_gb()
+    gb, _, _ = make_gb()
     seen = []
     gb.subscribe(lambda experiment, result: seen.append(experiment.key))
     gb.eval_feature("child")
@@ -133,17 +149,19 @@ def test_subscriptions_see_prerequisite_experiments():
 
 @pytest.mark.asyncio
 async def test_async_client_tracks_prerequisites_through_callback():
-    tracked = []
+    tracked, usage = [], []
     client = GrowthBookClient(Options(
         api_host="https://localhost.growthbook.io",
         client_key="test",
         on_experiment_viewed=lambda experiment, result, user_context: tracked.append(experiment.key),
+        on_feature_usage=lambda key, result, user_context: usage.append(key),
     ))
     await client.set_features(FEATURES)
     try:
         res = await client.eval_feature("child", UserContext(attributes={"id": "user-1"}))
         assert res.value == "child-on"
         assert tracked == ["parent-exp"]
+        assert usage == ["parent", "child"]
     finally:
         await client.close()
 

@@ -1265,6 +1265,7 @@ class GrowthBookClient:
                 stack=StackContext(evaluated_features=set()),
                 tracking_cb=self._track,
                 callback_subscription=self._fire_subscriptions,
+                feature_usage_cb=self._feature_usage if self.options.on_feature_usage else None,
             )
 
         # Get sticky bucket assignments if needed
@@ -1289,6 +1290,7 @@ class GrowthBookClient:
             ),
             tracking_cb=self._track,
             callback_subscription=self._fire_subscriptions,
+            feature_usage_cb=self._feature_usage if self.options.on_feature_usage else None,
         )
 
     async def eval_feature(self, key: str, user_context: UserContext) -> FeatureResult[Any]:
@@ -1296,21 +1298,23 @@ class GrowthBookClient:
         immutable feature snapshot, so concurrent evaluations never contend
         with each other or with feature updates."""
         context = await self.create_evaluation_context(user_context)
-        result = core_eval_feature(key=key, evalContext=context)
-        # Call feature usage callback if provided
-        if self.options.on_feature_usage:
-            try:
-                self._run_user_callback(
-                    self.options.on_feature_usage,
-                    # Fire-time snapshot: context.user may be the caller's own
-                    # context (plain CDN evals skip the boundary copy), and
-                    # this callback can run deferred on the event loop.
-                    (key, result, tracking_user_context(context.user)),
-                    "feature usage",
-                )
-            except Exception:
-                logger.exception("Error in feature usage callback")
-        return result
+        return core_eval_feature(key=key, evalContext=context)
+
+    def _feature_usage(self, key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
+        if not self.options.on_feature_usage:
+            return
+        try:
+            self._run_user_callback(
+                self.options.on_feature_usage,
+                # Fire-time snapshot: core passes evalContext.user, which may
+                # be the caller's own context (plain CDN evals skip the
+                # boundary copy), and this callback can run deferred on the
+                # event loop.
+                (key, result, tracking_user_context(user_context)),
+                "feature usage",
+            )
+        except Exception:
+            logger.exception("Error in feature usage callback")
 
     async def is_on(self, key: str, user_context: UserContext) -> bool:
         """Check if a feature is enabled with proper async context management"""

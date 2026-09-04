@@ -1461,6 +1461,7 @@ class GrowthBook(object):
             # up), letting core skip dead work like rule.tracks hydration.
             tracking_cb = self._track if self._trackingCallback else None,
             callback_subscription = self._fireSubscriptions,
+            feature_usage_cb = self._feature_usage if self._featureUsageCallback else None,
         )
 
     def _get_eval_context(self) -> EvaluationContext:
@@ -1470,14 +1471,17 @@ class GrowthBook(object):
         return self._build_eval_context()
 
     def eval_feature(self, key: str) -> FeatureResult[Any]:
-        result = core_eval_feature(key=key, evalContext=self._get_eval_context())
-        # Call feature usage callback if provided
-        if self._featureUsageCallback:
-            try:
-                self._featureUsageCallback(key, result, tracking_user_context(self._user_ctx))
-            except Exception:
-                pass
-        return result
+        return core_eval_feature(key=key, evalContext=self._get_eval_context())
+
+    def _feature_usage(self, key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
+        if not self._featureUsageCallback:
+            return
+        try:
+            # Snapshot so the logged attributes are exactly the ones used
+            # for the evaluation, even if the caller mutates them afterwards.
+            self._featureUsageCallback(key, result, tracking_user_context(user_context))
+        except Exception:
+            pass
 
     @deprecated("getAllResults is deprecated, use get_all_results instead")
     def getAllResults(self) -> Dict[str, Dict[str, Any]]:
