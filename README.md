@@ -524,6 +524,8 @@ gb.setDeferredTrackingCalls(callsFromServer);
 gb.fireDeferredTrackingCalls();
 ```
 
+Forwarding the exposure-time `user` context to the tracking callback requires JS SDK 1.7.0+; older SDKs fire the exposures without the user argument.
+
 On the async client, pass a per-request `TrackingBuffer` — the explicit buffer is the opt-in, and because the caller owns it, concurrent requests never mix exposures:
 
 ```python
