@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## [3.1.0](https://github.com/growthbook/growthbook-python/compare/v3.0.0...v3.1.0) (2026-09-05)
 
 ### Features
 
@@ -14,6 +14,8 @@
 * Deferred tracking: buffer experiment exposures for forwarding to a client SDK (which fires them via `setDeferredTrackingCalls` + `fireDeferredTrackingCalls`). Opt-in and independent of `on_experiment_viewed` — the buffer records first, the callback still fires. Entries use the JS SDK's `TrackingData` shape, deduped per unique assignment and JSON round-tripped at exposure time, so buffered payloads are always `json.dumps`-ready — an exposure carrying a non-JSON value (e.g. a `datetime` attribute) is dropped and logged, never the batch. Firing the forwarded `user` context on the receiving side requires JS SDK 1.7.0+.
   * Sync client: `GrowthBook(defer_tracking=True)` with `get_deferred_tracking_calls()` / `clear_deferred_tracking_calls()`.
   * Async client: pass a per-request `TrackingBuffer` to `eval_feature` / `run` / `is_on` / `is_off` / `get_feature_value` and read it with `buffer.get_calls()`; the caller owns the buffer, so concurrent requests never mix exposures.
+
+* prerequisite exposure telemetry and deferred tracking ([4dac52f](https://github.com/growthbook/growthbook-python/commit/4dac52f9028f426a87b2c558e75def7f1de7b205))
 
 ### Performance
 
