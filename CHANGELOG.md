@@ -31,6 +31,13 @@
 * `savedGroups` from a feature refresh were applied to the evaluation context one refresh late in the synchronous client.
 * The built-in tracking plugin now sends the exposure-time user context attributes with experiment events (previously async client events had none).
 
+## [3.1.0](https://github.com/growthbook/growthbook-python/compare/v3.0.0...v3.1.0) (2026-09-05)
+
+
+### Features
+
+* prerequisite exposure telemetry and deferred tracking ([4dac52f](https://github.com/growthbook/growthbook-python/commit/4dac52f9028f426a87b2c558e75def7f1de7b205))
+
 ## [3.0.0](https://github.com/growthbook/growthbook-python/compare/v2.4.0...v3.0.0) (2026-08-26)
 
 
