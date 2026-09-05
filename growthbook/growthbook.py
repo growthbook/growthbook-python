@@ -36,8 +36,11 @@ from .common_types import (
     AbstractStickyBucketService,
     AbstractAsyncStickyBucketService,
     FeatureRule,
+    TrackingBuffer,
+    TrackingDedupeKey,
     build_remote_eval_payload,
     features_from_dict,
+    tracking_dedupe_key,
     tracking_user_context,
     validate_remote_eval_options,
 )
@@ -56,7 +59,7 @@ if TYPE_CHECKING:
     # Only present in urllib3 2.x; the runtime dependency allows 1.x too.
     from urllib3.response import BaseHTTPResponse
 
-from .core import _getHashValue, eval_feature as core_eval_feature, run_experiment
+from .core import _eval_feature_and_report, _getHashValue, run_experiment
 
 logger = logging.getLogger("growthbook")
 
@@ -933,6 +936,11 @@ class GrowthBook(object):
         # included) so every existing positional call site keeps its meaning.
         contextual_bandits: Optional[Dict[str, Any]] = None,
         contextualBandits: Optional[Dict[str, Any]] = None,
+        # New in 3.1.0, after the deprecated block so every earlier positional
+        # index is preserved. Opt-in: buffer every exposure for forwarding to
+        # a client SDK (see get_deferred_tracking_calls). Independent of
+        # on_experiment_viewed.
+        defer_tracking: bool = False,
     ) -> None:
         remote_eval = remote_eval or remoteEval
         saved_groups = saved_groups if saved_groups is not None else savedGroups
@@ -993,7 +1001,8 @@ class GrowthBook(object):
         self._forcedVariations = forced_variations if forced_variations is not None else (forcedVariations if forcedVariations is not None else {})
         self._forcedFeatures: Dict[str, Any] = forced_features or {}
 
-        self._tracked: Dict[str, Any] = {}
+        self._tracked: Dict[TrackingDedupeKey, Any] = {}
+        self._deferred_buffer: Optional[TrackingBuffer] = TrackingBuffer() if defer_tracking else None
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Callable[[Experiment[Any], Result[Any]], None]] = set()
         self._is_updating_features = False
@@ -1332,6 +1341,8 @@ class GrowthBook(object):
         try:
             self._subscriptions.clear()
             self._tracked.clear()
+            if self._deferred_buffer:
+                self._deferred_buffer.clear()
             self._assigned.clear()
             self._trackingCallback = None
             self._featureUsageCallback = None
@@ -1455,7 +1466,14 @@ class GrowthBook(object):
         return EvaluationContext(
             global_ctx = self._global_ctx,
             user = self._user_ctx,
-            stack = StackContext(evaluated_features=set())
+            stack = StackContext(evaluated_features=set()),
+            # Wired only when a consumer exists (contexts are per-eval, so a
+            # callback installed later — e.g. by a plugin — is still picked
+            # up), letting core skip dead work like rule.tracks hydration.
+            tracking_cb = self._track if self._trackingCallback else None,
+            callback_subscription = self._fireSubscriptions,
+            feature_usage_cb = self._feature_usage if self._featureUsageCallback else None,
+            tracking_buffer = self._deferred_buffer,
         )
 
     def _get_eval_context(self) -> EvaluationContext:
@@ -1465,18 +1483,19 @@ class GrowthBook(object):
         return self._build_eval_context()
 
     def eval_feature(self, key: str) -> FeatureResult[Any]:
-        result = core_eval_feature(key=key, 
-                                   evalContext=self._get_eval_context(), 
-                                   callback_subscription=self._fireSubscriptions,
-                                   tracking_cb=self._track
-                                   )
-        # Call feature usage callback if provided
-        if self._featureUsageCallback:
-            try:
-                self._featureUsageCallback(key, result, tracking_user_context(self._user_ctx))
-            except Exception:
-                pass
-        return result
+        # The internal entry point skips the public wrapper's deprecated-kwarg
+        # shim — the callbacks are already wired on the context.
+        return _eval_feature_and_report(key, self._get_eval_context())
+
+    def _feature_usage(self, key: str, result: FeatureResult[Any], user_context: UserContext) -> None:
+        if not self._featureUsageCallback:
+            return
+        try:
+            # Snapshot so the logged attributes are exactly the ones used
+            # for the evaluation, even if the caller mutates them afterwards.
+            self._featureUsageCallback(key, result, tracking_user_context(user_context))
+        except Exception:
+            pass
 
     @deprecated("getAllResults is deprecated, use get_all_results instead")
     def getAllResults(self) -> Dict[str, Dict[str, Any]]:
@@ -1504,11 +1523,8 @@ class GrowthBook(object):
                         pass
 
     def run(self, experiment: Experiment[T]) -> Result[T]:
-        # result = self._run(experiment)
         result = run_experiment(experiment=experiment,
-                                evalContext=self._get_eval_context(),
-                                tracking_cb=self._track
-                                )
+                                evalContext=self._get_eval_context())
 
         self._fireSubscriptions(experiment, result)
         return result
@@ -1517,15 +1533,26 @@ class GrowthBook(object):
         self._subscriptions.add(callback)
         return lambda: self._subscriptions.remove(callback)
 
+    def get_deferred_tracking_calls(self) -> List[Dict[str, Any]]:
+        """Exposures buffered by defer_tracking=True, as JSON-ready dicts in
+        the JS SDK's TrackingData shape ({experiment, result, user}) — forward
+        them to a client SDK's setDeferredTrackingCalls. Non-destructive;
+        call clear_deferred_tracking_calls() once they have been handed off.
+
+        When one instance serves many users (set_attributes per request), the
+        buffer spans all of them: read and clear it per request, or use one
+        instance per request, so exposures are never forwarded to the wrong
+        client."""
+        return self._deferred_buffer.get_calls() if self._deferred_buffer else []
+
+    def clear_deferred_tracking_calls(self) -> None:
+        if self._deferred_buffer:
+            self._deferred_buffer.clear()
+
     def _track(self, experiment: Experiment[Any], result: Result[Any], user_context: UserContext) -> None:
         if not self._trackingCallback:
             return None
-        key = (
-            result.hashAttribute
-            + str(result.hashValue)
-            + experiment.key
-            + str(result.variationId)
-        )
+        key = tracking_dedupe_key(experiment, result)
         if not self._tracked.get(key):
             try:
                 # Snapshot so the logged attributes are exactly the ones used

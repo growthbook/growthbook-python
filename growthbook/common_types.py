@@ -1,5 +1,9 @@
 #!/usr/bin/env python
 
+import json
+import logging
+import threading
+from copy import deepcopy
 from dataclasses import dataclass, field, replace
 from typing import (
     TYPE_CHECKING,
@@ -30,6 +34,8 @@ from typing_extensions import Required
 # introspection (pydantic, dacite, ...). plugins.base only imports stdlib at
 # runtime, so this is cycle-free.
 from .plugins.base import PluginLike
+
+logger = logging.getLogger("growthbook")
 
 # Generic feature/experiment value type. Deliberately unbounded: a JSONValue
 # bound would reject TypedDict/dataclass-shaped fallbacks (see JS SDK issue #1729,
@@ -159,7 +165,9 @@ class Experiment(Generic[T]):
             "variations": self.variations,
             "weights": self.weights,
             "active": self.active,
-            "coverage": self.coverage or 1,
+            # None means "no coverage set" and reads as full coverage, but an
+            # explicit 0 must survive serialization (`or` would coerce it to 1).
+            "coverage": self.coverage if self.coverage is not None else 1,
             "condition": self.condition,
             "namespace": self.namespace,
             "force": self.force,
@@ -622,6 +630,23 @@ def snapshot_user_context(user: "UserContext") -> "UserContext":
     )
 
 
+# Identity of one exposure: (hashAttribute, hashValue, experiment key,
+# variation id). Same fields as JS getExperimentDedupeKey / Go
+# TrackingData.DedupeKey, but a tuple instead of a joined string so field
+# values containing a would-be delimiter can never make two distinct
+# exposures collide.
+TrackingDedupeKey = Tuple[str, str, str, str]
+
+
+def tracking_dedupe_key(experiment: "Experiment[Any]", result: "Result[Any]") -> TrackingDedupeKey:
+    return (
+        result.hashAttribute,
+        str(result.hashValue),
+        experiment.key,
+        str(result.variationId),
+    )
+
+
 def tracking_user_context(user: "UserContext") -> "UserContext":
     """Exposure-time snapshot of a user context for tracking and
     feature-usage callbacks (JS SDK: getTrackingUserContext).
@@ -630,6 +655,66 @@ def tracking_user_context(user: "UserContext") -> "UserContext":
     Python's threaded callers make nested mutation of a deferred callback's
     payload a realistic hazard, so this diverges deliberately)."""
     return replace(user, attributes=snapshot_attributes(user.attributes))
+
+
+class TrackingBuffer:
+    """Collector for deferred tracking calls: experiment exposures buffered
+    during evaluation so a server can forward them to a client SDK (which
+    fires them through its own tracking callback — JS setDeferredTrackingCalls
+    / fireDeferredTrackingCalls). Buffering is independent of the tracking
+    callback: when both are wired, the buffer is written first and the
+    callback still fires (Go SDK semantics).
+
+    Entries use the JS SDK's TrackingData shape —
+    ``{"experiment": {...}, "result": {...}, "user": {"attributes", "url"}}``
+    — JSON round-tripped at record time, so nothing the caller mutates
+    afterwards can reach the buffer and every stored entry is guaranteed
+    json.dumps-ready (an exposure carrying a non-JSON value is dropped and
+    logged, never the batch). Deduped by tracking_dedupe_key, first exposure
+    wins, insertion-ordered. Thread-safe: the async client may share one
+    buffer across concurrent evaluations of the same request."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._calls: Dict[TrackingDedupeKey, Dict[str, Any]] = {}
+
+    def record(self, experiment: "Experiment[Any]", result: "Result[Any]", user: "UserContext") -> None:
+        key = tracking_dedupe_key(experiment, result)
+        if key in self._calls:
+            # Unlocked read is GIL-safe; the setdefault below closes the race
+            # (first exposure wins). This only skips building the entry twice.
+            return
+        try:
+            # JSON round-trip at record time (Go SDK: detachTrackingData).
+            # It snapshots — to_dict() aliases nested mutables (variations,
+            # condition, attribute values), so a shallow entry would let later
+            # caller mutations reach the buffer — AND it guarantees the
+            # json.dumps-ready contract per entry, so one exposure carrying a
+            # non-JSON value (datetime, NaN, custom object) is dropped here
+            # with a log instead of poisoning the whole forwarded batch at the
+            # caller's json.dumps. Telemetry must never break evaluation.
+            entry = json.loads(json.dumps({
+                "experiment": experiment.to_dict(),
+                "result": result.to_dict(),
+                "user": {"attributes": user.attributes, "url": user.url},
+            }, allow_nan=False))
+        except Exception:
+            logger.exception("Dropped deferred tracking call that cannot be JSON-serialized")
+            return
+        with self._lock:
+            self._calls.setdefault(key, entry)
+
+    def get_calls(self) -> List[Dict[str, Any]]:
+        """Buffered exposures as detached copies (mutating them cannot corrupt
+        the buffer, which get_calls leaves intact for a later read), ready for
+        json.dumps. Non-destructive; pair with clear()."""
+        with self._lock:
+            snapshot = list(self._calls.values())
+        return deepcopy(snapshot)
+
+    def clear(self) -> None:
+        with self._lock:
+            self._calls.clear()
 
 
 @dataclass
@@ -690,6 +775,24 @@ class EvaluationContext:
     # directly, letting the async client schedule persistence off the event loop.
     # None (the default) preserves the sync client's direct-call behavior.
     save_sticky_bucket_doc: Optional[Callable[[Dict[str, Any]], None]] = None
+    # Client callbacks carried on the context rather than threaded through as
+    # function parameters, so nested evaluations — prerequisites especially —
+    # inherit them automatically (JS SDK: ctx.global.trackingCallback). A
+    # recursive call site that forgets a parameter silently drops telemetry;
+    # a shared context field cannot be forgotten.
+    tracking_cb: Optional[Callable[["Experiment[Any]", "Result[Any]", UserContext], None]] = None
+    callback_subscription: Optional[Callable[["Experiment[Any]", "Result[Any]"], None]] = None
+    feature_usage_cb: Optional[Callable[[str, "FeatureResult[Any]", UserContext], None]] = None
+    # Feature keys already reported through feature_usage_cb during this
+    # evaluation — one usage event per key per top-level eval call, however
+    # many times a prerequisite chain re-visits it. Allocated lazily by
+    # _report_feature_usage: contexts are built on every evaluation, and evals
+    # with no usage callback must not pay for the set.
+    reported_features: Optional[Set[str]] = None
+    # When set, every exposure produced by this evaluation (prerequisites and
+    # passthrough included) is recorded here, before and independent of
+    # tracking_cb.
+    tracking_buffer: Optional[TrackingBuffer] = None
 
 
 # ---------------------------------------------------------------------------

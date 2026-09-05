@@ -3,6 +3,7 @@ import logging
 import math
 import re
 import json
+import warnings
 from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
@@ -580,14 +581,16 @@ def getBucketRanges(
 def _fire_rule_tracks(
     rule_tracks: List[Dict[str, Any]],
     eval_context: EvaluationContext,
-    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]],
 ) -> None:
-    """Fire tracking_cb for each deferred experiment-tracking entry attached to
-    a remote-eval force rule. The proxy server evaluates experiments server-side
-    and emits the resulting (experiment, result) pairs here so the SDK can still
-    drive its tracking pipeline. Mirrors the JS SDK behavior in
+    """Report each pre-evaluated experiment-tracking entry attached to a
+    remote-eval force rule through the context's tracking buffer and tracking
+    callback. The proxy server evaluates experiments server-side and emits the
+    resulting (experiment, result) pairs here so the SDK can still drive its
+    tracking pipeline. Mirrors the JS SDK behavior in
     packages/sdk-js/src/core.ts (`if (rule.tracks) ...`)."""
-    if not rule_tracks or not tracking_cb:
+    if not rule_tracks or (
+        eval_context.tracking_cb is None and eval_context.tracking_buffer is None
+    ):
         return
     for entry in rule_tracks:
         exp_data = entry.get("experiment") or {}
@@ -635,7 +638,7 @@ def _fire_rule_tracks(
                 variationWeights=variation_weights,
                 banditVersion=bandit_version,
             )
-            tracking_cb(experiment, result, eval_context.user)
+            _report_exposure(experiment, result, eval_context)
         except Exception:
             logger.exception("Failed to fire rule.tracks tracking event")
 
@@ -750,17 +753,99 @@ def _build_contextual_bandit_experiment(
     experiment.contextualBandit = cb
 
 
+def _report_exposure(
+    experiment: Experiment[Any],
+    result: Result[Any],
+    evalContext: EvaluationContext,
+) -> None:
+    """Report one experiment exposure: deferred tracking buffer first (it
+    snapshots for itself, so a failing callback can never lose it), then the
+    tracking callback. Buffering is independent of the callback — both fire."""
+    if evalContext.tracking_buffer is not None:
+        evalContext.tracking_buffer.record(experiment, result, evalContext.user)
+    if evalContext.tracking_cb:
+        evalContext.tracking_cb(experiment, result, evalContext.user)
+
+
+def _report_feature_usage(
+    key: str,
+    result: FeatureResult[Any],
+    evalContext: EvaluationContext,
+) -> None:
+    """Fire the context's feature-usage callback, once per feature key per
+    evaluation, however many times a prerequisite chain re-visits it."""
+    cb = evalContext.feature_usage_cb
+    if cb is None:
+        return
+    reported = evalContext.reported_features
+    if reported is None:
+        reported = evalContext.reported_features = set()
+    if key in reported:
+        return
+    reported.add(key)
+    cb(key, result, evalContext.user)
+
+
+def _warn_legacy_callback(name: str) -> None:
+    warnings.warn(
+        f"the {name} argument is deprecated; set EvaluationContext.{name}",
+        DeprecationWarning,
+        stacklevel=4,
+    )
+
+
 def eval_feature(
     key: str,
     evalContext: Optional[EvaluationContext] = None,
     callback_subscription: Optional[Callable[[Experiment[Any], Result[Any]], None]] = None,
-    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None
+    tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None,
 ) -> FeatureResult[Any]:
-    """Core feature evaluation logic as a standalone function"""
+    """Core feature evaluation logic as a standalone function.
+
+    Tracking, subscription, and feature-usage callbacks are read from the
+    EvaluationContext so recursive evaluations (prerequisites) report through
+    them too. The callback keyword arguments are a deprecated,
+    invocation-scoped compatibility shim: they are installed on the context
+    for the duration of this call (so prerequisites inherit them) and the
+    previous context fields are restored afterwards, matching their pre-3.1
+    per-call behavior."""
 
     if evalContext is None:
         raise ValueError("evalContext is required - eval_feature")
-    
+
+    if callback_subscription is None and tracking_cb is None:
+        # Inlined _eval_feature_and_report: this is the hot path, and the
+        # extra call frame is measurable at millions of evals per second.
+        result = _eval_feature(key, evalContext)
+        if evalContext.feature_usage_cb is not None:
+            _report_feature_usage(key, result, evalContext)
+        return result
+
+    previous = (evalContext.callback_subscription, evalContext.tracking_cb)
+    if callback_subscription is not None:
+        _warn_legacy_callback("callback_subscription")
+        evalContext.callback_subscription = callback_subscription
+    if tracking_cb is not None:
+        _warn_legacy_callback("tracking_cb")
+        evalContext.tracking_cb = tracking_cb
+    try:
+        return _eval_feature_and_report(key, evalContext)
+    finally:
+        evalContext.callback_subscription, evalContext.tracking_cb = previous
+
+
+def _eval_feature_and_report(key: str, evalContext: EvaluationContext) -> FeatureResult[Any]:
+    result = _eval_feature(key, evalContext)
+    if evalContext.feature_usage_cb is not None:
+        _report_feature_usage(key, result, evalContext)
+    return result
+
+
+def _eval_feature(
+    key: str,
+    evalContext: EvaluationContext,
+) -> FeatureResult[Any]:
+
     if key not in evalContext.global_ctx.features:
         logger.warning("Unknown feature %s", key)
         return FeatureResult(None, "unknownFeature")
@@ -824,7 +909,7 @@ def eval_feature(
             # remote-eval proxy (no-op when the rule was not produced by remote
             # evaluation).
             if rule.tracks:
-                _fire_rule_tracks(rule.tracks, evalContext, tracking_cb)
+                _fire_rule_tracks(rule.tracks, evalContext)
             return FeatureResult(rule.force, "force", ruleId=rule.id)
 
         # Contextual bandit rules carry their variations under
@@ -863,7 +948,7 @@ def eval_feature(
         if rule.contextualBanditRef:
             _build_contextual_bandit_experiment(exp, rule.contextualBanditRef, key, evalContext)
 
-        result = run_experiment(experiment=exp, featureId=key, evalContext=evalContext, tracking_cb=tracking_cb)
+        result = _run_experiment(exp, key, evalContext)
 
         # Bandit metadata is only meaningful for real hashed exposures; strip
         # it from the experiment for forced/QA/coverage-miss outcomes so it
@@ -871,8 +956,8 @@ def eval_feature(
         if exp.contextualBandit is not None and not (result.hashUsed and result.inExperiment):
             exp.contextualBandit = None
 
-        if callback_subscription:
-            callback_subscription(exp, result)
+        if evalContext.callback_subscription:
+            evalContext.callback_subscription(exp, result)
 
         if not result.inExperiment:
             logger.debug(
@@ -903,7 +988,7 @@ def eval_prereqs(parentConditions: List[Dict[str, Any]], evalContext: Evaluation
         if parent_id is None:
             continue  # Skip if no valid ID
             
-        parentRes = eval_feature(key=parent_id, evalContext=evalContext)
+        parentRes = _eval_feature_and_report(parent_id, evalContext)
 
         if parentRes.source == "cyclicPrerequisite":
             return "cyclic"
@@ -1000,10 +1085,26 @@ def _get_sticky_bucket_variation(
 def run_experiment(experiment: Experiment[Any],
                    featureId: Optional[str] = None,
                    evalContext: Optional[EvaluationContext] = None,
-                   tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None
+                   tracking_cb: Optional[Callable[[Experiment[Any], Result[Any], UserContext], None]] = None,
                 ) -> Result[Any]:
     if evalContext is None:
         raise ValueError("evalContext is required - run_experiment")
+    if tracking_cb is None:
+        return _run_experiment(experiment, featureId, evalContext)
+    # Deprecated, invocation-scoped compatibility shim (see eval_feature).
+    _warn_legacy_callback("tracking_cb")
+    previous = evalContext.tracking_cb
+    evalContext.tracking_cb = tracking_cb
+    try:
+        return _run_experiment(experiment, featureId, evalContext)
+    finally:
+        evalContext.tracking_cb = previous
+
+
+def _run_experiment(experiment: Experiment[Any],
+                    featureId: Optional[str],
+                    evalContext: EvaluationContext,
+                ) -> Result[Any]:
     # 1. If experiment has less than 2 variations, return immediately
     if len(experiment.variations) < 2:
         logger.warning(
@@ -1264,13 +1365,13 @@ def run_experiment(experiment: Experiment[Any],
                         "assignment doc was not persisted"
                     )
 
-    # 14. Fire the tracking callback if set. The clients' _track wrappers
-    # snapshot the user context (tracking_user_context) before invoking the
-    # user's callback, so the logged attributes are exactly the ones used
-    # for bucketing; snapshotting there instead of here keeps evals
-    # allocation-free when no tracking callback is configured.
-    if tracking_cb:
-        tracking_cb(experiment, result, evalContext.user)
+    # 14. Report the exposure (see _report_exposure: buffer first, then the
+    # tracking callback). The clients' _track wrappers snapshot the user
+    # context (tracking_user_context) before invoking the user's callback, so
+    # the logged attributes are exactly the ones used for bucketing;
+    # snapshotting there instead of here keeps evals allocation-free when no
+    # tracking callback is configured.
+    _report_exposure(experiment, result, evalContext)
 
     # 15. Return the result
     logger.debug("Assigned variation %d in experiment %s", assigned, experiment.key)

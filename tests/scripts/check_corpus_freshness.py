@@ -71,6 +71,9 @@ KEYS_TO_DIFF = (
     "inNamespace",
     "getEqualWeights",
     "stickyBucket",
+    # Python-local extension today (reported as extras); once the JS SDK
+    # adopts the section, drift checking picks it up automatically.
+    "trackingCalls",
 )
 
 
