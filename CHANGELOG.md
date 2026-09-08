@@ -5,8 +5,6 @@
 
 ### Bug Fixes
 
-* empty variations or short meta in a rule crashed eval with IndexError ([3192058](https://github.com/growthbook/growthbook-python/commit/31920582b9333b0ce4751780f0a79c085c9f078c))
-* empty variations or short meta in a rule crashed evaluation with IndexError ([9af3be5](https://github.com/growthbook/growthbook-python/commit/9af3be5aa44751ea87a5776bb1ba9c4181e86215))
 * empty variations or short meta in a rule crashed evaluation with IndexError - Merge pull request [#137](https://github.com/growthbook/growthbook-python/issues/137) from growthbook/fix/empty-variations-index-error ([9af3be5](https://github.com/growthbook/growthbook-python/commit/9af3be5aa44751ea87a5776bb1ba9c4181e86215))
 
 ## [3.1.0](https://github.com/growthbook/growthbook-python/compare/v3.0.0...v3.1.0) (2026-09-05)
