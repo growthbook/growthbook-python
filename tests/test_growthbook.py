@@ -413,6 +413,62 @@ def test_handles_weird_experiment_values():
     gb.destroy()
 
 
+def test_empty_variations_rule_serves_default():
+    """A rule with an empty variations list is a malformed payload: the JS SDK
+    reads `undefined` as the clamped variation's value, marks the result not
+    in-experiment, and serves the feature default. Python used to raise an
+    uncaught IndexError instead."""
+    gb = GrowthBook(
+        attributes={"id": "1"},
+        features={"f": {"defaultValue": "x", "rules": [{"key": "exp", "variations": []}]}},
+    )
+    res = gb.eval_feature("f")
+    assert res.value == "x"
+    assert res.source == "defaultValue"
+
+    # Same guard for the public run() API.
+    result = gb.run(Experiment(key="direct", variations=[]))
+    assert result.inExperiment is False
+    assert result.value is None
+    gb.destroy()
+
+
+def test_empty_contextual_variations_rule_serves_default():
+    """Same malformed shape through the contextual bandit door
+    (`contextualVariations: []`)."""
+    gb = GrowthBook(
+        attributes={"id": "1"},
+        features={"f": {"defaultValue": "x", "rules": [{
+            "key": "exp", "seed": "s", "hashVersion": 2, "hashAttribute": "id",
+            "contextualVariations": [], "weights": [], "contextualBanditRef": "cb1",
+        }]}},
+        contextualBandits={"cb1": {"contexts": []}},
+    )
+    res = gb.eval_feature("f")
+    assert res.value == "x"
+    assert res.source == "defaultValue"
+    gb.destroy()
+
+
+def test_meta_shorter_than_variations_does_not_crash():
+    """A meta list shorter than the variations list is a malformed payload:
+    the missing entry reads as absent (result key falls back to the variation
+    id) instead of raising IndexError. Deliberately stricter than the JS SDK,
+    which crashes reading `.key` off undefined here."""
+    gb = GrowthBook(
+        attributes={"id": "1"},
+        features={"m": {"defaultValue": "x", "rules": [{
+            "key": "exp-meta", "variations": ["a", "b"], "weights": [0, 1],
+            "meta": [{"key": "control"}],
+        }]}},
+    )
+    res = gb.eval_feature("m")
+    assert res.value == "b"
+    assert res.experimentResult.variationId == 1
+    assert res.experimentResult.key == "1"
+    gb.destroy()
+
+
 def test_experiment_to_dict_preserves_explicit_zero_coverage():
     # `or 1` would coerce a real coverage of 0 to 1; None still reads as
     # full coverage. Serialized dicts are forwarded (deferred tracking),

@@ -1417,8 +1417,12 @@ def _getExperimentResult(
         variationId = 0
         inExperiment = False
 
+    # A meta list shorter than the variations list is a malformed payload:
+    # treat the missing entry as absent instead of raising. (The JS SDK
+    # crashes here too — reading `.key` off undefined — so this is a
+    # deliberate divergence on invalid payloads only.)
     meta = None
-    if experiment.meta:
+    if experiment.meta and variationId < len(experiment.meta):
         meta = experiment.meta[variationId]
 
     (hashAttribute, hashValue) = _getOrigHashValue(attr=experiment.hashAttribute,
@@ -1436,11 +1440,18 @@ def _getExperimentResult(
         variation_weights = cb["variationWeights"]
         bandit_version = cb.get("banditVersion")
 
+    # The clamp above leaves variationId at 0 even when the variations list is
+    # empty (a malformed payload — e.g. `variations: []` or
+    # `contextualVariations: []`). The JS SDK reads `undefined` there and the
+    # rule degrades to the feature's default; mirror it with None instead of
+    # raising IndexError.
+    value = experiment.variations[variationId] if experiment.variations else None
+
     return Result(
         featureId=featureId,
         inExperiment=inExperiment,
         variationId=variationId,
-        value=experiment.variations[variationId],
+        value=value,
         hashUsed=hashUsed,
         hashAttribute=hashAttribute,
         hashValue=hashValue,
