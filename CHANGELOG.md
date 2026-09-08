@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.1.1](https://github.com/growthbook/growthbook-python/compare/v3.1.0...v3.1.1) (2026-09-08)
+
+
+### Bug Fixes
+
+* empty variations or short meta in a rule crashed evaluation with IndexError - Merge pull request [#137](https://github.com/growthbook/growthbook-python/issues/137) from growthbook/fix/empty-variations-index-error ([9af3be5](https://github.com/growthbook/growthbook-python/commit/9af3be5aa44751ea87a5776bb1ba9c4181e86215))
+
 ## [3.1.0](https://github.com/growthbook/growthbook-python/compare/v3.0.0...v3.1.0) (2026-09-05)
 
 ### Features
