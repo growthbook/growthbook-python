@@ -1070,6 +1070,73 @@ def test_feature_repository_encrypted(mocker):
         feature_repo.load_features("https://cdn.growthbook.io", "sdk-abc123")
 
 
+VIP_FEATURE = {
+    "vip-only": {
+        "defaultValue": False,
+        "rules": [{"condition": {"id": {"$inGroup": "vips"}}, "force": True}],
+    }
+}
+
+
+def test_saved_groups_from_sse_payload_reach_evaluation(mocker):
+    # Regression: assigning self._saved_groups rebinds the instance attribute
+    # while the evaluation context keeps referencing the old dict. On the
+    # streaming path nothing calls set_features() again before evaluation, so
+    # the groups were silently ignored.
+    mocker.patch.object(
+        feature_repo,
+        "_get",
+        return_value=MockHttpResp(200, json.dumps({"features": {}, "savedGroups": {}})),
+    )
+    mocker.patch.object(feature_repo, "startAutoRefresh")
+
+    gb = GrowthBook(
+        api_host="https://cdn.growthbook.io",
+        client_key="sdk-abc123",
+        attributes={"id": "u1"},
+        streaming=True,
+    )
+    gb._dispatch_sse_event(
+        {
+            "type": "features",
+            "data": json.dumps(
+                {"features": VIP_FEATURE, "savedGroups": {"vips": ["u1"]}}
+            ),
+        }
+    )
+
+    assert gb.get_saved_groups() == {"vips": ["u1"]}
+    assert gb.is_on("vip-only") is True
+
+    gb.destroy()
+    feature_repo.clear_cache()
+
+
+def test_saved_groups_update_without_features_takes_effect(mocker):
+    # A payload carrying savedGroups but no features never reaches
+    # set_features(), so the setter has to sync the global context itself.
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(
+        200, json.dumps({"features": VIP_FEATURE, "savedGroups": {"vips": []}})
+    )
+
+    gb = GrowthBook(
+        api_host="https://cdn.growthbook.io",
+        client_key="sdk-abc123",
+        attributes={"id": "u1"},
+    )
+    gb.load_features()
+    assert gb.is_on("vip-only") is False
+
+    # Refresh carrying only savedGroups — set_features() is never called.
+    m.return_value = MockHttpResp(200, json.dumps({"savedGroups": {"vips": ["u1"]}}))
+    gb.load_features(force_refresh=True)
+    assert gb.is_on("vip-only") is True
+
+    gb.destroy()
+    feature_repo.clear_cache()
+
+
 def test_load_features(mocker):
     m = mocker.patch.object(feature_repo, "_get")
     m.return_value = MockHttpResp(

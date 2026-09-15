@@ -1099,7 +1099,7 @@ class GrowthBook(object):
         section writes and publish a snapshot mixing payload generations."""
         with self._payload_lock:
             if "savedGroups" in data:
-                self._saved_groups = data["savedGroups"]
+                self.set_saved_groups(data["savedGroups"])
             if "contextualBandits" in data:
                 self._contextual_bandits = data["contextualBandits"]
             if "features" in data:
@@ -1254,6 +1254,22 @@ class GrowthBook(object):
                 self.refresh_sticky_buckets()
         finally:
             self._is_updating_features = False
+
+    def set_saved_groups(self, saved_groups: Optional[Dict[str, Any]]) -> None:
+        """Replace the saved groups used by `$inGroup` / `$notInGroup`.
+
+        Writes straight through to the global context. Assigning
+        `self._saved_groups` alone is not enough: it rebinds the instance
+        attribute while the evaluation context keeps referencing the previous
+        dict, so a refreshed payload's groups would only take effect on the
+        next set_features() call — which never comes on the streaming and
+        stale-while-revalidate paths, where evaluation does no inline
+        refresh."""
+        self._saved_groups = saved_groups if saved_groups is not None else {}
+        self._global_ctx.saved_groups = self._saved_groups
+
+    def get_saved_groups(self) -> Dict[str, Any]:
+        return self._saved_groups
 
     @deprecated("getFeatures is deprecated, use get_features instead")
     def getFeatures(self) -> Dict[str, Feature]:
