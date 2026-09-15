@@ -1584,3 +1584,101 @@ def test_stale_while_revalidate_cleanup(mocker):
         if feature_repo._refresh_thread:
             feature_repo.stop_background_refresh()
         feature_repo.clear_cache()
+
+
+# --- Feature refresh listeners ----------------------------------------------
+
+def test_feature_refresh_listener_fires_once_per_refresh(mocker):
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": 1}}}))
+
+    seen = []
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
+    gb.add_feature_refresh_listener(lambda payload: seen.append(payload["features"]))
+
+    gb.load_features()
+    assert len(seen) == 1
+
+    # Evaluation refreshes from cache on every call; that must not re-fire.
+    gb.get_feature_value("flag", 0)
+    gb.get_feature_value("flag", 0)
+    assert len(seen) == 1
+
+    m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": 2}}}))
+    gb.load_features(force_refresh=True)
+    assert len(seen) == 2
+    assert seen[1]["flag"]["defaultValue"] == 2
+
+    gb.destroy()
+    feature_repo.clear_cache()
+
+
+def test_feature_refresh_listener_fires_on_sse_payload(mocker):
+    # The streaming path applies features without going through the
+    # repository's callbacks — the case listeners exist for.
+    mocker.patch.object(
+        feature_repo, "_get",
+        return_value=MockHttpResp(200, json.dumps({"features": {}})),
+    )
+    mocker.patch.object(feature_repo, "startAutoRefresh")
+
+    seen = []
+    gb = GrowthBook(
+        api_host="https://cdn.growthbook.io", client_key="sdk-abc123", streaming=True
+    )
+    gb.add_feature_refresh_listener(seen.append)
+
+    gb._dispatch_sse_event({
+        "type": "features",
+        "data": json.dumps({"features": {"flag": {"defaultValue": "live"}}}),
+    })
+
+    assert len(seen) == 1
+    assert gb.get_feature_value("flag", "none") == "live"
+
+    gb.destroy()
+    feature_repo.clear_cache()
+
+
+def test_feature_refresh_listener_sees_applied_payload(mocker):
+    # Evaluating from inside the listener must already see the new definitions.
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": "new"}}}))
+
+    observed = []
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
+    gb.add_feature_refresh_listener(
+        lambda payload: observed.append(gb.get_feature_value("flag", "old"))
+    )
+
+    gb.load_features()
+    assert observed == ["new"]
+
+    gb.destroy()
+    feature_repo.clear_cache()
+
+
+def test_feature_refresh_listener_unsubscribe_and_error_isolation(mocker):
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": 1}}}))
+
+    calls = []
+
+    def boom(payload):
+        raise RuntimeError("listener exploded")
+
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
+    gb.add_feature_refresh_listener(boom)
+    unsubscribe = gb.add_feature_refresh_listener(lambda payload: calls.append(payload))
+
+    # A raising listener is logged, not propagated, and doesn't stop the others.
+    gb.load_features()
+    assert len(calls) == 1
+
+    unsubscribe()
+    m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": 2}}}))
+    gb.load_features(force_refresh=True)
+    assert len(calls) == 1
+
+    gb.destroy()
+    feature_repo.clear_cache()

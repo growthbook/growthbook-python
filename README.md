@@ -289,6 +289,41 @@ client = GrowthBookClient(
 )
 ```
 
+### Feature Refresh Listeners
+
+Both clients can notify your application whenever a new feature payload is
+applied, so you can react to updates instead of polling:
+
+```python
+def on_refresh(payload):
+    log.info("features updated: %d flags", len(payload.get("features", {})))
+
+unsubscribe = gb.add_feature_refresh_listener(on_refresh)
+# ...later
+unsubscribe()
+```
+
+The listener receives the raw payload dict (`features`, `savedGroups`, …) and
+runs *after* it has been applied, so evaluating a feature from inside the
+listener already sees the new definitions. It fires once per refresh — not once
+per evaluation — covering HTTP loads, the stale-while-revalidate background
+worker and streaming (SSE) updates. A listener that raises is logged and
+skipped; it cannot break a refresh.
+
+On the async client the listener may be a plain function or a coroutine
+function:
+
+```python
+async def on_refresh(payload):
+    await cache.invalidate()
+
+unsubscribe = gb_client.add_feature_refresh_listener(on_refresh)
+```
+
+Remote-eval mode emits no events on the async client: payloads there are
+per-user, so there is no client-wide "definitions changed" moment to report.
+The sync client, which is already per-user, does fire them.
+
 ### Concurrency and Thread Safety
 
 The async client is designed to be thread-safe and handle concurrent requests efficiently. You can safely use a single client instance across multiple coroutines. For web applications, you can create a single client instance at startup and share it across requests. Here's an example:

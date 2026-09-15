@@ -1005,6 +1005,12 @@ class GrowthBook(object):
         self._deferred_buffer: Optional[TrackingBuffer] = TrackingBuffer() if defer_tracking else None
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Callable[[Experiment[Any], Result[Any]], None]] = set()
+        self._feature_refresh_listeners: List[Callable[[Dict[str, Any]], None]] = []
+        # Identity of the last payload dispatched to listeners. The cache hands
+        # back the same object on every hit, and evaluation calls load_features()
+        # constantly, so an identity check is what keeps listeners firing once
+        # per actual refresh instead of once per evaluation.
+        self._last_refresh_payload: Optional[Dict[str, Any]] = None
         self._is_updating_features = False
         # Serializes payload writers (set_features/set_payload/refreshes).
         # Re-entrant because _ingest_payload calls set_features while holding
@@ -1085,6 +1091,7 @@ class GrowthBook(object):
         """Callback to handle automatic feature updates from FeatureRepository"""
         if features_data:
             self._ingest_payload(features_data)
+        self._notify_feature_refresh(features_data)
 
     def _ingest_payload(self, data: Dict[str, Any]) -> None:
         """Apply the sections present in a (decrypted) SDK payload.
@@ -1152,6 +1159,12 @@ class GrowthBook(object):
         if response is not None:
             self._ingest_payload(response)
 
+        # In CDN mode the repository already dispatched this exact object via
+        # _on_feature_update; the identity check there makes this a no-op. It
+        # matters in remote-eval mode, where the repository deliberately skips
+        # its global callbacks and this is the only dispatch point.
+        self._notify_feature_refresh(response)
+
     async def load_features_async(self, force_refresh: bool = False) -> None:
         if not self._client_key:
             raise ValueError("Must specify `client_key` to refresh features")
@@ -1171,6 +1184,8 @@ class GrowthBook(object):
         if features is not None:
             self._ingest_payload(features)
 
+        self._notify_feature_refresh(features)
+
     def _features_event_handler(self, features: str) -> None:
         decoded = json.loads(features)
         if not decoded:
@@ -1182,6 +1197,10 @@ class GrowthBook(object):
         if data is not None:
             self._ingest_payload(data)
             feature_repo.save_in_cache(key, data, self._cache_ttl)
+            # The streaming path applies the payload itself and never goes
+            # through the repository's callbacks, so without this listeners
+            # would miss exactly the updates they exist to observe.
+            self._notify_feature_refresh(data)
 
     def _dispatch_sse_event(self, event_data: Dict[str, Any]) -> None:
         event_type = event_data.get('type')
@@ -1254,6 +1273,51 @@ class GrowthBook(object):
                 self.refresh_sticky_buckets()
         finally:
             self._is_updating_features = False
+
+    def add_feature_refresh_listener(
+        self, listener: Callable[[Dict[str, Any]], None]
+    ) -> Callable[[], None]:
+        """Register a callable invoked whenever a new feature payload is applied
+        to this instance, so an app can react to updates without polling.
+
+        The listener receives the raw payload dict (``features``, ``savedGroups``,
+        …). It runs *after* the payload has been applied, so evaluating a feature
+        from inside the listener already sees the new definitions.
+
+        Fires once per refresh — not once per evaluation — for HTTP loads, the
+        stale-while-revalidate background worker and streaming (SSE) updates.
+        A listener that raises is logged and skipped; it can't break a refresh.
+
+        Returns a callable that unregisters the listener."""
+        if listener not in self._feature_refresh_listeners:
+            self._feature_refresh_listeners.append(listener)
+
+        def unsubscribe() -> None:
+            self.remove_feature_refresh_listener(listener)
+
+        return unsubscribe
+
+    def remove_feature_refresh_listener(
+        self, listener: Callable[[Dict[str, Any]], None]
+    ) -> None:
+        if listener in self._feature_refresh_listeners:
+            self._feature_refresh_listeners.remove(listener)
+
+    def _notify_feature_refresh(self, payload: Optional[Dict[str, Any]]) -> None:
+        """Dispatch a payload to the refresh listeners, once per distinct
+        payload object. Call this only after the payload has been applied."""
+        if payload is None or not self._feature_refresh_listeners:
+            self._last_refresh_payload = payload
+            return
+        if payload is self._last_refresh_payload:
+            return
+        self._last_refresh_payload = payload
+
+        for listener in list(self._feature_refresh_listeners):
+            try:
+                listener(payload)
+            except Exception:
+                logger.exception("Error in feature refresh listener")
 
     @deprecated("getFeatures is deprecated, use get_features instead")
     def getFeatures(self) -> Dict[str, Feature]:
@@ -1340,6 +1404,7 @@ class GrowthBook(object):
         # Clear all internal state
         try:
             self._subscriptions.clear()
+            self._feature_refresh_listeners.clear()
             self._tracked.clear()
             if self._deferred_buffer:
                 self._deferred_buffer.clear()

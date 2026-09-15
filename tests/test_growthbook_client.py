@@ -1711,3 +1711,95 @@ async def test_skip_all_experiments_flag():
             
     finally:
         await client.close()
+
+# --- Feature refresh listeners ----------------------------------------------
+
+@pytest.mark.asyncio
+async def test_client_feature_refresh_listener_sync_and_async(mock_options):
+    """Both plain and coroutine listeners fire, on the initial load and on
+    every subsequent refresh."""
+    payload = {"features": {"flag": {"defaultValue": 1}}, "savedGroups": {}}
+    sync_seen, async_seen = [], []
+
+    async def async_listener(data):
+        async_seen.append(data["features"])
+
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=payload), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+
+        client = GrowthBookClient(mock_options)
+        client.add_feature_refresh_listener(lambda data: sync_seen.append(data["features"]))
+        client.add_feature_refresh_listener(async_listener)
+        try:
+            await client.initialize()
+            assert len(sync_seen) == 1 and len(async_seen) == 1
+
+            # A later refresh (e.g. from SSE) goes through the same callback.
+            await client._feature_update_callback(
+                {"features": {"flag": {"defaultValue": 2}}, "savedGroups": {}}
+            )
+            assert len(sync_seen) == 2 and len(async_seen) == 2
+            assert sync_seen[1]["flag"]["defaultValue"] == 2
+        finally:
+            await client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_feature_refresh_listener_can_evaluate(mock_options):
+    """A listener that evaluates a feature must see the new payload and must
+    not deadlock: evaluation takes the same context lock the update holds."""
+    payload = {"features": {"flag": {"defaultValue": "new"}}, "savedGroups": {}}
+    observed = []
+
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=payload), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+
+        client = GrowthBookClient(mock_options)
+
+        async def listener(data):
+            value = await client.get_feature_value("flag", "old", UserContext(attributes={"id": "1"}))
+            observed.append(value)
+
+        client.add_feature_refresh_listener(listener)
+        try:
+            await asyncio.wait_for(client.initialize(), timeout=5)
+            assert observed == ["new"]
+        finally:
+            await client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_feature_refresh_listener_unsubscribe_and_errors(mock_options):
+    payload = {"features": {"flag": {"defaultValue": 1}}, "savedGroups": {}}
+    calls = []
+
+    def boom(data):
+        raise RuntimeError("listener exploded")
+
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=payload), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+
+        client = GrowthBookClient(mock_options)
+        client.add_feature_refresh_listener(boom)
+        unsubscribe = client.add_feature_refresh_listener(lambda data: calls.append(data))
+        try:
+            await client.initialize()
+            assert len(calls) == 1
+
+            unsubscribe()
+            await client._feature_update_callback(payload)
+            assert len(calls) == 1
+        finally:
+            await client.close()
