@@ -138,8 +138,8 @@ class FeatureCache:
         with self._lock:
             return {
                 "features": dict(self._cache['features']),
-                "savedGroups": self._cache['savedGroups'],
-                "contextualBandits": self._cache['contextualBandits']
+                "savedGroups": dict(self._cache['savedGroups']),
+                "contextualBandits": dict(self._cache['contextualBandits'])
             }
 
 class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
