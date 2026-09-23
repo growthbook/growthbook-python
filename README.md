@@ -394,6 +394,40 @@ gb = GrowthBook(
 
 Note: When doing this, you do not need to specify your `api_host` or `client_key` and you don't need to call `gb.load_features()`.
 
+### Saved group references
+
+Both `GrowthBook` and `GrowthBookClient` support `savedGroupReferencesV2` for
+local evaluation. The `savedGroups` payload map can contain legacy ID arrays
+or typed entries:
+
+```json
+{
+  "savedGroups": {
+    "beta": {"type": "list", "attributeKey": "id", "values": ["u1", "u2"]},
+    "power": {"type": "condition", "condition": {"plan": "pro"}}
+  }
+}
+```
+
+A rule references either type with a top-level condition such as
+`{"$savedGroup": {"id": "beta"}}`. For a list group, an optional `attributeKey`
+in the reference overrides the group's attribute. Condition groups evaluate
+against the current attributes and can reference other groups; cyclic
+references return no match. References compose with `$and`, `$or`, `$nor`,
+and `$not`, including in prerequisite conditions (which see the parent's
+`value`, not the user's attributes).
+
+When loading a payload yourself, use `gb.set_payload(payload)` or
+`await client.set_payload(payload)` so the saved groups accompany the features.
+Legacy `$inGroup` and `$notInGroup` conditions accept both bare arrays and typed
+list entries. A missing group still passes `$notInGroup`; a present malformed
+entry, condition group, or unknown group type matches neither legacy operator.
+
+Receiving v2 payloads requires an SDK version registered with the capability
+and an SDK Connection set to **All Saved Groups** under **Pass Saved Groups by
+reference**. Capability registration follows publication of the supporting SDK
+version. This support does not enable v2 for remote-evaluation connections.
+
 ## GrowthBook class
 
 The GrowthBook constructor has the following parameters:
