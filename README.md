@@ -425,8 +425,11 @@ entry, condition group, or unknown group type matches neither legacy operator.
 
 Receiving v2 payloads requires an SDK version registered with the capability
 and an SDK Connection set to **All Saved Groups** under **Pass Saved Groups by
-reference**. Capability registration follows publication of the supporting SDK
-version. This support does not enable v2 for remote-evaluation connections.
+reference**. Before publication, a new version can be registered with
+`prerelease: true` for testing by entering that version manually on the connection.
+Remove the prerelease flag and regenerate `CAPABILITIES.md` when the version is
+published. Remote-evaluation connections require the proxy's JS SDK dependency
+to support v2 before the back end enables the capability for them.
 
 ## GrowthBook class
 

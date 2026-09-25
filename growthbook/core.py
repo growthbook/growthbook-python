@@ -33,8 +33,6 @@ def evalCondition(
     attributes: Dict[str, Any], condition: Dict[str, Any],
     savedGroups: Optional[Dict[str, Any]] = None, visited: Optional[Set[str]] = None,
 ) -> bool:
-    savedGroups = savedGroups if savedGroups is not None else {}
-    visited = visited if visited is not None else set()
     for key, value in condition.items():
         if key == "$or":
             if not evalOr(attributes, value, savedGroups, visited):
@@ -59,18 +57,19 @@ def evalCondition(
     return True
 
 def _eval_saved_group(
-    attributes: Dict[str, Any], reference: Any, saved_groups: Dict[str, Any], visited: Set[str],
+    attributes: Dict[str, Any], reference: Any, saved_groups: Optional[Dict[str, Any]],
+    visited: Optional[Set[str]],
 ) -> bool:
     """Resolve a typed saved group, keeping cycle detection local to this branch."""
     if not isinstance(reference, dict):
         return False
     group_id = reference.get("id")
-    if not isinstance(group_id, str) or group_id in visited:
+    if not isinstance(group_id, str) or (visited is not None and group_id in visited):
         return False
     if "attributeKey" in reference and not isinstance(reference["attributeKey"], str):
         return False
 
-    entry = saved_groups.get(group_id)
+    entry = saved_groups.get(group_id) if saved_groups is not None else None
     if not isinstance(entry, dict):
         return False
 
@@ -85,7 +84,9 @@ def _eval_saved_group(
             condition = entry.get("condition")
             if not isinstance(condition, dict):
                 return False
-            return evalCondition(attributes, condition, saved_groups, visited | {group_id})
+            # Allocate the branch guard only when entering a condition group.
+            next_visited = visited | {group_id} if visited else {group_id}
+            return evalCondition(attributes, condition, saved_groups, next_visited)
     except (TypeError, ValueError, AttributeError, IndexError, RecursionError):
         # Malformed payloads and Python's own stack limit must not escape evaluation.
         return False
@@ -291,7 +292,9 @@ def evalOperatorCondition(
     elif operator in ("$inGroup", "$notInGroup"):
         if not isinstance(conditionValue, str):
             return False
-        values = _saved_group_values(savedGroups, conditionValue)
+        values = savedGroups.get(conditionValue) if savedGroups is not None else None
+        if not isinstance(values, list):
+            values = _saved_group_values(savedGroups, conditionValue)
         if values is None:
             return False
         matches = isIn(values, attributeValue)

@@ -9,6 +9,20 @@ Also in this directory (documented in their own docstrings):
   `GrowthBookClient` with sync/async sticky bucket services. Reports
   throughput, latency percentiles, and event-loop lag.
   Run with `PYTHONPATH=. python3 tests/scripts/benchmark_async_client.py`.
+- `benchmark_saved_groups.py` — sync and async evaluation benchmarks for
+  ordinary conditions, legacy groups, and v2 list/condition groups. Checks
+  results before timing and emits JSON with all samples. Compare the same
+  workload on two checkouts with the same Python environment:
+
+  ```bash
+  python tests/scripts/benchmark_saved_groups.py --sdk-path /path/to/base --legacy-only
+  python tests/scripts/benchmark_saved_groups.py --sdk-path /path/to/change --legacy-only
+  python tests/scripts/benchmark_saved_groups.py  # includes v2 workloads
+  ```
+
+  Run sequentially, alternate checkout order, and repeat before drawing
+  conclusions. `--iterations` and `--rounds` control sample size. These are
+  local CPU measurements, not network or production throughput guarantees.
 - `check_corpus_freshness.py` — cases.json drift check vs the JS SDK
   (runs as its own CI job).
 

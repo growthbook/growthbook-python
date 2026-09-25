@@ -1,14 +1,21 @@
 """Saved group references v2 conformance and Python-specific regressions."""
 
+import asyncio
 import json
+import os
 import sys
+from base64 import b64decode, b64encode
 from copy import deepcopy
 from pathlib import Path
 
 import pytest
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
+from unittest.mock import AsyncMock
 
-from growthbook import Experiment, GrowthBook, GrowthBookClient, Options, UserContext
+from growthbook import Experiment, FeatureRepository, GrowthBook, GrowthBookClient, Options, UserContext, feature_repo
 from growthbook.core import evalCondition
+from growthbook.growthbook_client import EnhancedFeatureRepository
 
 
 CASES = json.loads(Path(__file__).with_name("cases.json").read_text())[
@@ -243,3 +250,97 @@ async def test_switching_payload_formats_preserves_results(attributes, expected)
     finally:
         sync_client.destroy()
         await async_client.close()
+
+
+def _encrypt_section(value, key):
+    """Encode a test payload using the SDK's AES-CBC wire format."""
+    iv = os.urandom(16)
+    padder = padding.PKCS7(128).padder()
+    padded = padder.update(json.dumps(value).encode()) + padder.finalize()
+    encryptor = Cipher(algorithms.AES(b64decode(key)), modes.CBC(iv)).encryptor()
+    ciphertext = encryptor.update(padded) + encryptor.finalize()
+    return b64encode(iv).decode() + "." + b64encode(ciphertext).decode()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("encrypted", [False, True])
+@pytest.mark.parametrize("transport", ["set_payload", "fetch"])
+async def test_both_clients_load_and_refresh_typed_groups(mocker, encrypted, transport):
+    mocker.patch.object(EnhancedFeatureRepository, "_instances", {})
+    key = b64encode(b"0123456789abcdef").decode()
+    payload = {
+        "features": {
+            "flag": {"defaultValue": False, "rules": [{
+                "condition": {"$savedGroup": {"id": "eligible"}}, "force": True,
+            }]},
+            "unsafe": {"defaultValue": False, "rules": [{
+                "condition": {"id": {"$notInGroup": "bad"}}, "force": True,
+            }]},
+        },
+        "savedGroups": {
+            "members": {"type": "list", "attributeKey": "id", "values": ["u1"]},
+            "eligible": {"type": "condition", "condition": {
+                "$and": [{"$savedGroup": {"id": "members"}}, {"plan": "pro"}],
+            }},
+            "bad": None,
+        },
+    }
+    wire = {}
+    sync_fetch = mocker.patch.object(
+        FeatureRepository, "_fetch_and_decode", side_effect=lambda *args: deepcopy(wire),
+    )
+    async_fetch = mocker.patch.object(
+        FeatureRepository, "_fetch_and_decode_async", new_callable=AsyncMock,
+        side_effect=lambda *args: deepcopy(wire),
+    )
+    mocker.patch.object(EnhancedFeatureRepository, "start_feature_refresh", new_callable=AsyncMock)
+    sync_client = GrowthBook(client_key="sdk-saved-sync" if transport == "fetch" else "", decryption_key=key)
+    async_client = GrowthBookClient(Options(client_key="sdk-saved-async" if transport == "fetch" else "", decryption_key=key))
+    users = [{"id": "u1", "plan": "pro"}, {"id": "u2", "plan": "pro"}, {"id": "u1", "plan": "free"}]
+    experiment = Experiment(key="saved-group", variations=[0, 1], condition={"$savedGroup": {"id": "eligible"}})
+
+    async def check_user(attributes, member):
+        user = UserContext(attributes=attributes)
+        expected = attributes["id"] == member and attributes["plan"] == "pro"
+        assert await async_client.is_on("flag", user) is expected
+        assert await async_client.is_on("unsafe", user) is False
+        assert (await async_client.run(experiment, user)).inExperiment is expected
+
+    feature_repo.clear_cache()
+    try:
+        for index, member in enumerate(("u1", "u2")):
+            payload["savedGroups"]["members"]["values"] = [member]
+            wire = ({
+                "encryptedFeatures": _encrypt_section(payload["features"], key),
+                "encryptedSavedGroups": _encrypt_section(payload["savedGroups"], key),
+            } if encrypted else deepcopy(payload))
+            if transport == "set_payload":
+                sync_client.set_payload(deepcopy(wire))
+                await async_client.set_payload(deepcopy(wire))
+            else:
+                sync_client.load_features(force_refresh=True)
+                if index == 0:
+                    assert await async_client.initialize()
+                else:
+                    repo = async_client._features_repository
+                    updated = await repo.load_features_async(
+                        "https://cdn.growthbook.io", "sdk-saved-async", key, force_refresh=True,
+                    )
+                    await repo._handle_feature_update(updated)
+            for attributes in users:
+                expected = attributes["id"] == member and attributes["plan"] == "pro"
+                sync_client.set_attributes(dict(attributes))
+                assert sync_client.is_on("flag") is expected
+                assert sync_client.is_on("unsafe") is False
+                assert sync_client.run(experiment).inExperiment is expected
+            await asyncio.gather(*(check_user(dict(attributes), member) for _ in range(10) for attributes in users))
+        if transport == "fetch":
+            assert sync_fetch.call_count == 2
+            assert async_fetch.await_count == 2
+        else:
+            sync_fetch.assert_not_called()
+            async_fetch.assert_not_called()
+    finally:
+        sync_client.destroy()
+        await async_client.close()
+        feature_repo.clear_cache()

@@ -183,11 +183,15 @@ Run benchmarks from the repository root with the virtual environment active:
 ```bash
 python tests/scripts/benchmark_eval_overhead.py 100000
 python tests/scripts/benchmark_async_client.py
+python tests/scripts/benchmark_saved_groups.py
 ```
 
 The first measures sync evaluation overhead; the second measures async
 throughput, latency, and event-loop lag with simulated sticky bucket services.
-Neither needs external services. Include before/after results in the PR when
+The third measures ordinary and saved-group conditions through both clients;
+use `--sdk-path /path/to/checkout --legacy-only` to compare existing workloads
+before and after a change. None needs external services. Include before/after
+results in the PR when
 changing evaluation performance or concurrency behavior, using the same Python
 version, machine, and workload for both runs.
 
