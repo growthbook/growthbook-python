@@ -191,6 +191,43 @@ def test_cycle_longer_than_python_stack_fails_closed():
     assert not evalCondition({}, {"$savedGroup": {"id": "0"}}, groups)
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("condition", [
+    {"$savedGroup": {"id": "0"}},
+    {"$not": {"$savedGroup": {"id": "0"}}},
+    {"$and": [{"$savedGroup": {"id": "0"}}]},
+    {"$or": [{"$savedGroup": {"id": "0"}}, {}]},
+    {"$nor": [{"$savedGroup": {"id": "0"}}]},
+    {"items": {"$elemMatch": {"marker": True, "$savedGroup": {"id": "0"}}}},
+    {"items": {"$not": {"$elemMatch": {"marker": True, "$savedGroup": {"id": "0"}}}}},
+], ids=["reference", "not", "and", "or", "nor", "elemMatch", "value-not"])
+async def test_recursion_overflow_rejects_the_entire_rule(condition):
+    count = sys.getrecursionlimit() + 50
+    groups = {str(i): {"type": "condition", "condition": {"$savedGroup": {"id": str(i + 1)}}}
+              for i in range(count)}
+    groups[str(count)] = {"type": "condition", "condition": {}}
+    attributes = {"id": "u1", "items": [{"marker": True}]}
+    payload = {"savedGroups": groups, "features": {"flag": {
+        "defaultValue": True, "rules": [{"condition": condition, "force": True}, {"force": False}],
+    }}}
+    experiment = Experiment(key="deep", variations=[0, 1], condition=condition)
+    sync_client = GrowthBook(attributes=dict(attributes))
+    async_client = GrowthBookClient(Options())
+    try:
+        sync_client.set_payload(payload)
+        await async_client.set_payload(payload)
+        user = UserContext(attributes=attributes)
+        assert evalCondition(attributes, condition, groups) is False
+        assert sync_client.is_on("flag") is False
+        assert await async_client.is_on("flag", user) is False
+        assert sync_client.run(experiment).inExperiment is False
+        assert (await async_client.run(experiment, user)).inExperiment is False
+        assert evalCondition(attributes, {"$or": [{}, condition]}, groups) is True
+    finally:
+        sync_client.destroy()
+        await async_client.close()
+
+
 @pytest.mark.parametrize("marker", ["__sgInvalid__", "__sgUnknown__", "__sgCycle__", "__sgMaxDepth__"])
 def test_error_markers_keep_boolean_semantics(marker):
     condition = {marker: "g"}
@@ -213,6 +250,22 @@ def test_array_membership_handles_unhashable_attributes():
     assert evalCondition(attributes, {"id": {"$inGroup": "g"}}, groups)
     assert not evalCondition(attributes, {"id": {"$notInGroup": "g"}}, groups)
     assert evalCondition(attributes, {"$savedGroup": {"id": "g"}}, groups)
+
+
+@pytest.mark.parametrize("value", [{"id": "u1"}, ["u1"]])
+@pytest.mark.parametrize("primitive_match", [False, True])
+def test_container_membership_does_not_use_structural_equality(value, primitive_match):
+    attributes = {"id": [deepcopy(value), "u1"]}
+    values = [deepcopy(value), "u1" if primitive_match else "u2"]
+    for entry in [values, {"type": "list", "attributeKey": "id", "values": values}]:
+        groups = {"g": entry}
+        for operator, expected in [("$in", primitive_match), ("$nin", not primitive_match)]:
+            assert evalCondition(attributes, {"id": {operator: values}}) is expected
+        assert evalCondition(attributes, {"id": {"$inGroup": "g"}}, groups) is primitive_match
+        assert evalCondition(attributes, {"id": {"$notInGroup": "g"}}, groups) is (not primitive_match)
+        if isinstance(entry, dict):
+            assert evalCondition(attributes, {"$savedGroup": {"id": "g"}}, groups) is primitive_match
+
 
 
 @pytest.mark.asyncio

@@ -33,6 +33,18 @@ def evalCondition(
     attributes: Dict[str, Any], condition: Dict[str, Any],
     savedGroups: Optional[Dict[str, Any]] = None, visited: Optional[Set[str]] = None,
 ) -> bool:
+    try:
+        return _eval_condition(attributes, condition, savedGroups, visited)
+    except RecursionError:
+        # Fail the entire condition so $not cannot turn a stack overflow into a match.
+        return False
+
+
+def _eval_condition(
+    attributes: Dict[str, Any], condition: Dict[str, Any],
+    savedGroups: Optional[Dict[str, Any]], visited: Optional[Set[str]],
+) -> bool:
+    """Evaluate recursively, leaving stack overflow handling to the outer caller."""
     for key, value in condition.items():
         if key == "$or":
             if not evalOr(attributes, value, savedGroups, visited):
@@ -44,7 +56,7 @@ def evalCondition(
             if not evalAnd(attributes, value, savedGroups, visited):
                 return False
         elif key == "$not":
-            if evalCondition(attributes, value, savedGroups, visited):
+            if _eval_condition(attributes, value, savedGroups, visited):
                 return False
         elif key == "$savedGroup":
             if not _eval_saved_group(attributes, value, savedGroups, visited):
@@ -86,9 +98,9 @@ def _eval_saved_group(
                 return False
             # Allocate the branch guard only when entering a condition group.
             next_visited = visited | {group_id} if visited else {group_id}
-            return evalCondition(attributes, condition, saved_groups, next_visited)
-    except (TypeError, ValueError, AttributeError, IndexError, RecursionError):
-        # Malformed payloads and Python's own stack limit must not escape evaluation.
+            return _eval_condition(attributes, condition, saved_groups, next_visited)
+    except (TypeError, ValueError, AttributeError, IndexError):
+        # Malformed payloads must not escape evaluation.
         return False
     return False
 
@@ -115,7 +127,7 @@ def evalOr(
         return True
 
     for condition in conditions:
-        if evalCondition(attributes, condition, savedGroups, visited):
+        if _eval_condition(attributes, condition, savedGroups, visited):
             return True
     return False
 
@@ -125,7 +137,7 @@ def evalAnd(
     visited: Optional[Set[str]] = None,
 ) -> bool:
     for condition in conditions:
-        if not evalCondition(attributes, condition, savedGroups, visited):
+        if not _eval_condition(attributes, condition, savedGroups, visited):
             return False
     return True
 
@@ -190,7 +202,7 @@ def elemMatch(
             if evalConditionValue(condition, item, savedGroups, visited=visited):
                 return True
         else:
-            if evalCondition(item, condition, savedGroups, visited):
+            if _eval_condition(item, condition, savedGroups, visited):
                 return True
 
     return False
@@ -423,7 +435,8 @@ def isIn(conditionValue: List[Any], attributeValue: Any, insensitive: bool = Fal
             return bool(set(conditionValue) & set(attributeValue))
         except TypeError:
             # JSON arrays may contain objects or arrays, which cannot be hashed.
-            return any(value in conditionValue for value in attributeValue)
+            return any(_js_strict_equal(value, expected)
+                       for value in attributeValue for expected in conditionValue)
     return attributeValue in conditionValue
 
 def isInAll(
