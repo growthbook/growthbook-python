@@ -409,27 +409,15 @@ or typed entries:
 }
 ```
 
-A rule references either type with a top-level condition such as
-`{"$savedGroup": {"id": "beta"}}`. For a list group, an optional `attributeKey`
-in the reference overrides the group's attribute. Condition groups evaluate
-against the current attributes and can reference other groups; cyclic
-references return no match. References compose with `$and`, `$or`, `$nor`,
-and `$not`, including in prerequisite conditions (which see the parent's
-`value`, not the user's attributes).
+A rule references either type with `{"$savedGroup": {"id": "beta"}}`. List
+references can override `attributeKey`; condition groups can reference other
+groups, with cycle detection. Legacy `$inGroup` and `$notInGroup` also accept
+typed list entries.
 
 When loading a payload yourself, use `gb.set_payload(payload)` or
-`await client.set_payload(payload)` so the saved groups accompany the features.
-Legacy `$inGroup` and `$notInGroup` conditions accept both bare arrays and typed
-list entries. A missing group still passes `$notInGroup`; a present malformed
-entry, condition group, or unknown group type matches neither legacy operator.
-
-Receiving v2 payloads requires an SDK version registered with the capability
-and an SDK Connection set to **All Saved Groups** under **Pass Saved Groups by
-reference**. Before publication, a new version can be registered with
-`prerelease: true` for testing by entering that version manually on the connection.
-Remove the prerelease flag and regenerate `CAPABILITIES.md` when the version is
-published. Remote-evaluation connections require the proxy's JS SDK dependency
-to support v2 before the back end enables the capability for them.
+`await client.set_payload(payload)` to load both features and saved groups.
+Receiving v2 payloads requires a registered SDK version with this capability
+and **All Saved Groups** under the SDK Connection's **Pass Saved Groups by reference**.
 
 ## GrowthBook class
 
