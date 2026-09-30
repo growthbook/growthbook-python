@@ -115,6 +115,51 @@ def test_malformed_entries_fail_closed(entry):
     assert evalCondition(attributes, {"id": {"$notInGroup": "missing"}}, groups) is True
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid", [{"$or": 5}, {"$not": None}, {"id": {"": True}}])
+async def test_condition_errors_fail_closed_under_negation(invalid):
+    groups = {"bad": {"type": "condition", "condition": invalid}}
+    sync_client = GrowthBook(attributes={"id": "u1"})
+    async_client = GrowthBookClient(Options())
+    try:
+        for target in (invalid, {"$savedGroup": {"id": "bad"}}):
+            condition = {"$not": target}
+            payload = {"savedGroups": groups, "features": {"flag": {
+                "defaultValue": False, "rules": [{"condition": condition, "force": True}],
+            }}}
+            sync_client.set_payload(payload)
+            await async_client.set_payload(payload)
+            assert not evalCondition({"id": "u1"}, condition, groups)
+            assert not sync_client.is_on("flag")
+            assert not await async_client.is_on("flag", UserContext(attributes={"id": "u1"}))
+    finally:
+        sync_client.destroy()
+        await async_client.close()
+
+
+@pytest.mark.parametrize("as_array", [False, True])
+@pytest.mark.parametrize("attribute, values, expected", [
+    (True, [1], False), (1, [True], False),
+    (False, [0], False), (0, [False], False),
+    (True, [1.0], False), (1.0, [True], False),
+    (True, [True], True), (False, [False], True),
+    (1, [1.0], True), (0, [0.0], True),
+    (True, [1, True], True), (1, [True, 1], True),
+    (False, [0, False], True), (0, [False, 0], True),
+])
+def test_membership_distinguishes_booleans_from_numbers(as_array, attribute, values, expected):
+    attributes = {"id": [attribute] if as_array else attribute}
+    for operator in ("$in", "$ini", "$nin", "$nini"):
+        result = not expected if operator in ("$nin", "$nini") else expected
+        assert evalCondition(attributes, {"id": {operator: values}}) is result
+    for entry in (values, {"type": "list", "attributeKey": "id", "values": values}):
+        groups = {"g": entry}
+        assert evalCondition(attributes, {"id": {"$inGroup": "g"}}, groups) is expected
+        assert evalCondition(attributes, {"id": {"$notInGroup": "g"}}, groups) is (not expected)
+        if isinstance(entry, dict):
+            assert evalCondition(attributes, {"$savedGroup": {"id": "g"}}, groups) is expected
+
+
 @pytest.mark.parametrize("groups", [None, {}])
 def test_legacy_operators_without_saved_groups(groups):
     assert evalCondition({"id": "u1"}, {"id": {"$inGroup": "missing"}}, groups) is False

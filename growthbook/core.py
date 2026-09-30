@@ -35,8 +35,8 @@ def evalCondition(
 ) -> bool:
     try:
         return _eval_condition(attributes, condition, savedGroups, visited)
-    except RecursionError:
-        # Fail the entire condition so $not cannot turn a stack overflow into a match.
+    except (TypeError, ValueError, AttributeError, IndexError, RecursionError):
+        # Fail the entire condition so $not cannot turn an evaluation error into a match.
         return False
 
 
@@ -44,7 +44,7 @@ def _eval_condition(
     attributes: Dict[str, Any], condition: Dict[str, Any],
     savedGroups: Optional[Dict[str, Any]], visited: Optional[Set[str]],
 ) -> bool:
-    """Evaluate recursively, leaving stack overflow handling to the outer caller."""
+    """Evaluate recursively, leaving evaluation error handling to the outer caller."""
     for key, value in condition.items():
         if key == "$or":
             if not evalOr(attributes, value, savedGroups, visited):
@@ -85,23 +85,19 @@ def _eval_saved_group(
     if not isinstance(entry, dict):
         return False
 
-    try:
-        if entry.get("type") == "list":
-            key = reference.get("attributeKey", entry.get("attributeKey"))
-            values = entry.get("values")
-            if not isinstance(key, str) or not isinstance(values, list):
-                return False
-            return isIn(values, getPath(attributes, key))
-        if entry.get("type") == "condition":
-            condition = entry.get("condition")
-            if not isinstance(condition, dict):
-                return False
-            # Allocate the branch guard only when entering a condition group.
-            next_visited = visited | {group_id} if visited else {group_id}
-            return _eval_condition(attributes, condition, saved_groups, next_visited)
-    except (TypeError, ValueError, AttributeError, IndexError):
-        # Malformed payloads must not escape evaluation.
-        return False
+    if entry.get("type") == "list":
+        key = reference.get("attributeKey", entry.get("attributeKey"))
+        values = entry.get("values")
+        if not isinstance(key, str) or not isinstance(values, list):
+            return False
+        return isIn(values, getPath(attributes, key))
+    if entry.get("type") == "condition":
+        condition = entry.get("condition")
+        if not isinstance(condition, dict):
+            return False
+        # Allocate the branch guard only when entering a condition group.
+        next_visited = visited | {group_id} if visited else {group_id}
+        return _eval_condition(attributes, condition, saved_groups, next_visited)
     return False
 
 
@@ -423,21 +419,45 @@ def isIn(conditionValue: List[Any], attributeValue: Any, insensitive: bool = Fal
         # Do an intersection if attribute is an array (insensitive)
         if isinstance(attributeValue, list):
             return any(
-                case_fold(el) == case_fold(exp)
+                case_fold(el) == case_fold(exp) and isinstance(el, bool) == isinstance(exp, bool)
                 for el in attributeValue
                 for exp in conditionValue
             )
-        return any(case_fold(attributeValue) == case_fold(exp) for exp in conditionValue)
+        return any(
+            case_fold(attributeValue) == case_fold(exp)
+            and isinstance(attributeValue, bool) == isinstance(exp, bool)
+            for exp in conditionValue
+        )
     
-    # Case-sensitive behavior (original)
     if isinstance(attributeValue, list):
         try:
-            return bool(set(conditionValue) & set(attributeValue))
+            matches = set(conditionValue) & set(attributeValue)
+            # Python collapses booleans with 0/1; any other match is unambiguous.
+            if not matches or matches.difference((0, 1)):
+                return bool(matches)
+            return any(_contains_boolean_or_number(conditionValue, value)
+                       for value in attributeValue if value == 0 or value == 1)
         except TypeError:
             # JSON arrays may contain objects or arrays, which cannot be hashed.
-            return any(_js_strict_equal(value, expected)
-                       for value in attributeValue for expected in conditionValue)
+            pass
+        return any(_js_strict_equal(value, expected)
+                   for value in attributeValue for expected in conditionValue)
+    if attributeValue == 0 or attributeValue == 1:
+        return _contains_boolean_or_number(conditionValue, attributeValue)
     return attributeValue in conditionValue
+
+
+def _contains_boolean_or_number(values: List[Any], value: Any) -> bool:
+    """Find 0/1 or False/True without Python's boolean/number equality aliasing."""
+    start = 0
+    while True:
+        try:
+            index = values.index(value, start)
+        except ValueError:
+            return False
+        if isinstance(values[index], bool) == isinstance(value, bool):
+            return True
+        start = index + 1
 
 def isInAll(
     conditionValue: List[Any], attributeValue: Any, savedGroups: Optional[Dict[str, Any]],

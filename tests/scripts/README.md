@@ -11,7 +11,14 @@ Also in this directory (documented in their own docstrings):
   Run with `PYTHONPATH=. python3 tests/scripts/benchmark_async_client.py`.
 - `benchmark_saved_groups.py` — sync/async condition and saved-group benchmarks.
   Run `python3 tests/scripts/benchmark_saved_groups.py`; use `--help` for options.
-  See the [comparison results and commands](../../docs/benchmarks/saved-group-references-v2.md).
+  Compare checkouts using the same Python environment:
+
+  ```bash
+  python tests/scripts/benchmark_saved_groups.py --sdk-path /path/to/base --legacy-only
+  python tests/scripts/benchmark_saved_groups.py --sdk-path /path/to/change --legacy-only
+  ```
+
+  Run sequentially, alternate checkout order, and repeat. Keep results in the PR description.
 - `check_corpus_freshness.py` — cases.json drift check vs the JS SDK
   (runs as its own CI job).
 
