@@ -55,7 +55,7 @@ DEFAULT_JS_URL = (
     "packages/sdk-js/test/cases.json"
 )
 
-# Top-level keys to diff. Other keys in cases.json (specVersion, decrypt
+# Suite paths to diff. Other keys in cases.json (specVersion, decrypt
 # binary blobs, urlRedirect which Python doesn't yet wire) are skipped
 # either because they're scalar metadata or because the divergence is
 # tracked separately.
@@ -71,6 +71,9 @@ KEYS_TO_DIFF = (
     "inNamespace",
     "getEqualWeights",
     "stickyBucket",
+    "savedGroupReferencesV2.evalCondition",
+    "savedGroupReferencesV2.feature",
+    "savedGroupReferencesV2.run",
     # Python-local extension today (reported as extras); once the JS SDK
     # adopts the section, drift checking picks it up automatically.
     "trackingCalls",
@@ -191,10 +194,8 @@ def _diff(
     drift_skip = skip.get("drift", {})
 
     for key in KEYS_TO_DIFF:
-        js_list = js_cases.get(key, [])
-        py_list = py_cases.get(key, [])
-        if not isinstance(js_list, list) or not isinstance(py_list, list):
-            continue
+        js_list = _section_cases(js_cases, key)
+        py_list = _section_cases(py_cases, key)
 
         js_grouped = _case_signatures_grouped(js_list)
         py_grouped = _case_signatures_grouped(py_list)
@@ -236,6 +237,16 @@ def _diff(
         skipped_drift[key] = [n for n in drift if n in key_drift_skip]
 
     return actionable_missing, skipped_missing, extras, actionable_drift, skipped_drift
+
+
+def _section_cases(corpus: dict, key: str) -> list:
+    """Read a suite, including capability suites nested under a top-level key."""
+    section = corpus
+    for part in key.split("."):
+        if not isinstance(section, dict):
+            return []
+        section = section.get(part, [])
+    return section if isinstance(section, list) else []
 
 
 def _spec_versions(js_cases: dict, py_cases: dict) -> Tuple[str, str]:
