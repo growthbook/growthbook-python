@@ -99,7 +99,9 @@ class CacheEntry(object):
         self.ttl = ttl
         self.expires = time() + ttl
 
-    def update(self, value: Dict[str, Any]) -> None:
+    def update(self, value: Dict[str, Any], ttl: Optional[int] = None) -> None:
+        if ttl is not None:
+            self.ttl = ttl
         self.value = value
         self.expires = time() + self.ttl
 
@@ -117,8 +119,7 @@ class InMemoryFeatureCache(AbstractFeatureCache):
 
     def set(self, key: str, value: Dict[str, Any], ttl: int) -> None:
         if key in self.cache:
-            self.cache[key].ttl = ttl
-            self.cache[key].update(value)
+            self.cache[key].update(value, ttl)
         else:
             self.cache[key] = CacheEntry(value, ttl)
 
