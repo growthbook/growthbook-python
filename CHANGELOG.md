@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.0](https://github.com/growthbook/growthbook-python/compare/v3.1.1...v3.2.0) (2026-10-02)
+
+
+### Features
+
+* support saved group references v2 ([#143](https://github.com/growthbook/growthbook-python/issues/143)) ([6f07c49](https://github.com/growthbook/growthbook-python/commit/6f07c49f007e393d125984e3032153ec1767af8f))
+
 ## [3.1.1](https://github.com/growthbook/growthbook-python/compare/v3.1.0...v3.1.1) (2026-09-08)
 
 
