@@ -1,3 +1,4 @@
+import inspect
 import json
 import logging
 import threading
@@ -140,7 +141,11 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
     def initialize(self, gb_instance: "GrowthBookInstance") -> None:
         """Initialize plugin with a GrowthBook instance."""
         try:
-            self._client_key = getattr(gb_instance, "_client_key", "") or ""
+            self._client_key = (
+                getattr(gb_instance, "_client_key", "")
+                or getattr(getattr(gb_instance, "options", None), "client_key", "")
+                or ""
+            )
 
             if self.track_experiment_viewed:
                 self._setup_experiment_tracking(gb_instance)
@@ -216,7 +221,16 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
             self._track_feature_evaluated(key, result, gb_instance)
             return result
 
-        gb_instance.eval_feature = eval_feature_wrapper
+        if inspect.iscoroutinefunction(original_eval_feature):
+            async def async_eval_feature_wrapper(key: str, *args: Any, **kwargs: Any) -> Any:
+                result = await original_eval_feature(key, *args, **kwargs)
+                user_context = kwargs.get("user_context") or (args[0] if args else None)
+                self._track_feature_evaluated(key, result, gb_instance, user_context)
+                return result
+
+            gb_instance.eval_feature = async_eval_feature_wrapper
+        else:
+            gb_instance.eval_feature = eval_feature_wrapper
 
     def _track_experiment_viewed(
         self, experiment: Any, result: Any, user_context: Any = None
@@ -257,9 +271,15 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
         except Exception as e:
             self.logger.error("Error tracking experiment: %s", e)
 
-    def _track_feature_evaluated(self, feature_key: str, result: Any, gb_instance: Any) -> None:
+    def _track_feature_evaluated(
+        self, feature_key: str, result: Any, gb_instance: Any, user_context: Any = None
+    ) -> None:
         try:
-            attrs: Dict[str, Any] = getattr(gb_instance, "_attributes", {}) or {}
+            attrs: Dict[str, Any] = (
+                getattr(user_context, "attributes", None)
+                or getattr(gb_instance, "_attributes", {})
+                or {}
+            )
             props: Dict[str, Any] = {
                 "feature_key": feature_key,
                 "feature_value": result.value,
@@ -277,7 +297,7 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
                 event_name="$$feature_evaluated",
                 properties=props,
                 attributes=attrs,
-                url=getattr(gb_instance, "_url", ""),
+                url=getattr(user_context, "url", None) or getattr(gb_instance, "_url", "") or "",
                 sdk_version=self._get_sdk_version(),
             )
             self._add_event_to_batch(payload)
