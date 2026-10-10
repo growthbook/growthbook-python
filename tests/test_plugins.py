@@ -739,3 +739,45 @@ async def test_tracking_plugin_sends_async_client_events(keyword_context):
             assert all(body["device_id"] == "async-user" for body in bodies)
         finally:
             await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("keyword_context", [False, True])
+async def test_async_tracking_freezes_context_before_evaluation_await(keyword_context):
+    from growthbook.common_types import Options, UserContext
+    from growthbook.growthbook_client import GrowthBookClient
+
+    plugin = growthbook_tracking_plugin(batch_size=100, batch_timeout=600)
+    client = GrowthBookClient(Options(client_key="sdk-key", tracking_plugins=[plugin]))
+    entered = asyncio.Event()
+    resume = asyncio.Event()
+    original_create_context = client.create_evaluation_context
+
+    async def paused_context(*args, **kwargs):
+        context = await original_create_context(*args, **kwargs)
+        entered.set()
+        await resume.wait()
+        return context
+
+    try:
+        await client.set_features({"test": {"defaultValue": True}})
+        user = UserContext(attributes={"id": "original", "nested": {"value": "before"}}, url="https://original.example")
+        with patch.object(client, "create_evaluation_context", side_effect=paused_context):
+            task = asyncio.create_task(
+                client.eval_feature("test", user_context=user) if keyword_context else client.eval_feature("test", user)
+            )
+            await entered.wait()
+            user.attributes["id"] = "changed"
+            user.attributes["nested"]["value"] = "after"
+            user.url = "https://changed.example"
+            resume.set()
+            assert (await task).value is True
+        event = plugin._event_batch[0]
+        assert event["device_id"] == "original"
+        assert event["context_json"]["nested"] == {"value": "before"}
+        assert event["url"] == "https://original.example"
+    finally:
+        # Discard the captured event so cleanup cannot send it to the network.
+        with plugin._batch_lock:
+            plugin._event_batch.clear()
+        await client.close()

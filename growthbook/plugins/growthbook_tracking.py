@@ -223,8 +223,12 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
 
         if inspect.iscoroutinefunction(original_eval_feature):
             async def async_eval_feature_wrapper(key: str, *args: Any, **kwargs: Any) -> Any:
-                result = await original_eval_feature(key, *args, **kwargs)
                 user_context = kwargs.get("user_context") or (args[0] if args else None)
+                if user_context is not None:
+                    from ..common_types import tracking_user_context
+
+                    user_context = tracking_user_context(user_context)
+                result = await original_eval_feature(key, *args, **kwargs)
                 self._track_feature_evaluated(key, result, gb_instance, user_context)
                 return result
 
