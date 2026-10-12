@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.1](https://github.com/growthbook/growthbook-python/compare/v3.2.0...v3.2.1) (2026-10-12)
+
+
+### Bug Fixes
+
+* send tracking plugin events from the async GrowthBookClient ([#147](https://github.com/growthbook/growthbook-python/issues/147)) ([aed5f43](https://github.com/growthbook/growthbook-python/commit/aed5f433d8110d0aef539af1198f9a3f8e1ba089))
+
 ## [3.2.0](https://github.com/growthbook/growthbook-python/compare/v3.1.1...v3.2.0) (2026-10-02)
 
 
