@@ -272,6 +272,73 @@ async def root(user_id: str):
     return {"new_ui": show_new_ui}
 ```
 
+### User-Scoped Instances
+
+Passing the same `UserContext` to every call gets tedious once evaluation
+happens across several layers, and passing the *wrong* one is a silent
+correctness bug. `create_scoped_instance()` returns a lightweight per-request
+handle whose evaluation methods take no context argument:
+
+```python
+from growthbook import GrowthBookClient, Options, UserContext
+
+@app.get("/")
+async def root(user_id: str):
+    gb = gb_client.create_scoped_instance(UserContext(attributes={"id": user_id}))
+
+    show_new_ui = await gb.is_on("new-ui")
+    color = await gb.get_feature_value("button-color", "blue")
+    return {"new_ui": show_new_ui, "color": color}
+```
+
+Every call delegates back to the shared client, so feature refresh, experiment
+subscriptions and the remote-eval cache are reused rather than forked. The
+handle holds no evaluation state — creating and discarding one per request is
+cheap.
+
+It also owns this user's state:
+
+```python
+gb = gb_client.create_scoped_instance()
+
+gb.set_attributes({"id": "123", "plan": "free"})
+gb.update_attributes({"plan": "pro"})       # shallow merge, keeps "id"
+gb.set_url("https://example.com/pricing")
+gb.set_forced_variations({"my-experiment": 1})
+
+# Per-user tracking, overriding Options.on_experiment_viewed for this user only.
+# Same contract as that option: invoked by keyword, and may be async.
+def log_exposure(*, experiment, result, user_context):
+    ...
+
+gb.set_tracking_callback(log_exposure)
+
+if await gb.is_on("pro-feature"):
+    ...
+```
+
+Available on the handle: `eval_feature`, `is_on`, `is_off`,
+`get_feature_value`, `run`, `log_event`, `preload_remote_eval`, plus the
+setters above and `get_attributes()` / `user_context`.
+
+The evaluation methods also take the same `tracking_buffer` keyword as their
+client counterparts, so [deferred tracking](#deferred-tracking) works per
+request:
+
+```python
+buffer = TrackingBuffer()
+await gb.is_on("pro-feature", tracking_buffer=buffer)
+return {"trackingCalls": buffer.get_calls()}
+```
+
+The context is bound by reference, not copied — the setters write back to the
+object you passed in. Scope one handle to one user: the same rule as above
+applies, since the bound context also accumulates sticky bucket assignments.
+
+`set_forced_features()` is only honored in remote-eval mode, where the values
+ship to the proxy in the eval payload; local evaluation ignores them. Use
+`set_forced_variations()` to steer local evaluation.
+
 ### Real-time Feature Updates
 
 The async client supports real-time feature updates using Server-Sent Events:

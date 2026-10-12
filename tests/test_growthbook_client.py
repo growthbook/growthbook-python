@@ -20,7 +20,7 @@ import json
 import threading
 from typing import Any, Dict, Optional
 
-from growthbook.common_types import Experiment, Options
+from growthbook.common_types import Experiment, Options, TrackingBuffer
 from growthbook.growthbook_client import (
     GrowthBookClient,
     UserContext,
@@ -1711,3 +1711,239 @@ async def test_skip_all_experiments_flag():
             
     finally:
         await client.close()
+
+# --- User-scoped instances --------------------------------------------------
+
+SCOPED_FEATURES = {
+    "pro-only": {
+        "defaultValue": False,
+        "rules": [{"condition": {"plan": "pro"}, "force": True}],
+    },
+    "exp-feature": {
+        "defaultValue": "default",
+        "rules": [
+            {
+                "key": "scoped-exp",
+                "variations": ["control", "treatment"],
+                "weights": [0.5, 0.5],
+                "meta": [{"key": "0"}, {"key": "1"}],
+            }
+        ],
+    },
+}
+
+
+@pytest_asyncio.fixture
+async def scoped_client(mock_options):
+    """An initialized client backed by SCOPED_FEATURES, no network."""
+    payload = {"features": SCOPED_FEATURES, "savedGroups": {}}
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=payload), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+        client = GrowthBookClient(mock_options)
+        await client.initialize()
+        try:
+            yield client
+        finally:
+            await client.close()
+
+
+@pytest.mark.asyncio
+async def test_scoped_instance_evaluates_without_context(scoped_client):
+    """Every evaluation method mirrors the client's, minus the ctx argument."""
+    ctx = UserContext(attributes={"id": "1", "plan": "pro"})
+    scoped = scoped_client.create_scoped_instance(ctx)
+
+    assert await scoped.is_on("pro-only") is True
+    assert await scoped.is_off("pro-only") is False
+    assert await scoped.get_feature_value("pro-only", "fallback") is True
+    assert (await scoped.eval_feature("pro-only")).source == "force"
+
+    result = await scoped.run(Experiment(key="direct", variations=["a", "b"]))
+    assert result.value in ("a", "b")
+
+    # Same answers as going through the client with an explicit context.
+    assert await scoped.is_on("pro-only") == await scoped_client.is_on("pro-only", ctx)
+
+
+@pytest.mark.asyncio
+async def test_scoped_instances_are_independent(scoped_client):
+    """Two handles off one client must not see each other's state."""
+    a = scoped_client.create_scoped_instance(UserContext(attributes={"id": "1", "plan": "pro"}))
+    b = scoped_client.create_scoped_instance(UserContext(attributes={"id": "2", "plan": "free"}))
+
+    assert await a.is_on("pro-only") is True
+    assert await b.is_on("pro-only") is False
+
+    b.update_attributes({"plan": "pro"})
+    assert await b.is_on("pro-only") is True
+    # a's context untouched
+    assert a.get_attributes() == {"id": "1", "plan": "pro"}
+
+
+@pytest.mark.asyncio
+async def test_scoped_instance_state_setters(scoped_client):
+    scoped = scoped_client.create_scoped_instance()
+    assert scoped.get_attributes() == {}
+
+    scoped.set_attributes({"id": "1", "plan": "free"})
+    assert await scoped.is_on("pro-only") is False
+
+    # update_attributes merges; None is a no-op
+    scoped.update_attributes({"plan": "pro"})
+    scoped.update_attributes(None)
+    assert scoped.get_attributes() == {"id": "1", "plan": "pro"}
+    assert await scoped.is_on("pro-only") is True
+
+    # set_attributes replaces wholesale
+    scoped.set_attributes({"id": "1"})
+    assert scoped.get_attributes() == {"id": "1"}
+
+    scoped.set_url("https://example.com/pricing")
+    assert scoped.user_context.url == "https://example.com/pricing"
+
+    scoped.set_forced_variations({"scoped-exp": 1})
+    result = await scoped.eval_feature("exp-feature")
+    assert result.value == "treatment"
+
+    scoped.set_forced_features({"pro-only": True})
+    assert scoped.user_context.forced_features == {"pro-only": True}
+
+
+@pytest.mark.asyncio
+async def test_scoped_instance_binds_context_by_reference(scoped_client):
+    ctx = UserContext(attributes={"id": "1", "plan": "free"})
+    scoped = scoped_client.create_scoped_instance(ctx)
+
+    # Caller mutates its own context object -> the handle sees it.
+    ctx.attributes = {"id": "1", "plan": "pro"}
+    assert await scoped.is_on("pro-only") is True
+
+    # ...and the handle's setters write back to the caller's object.
+    scoped.set_url("https://example.com")
+    assert ctx.url == "https://example.com"
+    assert scoped.user_context is ctx
+
+
+@pytest.mark.asyncio
+async def test_per_user_tracking_callback_overrides_client_level(mock_options):
+    """A per-user callback wins; users without one fall back to the client's."""
+    client_level = []
+
+    # Tracking callbacks are invoked by keyword, so the parameter names are
+    # part of the contract (same as Options.on_experiment_viewed).
+    def client_tracker(*, experiment, result, user_context):
+        client_level.append((user_context.attributes["id"], experiment.key))
+
+    mock_options.on_experiment_viewed = client_tracker
+
+    payload = {"features": SCOPED_FEATURES, "savedGroups": {}}
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=payload), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+        client = GrowthBookClient(mock_options)
+        await client.initialize()
+        try:
+            per_user = []
+
+            def user_tracker(*, experiment, result, user_context):
+                per_user.append((user_context.attributes["id"], experiment.key))
+
+            scoped = client.create_scoped_instance(UserContext(attributes={"id": "1"}))
+            scoped.set_tracking_callback(user_tracker)
+            await scoped.eval_feature("exp-feature")
+
+            assert per_user == [("1", "scoped-exp")]
+            assert client_level == []
+
+            # A second user with no per-user callback uses the client-level one.
+            other = client.create_scoped_instance(UserContext(attributes={"id": "2"}))
+            await other.eval_feature("exp-feature")
+            assert client_level == [("2", "scoped-exp")]
+
+            # Clearing it falls back too.
+            scoped.set_tracking_callback(None)
+            third = client.create_scoped_instance(UserContext(attributes={"id": "3"}))
+            await third.eval_feature("exp-feature")
+            assert [uid for uid, _ in client_level] == ["2", "3"]
+        finally:
+            await client.close()
+
+
+@pytest.mark.asyncio
+async def test_per_user_tracking_callback_without_client_level_callback(scoped_client):
+    """The per-user callback is a tracking consumer in its own right.
+
+    Evaluation contexts only wire tracking_cb when a consumer exists (core
+    then skips rule.tracks hydration). A client with no
+    Options.on_experiment_viewed must still wire it once a scoped handle
+    carries its own callback, or the exposure is silently dropped."""
+    assert scoped_client.options.on_experiment_viewed is None
+
+    seen = []
+
+    def user_tracker(*, experiment, result, user_context):
+        seen.append((user_context.attributes["id"], experiment.key))
+
+    scoped = scoped_client.create_scoped_instance(UserContext(attributes={"id": "1"}))
+    scoped.set_tracking_callback(user_tracker)
+    await scoped.eval_feature("exp-feature")
+
+    assert seen == [("1", "scoped-exp")]
+
+
+@pytest.mark.asyncio
+async def test_per_user_async_tracking_callback(scoped_client):
+    """A per-user callback may be async, like the client-level one."""
+    seen = []
+
+    async def user_tracker(*, experiment, result, user_context):
+        seen.append((user_context.attributes["id"], experiment.key))
+
+    scoped = scoped_client.create_scoped_instance(UserContext(attributes={"id": "1"}))
+    scoped.set_tracking_callback(user_tracker)
+    await scoped.eval_feature("exp-feature")
+
+    # Scheduled fire-and-forget; close() drains the pending callback tasks.
+    await asyncio.sleep(0)
+    assert seen == [("1", "scoped-exp")]
+
+
+@pytest.mark.asyncio
+async def test_scoped_eval_records_into_tracking_buffer(scoped_client):
+    """The deferred-tracking buffer stays a per-call argument on the handle."""
+    buffer = TrackingBuffer()
+    scoped = scoped_client.create_scoped_instance(UserContext(attributes={"id": "1"}))
+
+    await scoped.eval_feature("exp-feature", tracking_buffer=buffer)
+
+    calls = buffer.get_calls()
+    assert len(calls) == 1
+    assert calls[0]["experiment"]["key"] == "scoped-exp"
+
+
+@pytest.mark.asyncio
+async def test_scoped_log_event_passes_bound_context(scoped_client):
+    seen = []
+    scoped_client.set_event_logger(lambda name, props, ctx: seen.append((name, props, ctx)))
+
+    scoped = scoped_client.create_scoped_instance(UserContext(attributes={"id": "1"}))
+    await scoped.log_event("button_clicked", {"label": "buy"})
+
+    assert len(seen) == 1
+    name, props, ctx = seen[0]
+    assert (name, props) == ("button_clicked", {"label": "buy"})
+    assert ctx is scoped.user_context
+
+
+@pytest.mark.asyncio
+async def test_scoped_preload_remote_eval_is_noop_without_remote_eval(scoped_client):
+    # Guards the delegation path: no remote_eval configured -> returns quietly.
+    scoped = scoped_client.create_scoped_instance(UserContext(attributes={"id": "1"}))
+    assert await scoped.preload_remote_eval() is None
