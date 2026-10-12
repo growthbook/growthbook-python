@@ -227,7 +227,12 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
                 if user_context is not None:
                     from ..common_types import tracking_user_context
 
-                    user_context = tracking_user_context(user_context)
+                    try:
+                        user_context = tracking_user_context(user_context)
+                    except Exception as e:
+                        # Tracking never breaks evaluation: fall back to the live
+                        # context, weaker against the race but the call succeeds.
+                        self.logger.debug("could not snapshot user context: %s", e)
                 result = await original_eval_feature(key, *args, **kwargs)
                 self._track_feature_evaluated(key, result, gb_instance, user_context)
                 return result

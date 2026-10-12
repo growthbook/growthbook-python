@@ -781,3 +781,24 @@ async def test_async_tracking_freezes_context_before_evaluation_await(keyword_co
         with plugin._batch_lock:
             plugin._event_batch.clear()
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_async_tracking_snapshot_failure_does_not_break_evaluation():
+    from types import SimpleNamespace
+    from growthbook.common_types import Options
+    from growthbook.growthbook_client import GrowthBookClient
+
+    plugin = growthbook_tracking_plugin(batch_size=100, batch_timeout=600)
+    client = GrowthBookClient(Options(client_key="sdk-key", tracking_plugins=[plugin]))
+    try:
+        await client.set_features({"test": {"defaultValue": True}})
+        # Not a dataclass: dataclasses.replace() raises TypeError in the snapshot.
+        user = SimpleNamespace(attributes={"id": "duck"}, url="https://duck.example")
+        with patch.object(client, "create_evaluation_context", wraps=client.create_evaluation_context):
+            result = await client.eval_feature("test", user_context=user)
+        assert result.value is True
+    finally:
+        with plugin._batch_lock:
+            plugin._event_batch.clear()
+        await client.close()
