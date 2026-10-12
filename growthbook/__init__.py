@@ -109,5 +109,5 @@ __all__ = [
 ]
 
 # x-release-please-start-version
-__version__ = "3.2.0"
+__version__ = "3.2.1"
 # x-release-please-end
