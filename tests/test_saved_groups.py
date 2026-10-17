@@ -116,7 +116,7 @@ def test_malformed_entries_fail_closed(entry):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("invalid", [{"$or": 5}, {"$not": None}, {"id": {"": True}}])
+@pytest.mark.parametrize("invalid", [{"$or": 5}, {"$not": None}, {"$and": None}])
 async def test_condition_errors_fail_closed_under_negation(invalid):
     groups = {"bad": {"type": "condition", "condition": invalid}}
     sync_client = GrowthBook(attributes={"id": "u1"})

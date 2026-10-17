@@ -138,10 +138,7 @@ def evalAnd(
     return True
 
 def isOperatorObject(obj: Any) -> bool:
-    for key in obj.keys():
-        if key[0] != "$":
-            return False
-    return True
+    return bool(obj) and all(key.startswith("$") for key in obj.keys())
 
 def _is_numeric(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
