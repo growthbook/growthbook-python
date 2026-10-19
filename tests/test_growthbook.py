@@ -248,6 +248,77 @@ def test_stickyBucket(stickyBucket_data):
     gb.destroy()
 
 
+def test_update_attributes_merges_into_existing():
+    gb = GrowthBook(attributes={"id": "1", "country": "US"})
+
+    gb.update_attributes({"plan": "pro"})
+
+    assert gb.get_attributes() == {"id": "1", "country": "US", "plan": "pro"}
+    gb.destroy()
+
+
+def test_update_attributes_overwrites_and_preserves():
+    gb = GrowthBook(attributes={"id": "1", "country": "US"})
+
+    gb.update_attributes({"country": "FR"})
+
+    assert gb.get_attributes() == {"id": "1", "country": "FR"}
+    gb.destroy()
+
+
+def test_update_attributes_merges_not_replaces():
+    # Unlike set_attributes, update_attributes keeps untouched keys.
+    gb = GrowthBook(attributes={"plan": "pro"})
+
+    gb.update_attributes({"id": "2"})
+
+    assert gb.get_attributes() == {"plan": "pro", "id": "2"}
+    gb.destroy()
+
+
+def test_update_attributes_none_is_noop():
+    gb = GrowthBook(attributes={"id": "1", "country": "US"})
+
+    gb.update_attributes(None)
+
+    assert gb.get_attributes() == {"id": "1", "country": "US"}
+    gb.destroy()
+
+
+def test_update_attributes_empty_does_no_work(mocker):
+    # The merged map is equal either way, so asserting on attributes alone
+    # can't see this: an empty update used to delegate to set_attributes,
+    # which refreshes sticky buckets and — in remote-eval mode — issues a
+    # blocking refetch, costing a request whenever the cache had expired.
+    gb = GrowthBook(attributes={"id": "1"})
+    refresh = mocker.patch.object(gb, "refresh_sticky_buckets")
+    load = mocker.patch.object(gb, "load_features")
+
+    gb.update_attributes(None)
+    gb.update_attributes({})
+
+    assert refresh.call_count == 0
+    assert load.call_count == 0
+    assert gb.get_attributes() == {"id": "1"}
+
+    # A real update still delegates.
+    gb.update_attributes({"plan": "pro"})
+    assert refresh.call_count == 1
+    assert gb.get_attributes() == {"id": "1", "plan": "pro"}
+
+    gb.destroy()
+
+
+def test_update_attributes_stores_none_value():
+    # A None value is stored, not treated as key removal (parity with Ruby/C#).
+    gb = GrowthBook(attributes={"id": "1"})
+
+    gb.update_attributes({"plan": None})
+
+    assert gb.get_attributes() == {"id": "1", "plan": None}
+    gb.destroy()
+
+
 def getTrackingMock(gb: GrowthBook):
     calls = []
 
