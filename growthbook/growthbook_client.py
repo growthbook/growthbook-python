@@ -655,6 +655,13 @@ class GrowthBookClient:
         self._subscriptions: Set[Callable[[Experiment[Any], Result[Any]], Union[None, Awaitable[None]]]] = set()
         self._subscriptions_lock = threading.Lock()
 
+        # Feature refresh listeners (sync or async callables)
+        self._feature_refresh_listeners: List[Callable[[Dict[str, Any]], Any]] = []
+        self._feature_refresh_lock = threading.Lock()
+        # Serializes apply-then-notify so concurrent refreshes can't reorder
+        # listener events; see _feature_update_callback.
+        self._refresh_order_lock = asyncio.Lock()
+
         # Per-attributes-key inflight sticky bucket fetches. Concurrent evals
         # with identical attributes coalesce onto one service fetch; distinct
         # attributes fetch in parallel. No cross-eval result cache by default
@@ -804,6 +811,54 @@ class GrowthBookClient:
                 with self._subscriptions_lock:
                     self._subscriptions.discard(callback)
             return unsubscribe
+
+    def add_feature_refresh_listener(
+        self, listener: Callable[[Dict[str, Any]], Any]
+    ) -> Callable[[], None]:
+        """Register a callable invoked whenever a new feature payload is applied
+        to this client, so an app can react to updates without polling.
+
+        The listener receives the raw payload dict (``features``, ``savedGroups``,
+        …) and may be a plain function or a coroutine function; coroutines are
+        awaited. It runs *after* the payload has been applied to the global
+        context, so evaluating a feature from inside the listener already sees
+        the new definitions. A listener that raises is logged and skipped.
+
+        Fires on the initial load and on every refresh, whether driven by
+        streaming (SSE) or HTTP polling. Remote-eval mode emits no events:
+        payloads there are per-user, so there is no client-wide "definitions
+        changed" moment to report.
+
+        Returns a callable that unregisters the listener."""
+        with self._feature_refresh_lock:
+            if listener not in self._feature_refresh_listeners:
+                self._feature_refresh_listeners.append(listener)
+
+        def unsubscribe() -> None:
+            self.remove_feature_refresh_listener(listener)
+
+        return unsubscribe
+
+    def remove_feature_refresh_listener(
+        self, listener: Callable[[Dict[str, Any]], Any]
+    ) -> None:
+        with self._feature_refresh_lock:
+            if listener in self._feature_refresh_listeners:
+                self._feature_refresh_listeners.remove(listener)
+
+    async def _notify_feature_refresh(self, payload: Dict[str, Any]) -> None:
+        """Dispatch a payload to the refresh listeners. Call only after the
+        payload has been applied to the global context."""
+        with self._feature_refresh_lock:
+            listeners = list(self._feature_refresh_listeners)
+
+        for listener in listeners:
+            try:
+                result = listener(payload)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception:
+                logger.exception("Error in feature refresh listener")
 
     def _fire_subscriptions(self, experiment: Experiment[Any], result: Result[Any]) -> None:
         """Thread-safe subscription notifications"""
@@ -1180,6 +1235,18 @@ class GrowthBookClient:
             logger.warning("Warning: Received empty features data")
             return
 
+        # Apply and notify as one unit. The ordering lock is distinct from the
+        # context lock on purpose: evaluation takes that one, so notifying
+        # under it would deadlock any listener that evaluates. Evaluation
+        # never takes this one, so holding it across the pair is safe — and it
+        # is what keeps two overlapping refreshes from notifying out of
+        # application order (apply A, apply+notify B, notify A).
+        async with self._refresh_order_lock:
+            await self._apply_payload(features_data)
+            # Outside the context lock, which _apply_payload has released.
+            await self._notify_feature_refresh(features_data)
+
+    async def _apply_payload(self, features_data: Dict[str, Any]) -> None:
         async with self._context_lock:  # serializes concurrent updaters only
             prev = self._global_context
             # Mirror JS setPayload: sections absent from the update carry
@@ -1406,6 +1473,11 @@ class GrowthBookClient:
             self._tracked.clear()
         with self._subscriptions_lock:
             self._subscriptions.clear()
+        # Listener closures capture application objects; a closed client that
+        # kept them would hold those alive and, if reinitialized, fire
+        # callbacks registered in its previous lifecycle.
+        with self._feature_refresh_lock:
+            self._feature_refresh_listeners.clear()
         # Clear context
         async with self._context_lock:
             self._global_context = None
