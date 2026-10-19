@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.2.2](https://github.com/growthbook/growthbook-python/compare/v3.2.1...v3.2.2) (2026-10-19)
+
+
+### Bug Fixes
+
+* match literal empty objects and empty-string keys correctly ([#150](https://github.com/growthbook/growthbook-python/issues/150)) ([b4d8793](https://github.com/growthbook/growthbook-python/commit/b4d87935d445813d20410138cb674fb77c52ef91))
+
 ## [3.2.1](https://github.com/growthbook/growthbook-python/compare/v3.2.0...v3.2.1) (2026-10-12)
 
 
