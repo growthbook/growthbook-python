@@ -4014,14 +4014,14 @@
       false
     ],
     [
-      "[D6b] equality (no operator) integer vs string is strict",
+      "[D6b] equality (no operator) number condition coerces numeric string (JS value * 1)",
       {
         "x": 5
       },
       {
         "x": "5"
       },
-      false
+      true
     ],
     [
       "[D6] $eq boolean vs integer is strict (different types)",

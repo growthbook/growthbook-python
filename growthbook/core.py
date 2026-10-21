@@ -4,6 +4,7 @@ import math
 import re
 import json
 import warnings
+from decimal import Decimal
 from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
@@ -143,6 +144,116 @@ def isOperatorObject(obj: Any) -> bool:
 def _is_numeric(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
 
+_JS_WHITESPACE = " \t\n\v\f\r\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006" \
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+_re_js_decimal = re.compile(r"[+-]?(?:Infinity|(?:[0-9]+\.?[0-9]*|\.[0-9]+)(?:[eE][+-]?[0-9]+)?)")
+_re_js_radix = re.compile(r"0([xX][0-9a-fA-F]+|[oO][0-7]+|[bB][01]+)")
+_re_js_index_key = re.compile(r"0|[1-9][0-9]*")
+
+
+def _js_number_string(value: Any) -> str:
+    """JS String(number): shortest round-trip digits, exponent only outside 1e-7..1e21."""
+    if isinstance(value, int) and abs(value) < 2 ** 53:
+        return str(value)
+    try:
+        value = float(value)
+    except OverflowError:
+        return "Infinity" if value > 0 else "-Infinity"
+    if math.isnan(value):
+        return "NaN"
+    if math.isinf(value):
+        return "Infinity" if value > 0 else "-Infinity"
+    if value == 0:
+        return "0"
+    sign = "-" if value < 0 else ""
+    # repr() gives the same shortest round-trip digits as JS
+    _, digit_tuple, exp = Decimal(repr(abs(value))).normalize().as_tuple()
+    digits = "".join(map(str, digit_tuple))
+    k = len(digits)
+    point = k + int(exp)
+    if k <= point <= 21:
+        return sign + digits + "0" * (point - k)
+    if 0 < point <= 21:
+        return sign + digits[:point] + "." + digits[point:]
+    if -6 < point <= 0:
+        return sign + "0." + "0" * -point + digits
+    e = point - 1
+    exponent = "e" + ("+" if e >= 0 else "-") + str(abs(e))
+    return sign + digits[0] + ("." + digits[1:] if k > 1 else "") + exponent
+
+
+def _js_string(value: Any) -> str:
+    """JS String(value), as used by `value + ""`."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if _is_numeric(value):
+        return _js_number_string(value)
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return ",".join("" if v is None else _js_string(v) for v in value)
+    if isinstance(value, dict):
+        return "[object Object]"
+    return str(value)
+
+
+def _js_number(value: Any) -> Any:
+    """JS Number(value), as used by `value * 1`; NaN never equals anything."""
+    if value is None:
+        return 0
+    if isinstance(value, bool):
+        return int(value)
+    if _is_numeric(value):
+        return value
+    if isinstance(value, (list, tuple)):
+        value = _js_string(value)
+    if not isinstance(value, str):
+        return math.nan
+    value = value.strip(_JS_WHITESPACE)
+    if value == "":
+        return 0
+    if _re_js_decimal.fullmatch(value):
+        return float(value.replace("Infinity", "inf"))
+    if _re_js_radix.fullmatch(value):
+        return int(value, 0)
+    return math.nan
+
+
+def _js_truthy(value: Any) -> bool:
+    if value is None or value is False:
+        return False
+    if _is_numeric(value):
+        return not (value == 0 or (isinstance(value, float) and math.isnan(value)))
+    if isinstance(value, str):
+        return value != ""
+    return True
+
+
+def _js_json(value: Any) -> str:
+    """JS JSON.stringify(value) for JSON-shaped values (object keys in JS property order)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if _is_numeric(value):
+        if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+            return "null"
+        return _js_number_string(value)
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, (list, tuple)):
+        return "[" + ",".join(_js_json(v) for v in value) + "]"
+    if isinstance(value, dict):
+        keys = [str(k) for k in value.keys()]
+        index_keys = sorted((k for k in keys if _re_js_index_key.fullmatch(k) and int(k) < 2 ** 32 - 1), key=int)
+        ordered = index_keys + [k for k in keys if k not in index_keys]
+        items = {str(k): v for k, v in value.items()}
+        return "{" + ",".join(json.dumps(k, ensure_ascii=False) + ":" + _js_json(items[k]) for k in ordered) + "}"
+    raise TypeError("Value is not JSON serializable")
+
+
 def getType(attributeValue: Any) -> str:
     if attributeValue is None:
         return "null"
@@ -177,11 +288,19 @@ def evalConditionValue(
                 return False
         return True
     
-    # Simple equality comparison with optional case-insensitivity
-    if insensitive and isinstance(conditionValue, str) and isinstance(attributeValue, str):
-        return conditionValue.lower() == attributeValue.lower()
-    
-    return bool(conditionValue == attributeValue)
+    # Plain equality coerces the attribute to the condition's type, like JS
+    if isinstance(conditionValue, str):
+        if insensitive:
+            return _js_string(attributeValue).lower() == conditionValue.lower()
+        return _js_string(attributeValue) == conditionValue
+    if isinstance(conditionValue, bool):
+        return attributeValue is not None and _js_truthy(attributeValue) == conditionValue
+    if _is_numeric(conditionValue):
+        return bool(_js_number(attributeValue) == conditionValue)
+    if conditionValue is None:
+        return attributeValue is None
+
+    return _js_json(attributeValue) == _js_json(conditionValue)
 
 def elemMatch(
     condition: Dict[str, Any], attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
