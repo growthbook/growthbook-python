@@ -176,12 +176,28 @@ def evalConditionValue(
             if not evalOperatorCondition(key, attributeValue, value, savedGroups, visited):
                 return False
         return True
-    
-    # Simple equality comparison with optional case-insensitivity
+
+    # Simple equality comparison: values of different types never match
     if insensitive and isinstance(conditionValue, str) and isinstance(attributeValue, str):
         return conditionValue.lower() == attributeValue.lower()
-    
-    return bool(conditionValue == attributeValue)
+
+    return _strict_deep_equal(conditionValue, attributeValue)
+
+def _strict_deep_equal(a: Any, b: Any) -> bool:
+    """Structural equality where every nested value must have the same JSON type,
+    so True never equals 1 the way it does with Python's ==."""
+    ta = getType(a)
+    if ta != getType(b):
+        return False
+    if ta == "array":
+        return len(a) == len(b) and all(_strict_deep_equal(x, y) for x, y in zip(a, b))
+    if ta == "object":
+        return a.keys() == b.keys() and all(_strict_deep_equal(a[k], b[k]) for k in a)
+    return bool(a == b)
+
+def _is_orderable(a: Any, b: Any) -> bool:
+    """Only two numbers or two strings can be ordered. Booleans are not ordered."""
+    return (_is_numeric(a) and _is_numeric(b)) or (isinstance(a, str) and isinstance(b, str))
 
 def elemMatch(
     condition: Dict[str, Any], attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
@@ -210,18 +226,6 @@ def compare(val1: Any, val2: Any) -> int:
     if isinstance(val2, float) and math.isnan(val2):
         raise ValueError("NaN")
 
-    if _is_numeric(val1) and not _is_numeric(val2):
-        if (val2 is None):
-            val2 = 0
-        else:
-            val2 = float(val2)
-
-    if _is_numeric(val2) and not _is_numeric(val1):
-        if (val1 is None):
-            val1 = 0
-        else:
-            val1 = float(val1)
-
     if val1 > val2:
         return 1
     if val1 < val2:
@@ -229,9 +233,7 @@ def compare(val1: Any, val2: Any) -> int:
     return 0
 
 def _js_strict_equal(a: Any, b: Any) -> bool:
-    """JS === semantics for $eq/$ne. Routed here instead of compare() so
-    $lt/$gt keep their JS-aligned coercion via compare() while $eq stays
-    strict.
+    """JS === semantics for $eq/$ne.
 
     Three buckets:
 
@@ -262,38 +264,37 @@ def evalOperatorCondition(
         return _js_strict_equal(attributeValue, conditionValue)
     elif operator == "$ne":
         return not _js_strict_equal(attributeValue, conditionValue)
-    elif operator == "$lt":
-        try:
-            return compare(attributeValue, conditionValue) < 0
-        except Exception:
+    elif operator in ("$lt", "$lte", "$gt", "$gte"):
+        if not _is_orderable(attributeValue, conditionValue):
             return False
-    elif operator == "$lte":
         try:
-            return compare(attributeValue, conditionValue) <= 0
-        except Exception:
+            result = compare(attributeValue, conditionValue)
+        except ValueError:
             return False
-    elif operator == "$gt":
-        try:
-            return compare(attributeValue, conditionValue) > 0
-        except Exception:
-            return False
-    elif operator == "$gte":
-        try:
-            return compare(attributeValue, conditionValue) >= 0
-        except Exception:
-            return False
-    elif operator == "$veq":
-        return paddedVersionString(attributeValue) == paddedVersionString(conditionValue)
-    elif operator == "$vne":
-        return paddedVersionString(attributeValue) != paddedVersionString(conditionValue)
-    elif operator == "$vlt":
-        return paddedVersionString(attributeValue) < paddedVersionString(conditionValue)
-    elif operator == "$vlte":
-        return paddedVersionString(attributeValue) <= paddedVersionString(conditionValue)
-    elif operator == "$vgt":
-        return paddedVersionString(attributeValue) > paddedVersionString(conditionValue)
-    elif operator == "$vgte":
-        return paddedVersionString(attributeValue) >= paddedVersionString(conditionValue)
+        if operator == "$lt":
+            return result < 0
+        if operator == "$lte":
+            return result <= 0
+        if operator == "$gt":
+            return result > 0
+        return result >= 0
+    elif operator in ("$veq", "$vne", "$vlt", "$vlte", "$vgt", "$vgte"):
+        # $vne is the negation of $veq, so it matches on a type mismatch
+        if not _is_orderable(attributeValue, conditionValue):
+            return operator == "$vne"
+        actual = paddedVersionString(attributeValue)
+        expected = paddedVersionString(conditionValue)
+        if operator == "$veq":
+            return actual == expected
+        if operator == "$vne":
+            return actual != expected
+        if operator == "$vlt":
+            return actual < expected
+        if operator == "$vlte":
+            return actual <= expected
+        if operator == "$vgt":
+            return actual > expected
+        return actual >= expected
     elif operator in ("$inGroup", "$notInGroup"):
         if not isinstance(conditionValue, str):
             return False
