@@ -417,13 +417,12 @@ def isIn(conditionValue: List[Any], attributeValue: Any, insensitive: bool = Fal
         # Do an intersection if attribute is an array (insensitive)
         if isinstance(attributeValue, list):
             return any(
-                case_fold(el) == case_fold(exp) and isinstance(el, bool) == isinstance(exp, bool)
+                _js_strict_equal(case_fold(el), case_fold(exp))
                 for el in attributeValue
                 for exp in conditionValue
             )
         return any(
-            case_fold(attributeValue) == case_fold(exp)
-            and isinstance(attributeValue, bool) == isinstance(exp, bool)
+            _js_strict_equal(case_fold(attributeValue), case_fold(exp))
             for exp in conditionValue
         )
     
@@ -440,6 +439,9 @@ def isIn(conditionValue: List[Any], attributeValue: Any, insensitive: bool = Fal
             pass
         return any(_js_strict_equal(value, expected)
                    for value in attributeValue for expected in conditionValue)
+    # JS includes() compares objects by reference, so an object never matches
+    if isinstance(attributeValue, dict):
+        return False
     if attributeValue == 0 or attributeValue == 1:
         return _contains_boolean_or_number(conditionValue, attributeValue)
     return attributeValue in conditionValue

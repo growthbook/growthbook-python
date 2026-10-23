@@ -2837,6 +2837,332 @@
       true
     ],
     [
+      "[D16] nested equality - [true] vs [1] attribute",
+      {
+        "x": [
+          true
+        ]
+      },
+      {
+        "x": [
+          1
+        ]
+      },
+      false
+    ],
+    [
+      "[D16] nested equality - [1] vs [true] attribute",
+      {
+        "x": [
+          1
+        ]
+      },
+      {
+        "x": [
+          true
+        ]
+      },
+      false
+    ],
+    [
+      "[D16] nested equality - {a: false} vs {a: 0} attribute",
+      {
+        "x": {
+          "a": false
+        }
+      },
+      {
+        "x": {
+          "a": 0
+        }
+      },
+      false
+    ],
+    [
+      "[D16] nested equality - {a: 0} vs {a: false} attribute",
+      {
+        "x": {
+          "a": 0
+        }
+      },
+      {
+        "x": {
+          "a": false
+        }
+      },
+      false
+    ],
+    [
+      "[D16] nested equality - [[true]] vs [[1]] attribute",
+      {
+        "x": [
+          [
+            true
+          ]
+        ]
+      },
+      {
+        "x": [
+          [
+            1
+          ]
+        ]
+      },
+      false
+    ],
+    [
+      "[D16] nested equality - matching mixed values pass",
+      {
+        "x": [
+          1,
+          true,
+          {
+            "a": false,
+            "b": 0
+          }
+        ]
+      },
+      {
+        "x": [
+          1,
+          true,
+          {
+            "a": false,
+            "b": 0
+          }
+        ]
+      },
+      true
+    ],
+    [
+      "[D16] nested equality - [1] vs [1.0] attribute",
+      {
+        "x": [
+          1
+        ]
+      },
+      {
+        "x": [
+          1.0
+        ]
+      },
+      true
+    ],
+    [
+      "[D16] nested equality - {a: 1.0} vs {a: 1} attribute",
+      {
+        "x": {
+          "a": 1.0
+        }
+      },
+      {
+        "x": {
+          "a": 1
+        }
+      },
+      true
+    ],
+    [
+      "[D16] $in with array attribute - [true] vs [1]",
+      {
+        "x": {
+          "$in": [
+            true
+          ]
+        }
+      },
+      {
+        "x": [
+          1
+        ]
+      },
+      false
+    ],
+    [
+      "[D16] $in with array attribute - [1] vs [true]",
+      {
+        "x": {
+          "$in": [
+            1
+          ]
+        }
+      },
+      {
+        "x": [
+          true
+        ]
+      },
+      false
+    ],
+    [
+      "[D16] $nin with array attribute - [0] vs [false]",
+      {
+        "x": {
+          "$nin": [
+            0
+          ]
+        }
+      },
+      {
+        "x": [
+          false
+        ]
+      },
+      true
+    ],
+    [
+      "[D16] $in - 1 vs 1.0 attribute",
+      {
+        "x": {
+          "$in": [
+            1
+          ]
+        }
+      },
+      {
+        "x": 1.0
+      },
+      true
+    ],
+    [
+      "[D16] $in with array attribute - [1.0] vs [1]",
+      {
+        "x": {
+          "$in": [
+            1.0
+          ]
+        }
+      },
+      {
+        "x": [
+          1
+        ]
+      },
+      true
+    ],
+    [
+      "[D16] $elemMatch - $eq 1 vs [true]",
+      {
+        "x": {
+          "$elemMatch": {
+            "$eq": 1
+          }
+        }
+      },
+      {
+        "x": [
+          true
+        ]
+      },
+      false
+    ],
+    [
+      "[D16] $elemMatch - {a: true} vs [{a: 1}]",
+      {
+        "x": {
+          "$elemMatch": {
+            "a": true
+          }
+        }
+      },
+      {
+        "x": [
+          {
+            "a": 1
+          }
+        ]
+      },
+      false
+    ],
+    [
+      "[D16] $elemMatch - {a: 1} vs [{a: 1.0}]",
+      {
+        "x": {
+          "$elemMatch": {
+            "a": 1
+          }
+        }
+      },
+      {
+        "x": [
+          {
+            "a": 1.0
+          }
+        ]
+      },
+      true
+    ],
+    [
+      "[D16] $all - [false] vs [0]",
+      {
+        "x": {
+          "$all": [
+            false
+          ]
+        }
+      },
+      {
+        "x": [
+          0
+        ]
+      },
+      false
+    ],
+    [
+      "[D16] $all - [1] vs [1.0]",
+      {
+        "x": {
+          "$all": [
+            1
+          ]
+        }
+      },
+      {
+        "x": [
+          1.0
+        ]
+      },
+      true
+    ],
+    [
+      "[D16] $in - object attribute never matches",
+      {
+        "x": {
+          "$in": [
+            {
+              "a": 1
+            }
+          ]
+        }
+      },
+      {
+        "x": {
+          "a": 1
+        }
+      },
+      false
+    ],
+    [
+      "[D16] $in - array element that is an object never matches",
+      {
+        "x": {
+          "$in": [
+            {
+              "a": 1
+            }
+          ]
+        }
+      },
+      {
+        "x": [
+          {
+            "a": 1
+          }
+        ]
+      },
+      false
+    ],
+    [
       "$nor - pass",
       {
         "$nor": [
