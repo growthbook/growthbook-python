@@ -139,10 +139,11 @@ def test_version_comparison_normalizes_unhashable_values():
         {"version": ["1.2.3"]},
         {"version": {"$vgt": "1.0.0"}},
     ) is False
+    # An object condition value is not a version, so it never matches
     assert evalCondition(
         {"version": "1.0.0"},
         {"version": {"$vgt": {"version": "0.9.0"}}},
-    ) is True
+    ) is False
 
 
 def test_decrypt(decrypt_data):
