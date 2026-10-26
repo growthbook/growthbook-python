@@ -26,6 +26,7 @@ from growthbook.core import (
     inNamespace,
     getEqualWeights,
     evalCondition,
+    getPath,
     pruneCondition,
     reduce_payload,
     _saved_groups_on_cycles,
@@ -219,6 +220,35 @@ def test_saved_groups_on_long_chains():
         "savedGroups": chain,
     }
     assert reduce_payload(payload, {"x": 1})["savedGroups"] == chain
+
+
+def test_get_path_reads_array_own_keys():
+    # Like JS, an array's own keys are its canonical indices and "length"
+    assert getPath([5, 6], "1") == 6
+    assert getPath({"a": [1, 2]}, "a.length") == 2
+    assert getPath({"a": [[1, 2]]}, "a.0.1") == 2
+    for path in ("2", "01", "-0", "-1", "+1", " 1", "1.0", "", "len", "count"):
+        assert getPath([5, 6], path) is None
+
+
+@pytest.mark.parametrize("condition, expected", [
+    ({"$or": [{"0": 1}]}, True),
+    ({"$and": [{"0": 1}, {"length": 1}]}, True),
+    ({"$or": [{"length": 2}]}, False),
+    ({"$or": [{"1": 1}]}, False),
+    ({"$or": [{"01": 1}]}, False),
+    ({"$nor": [{"0": 2}]}, True),
+    ({"0": 1}, True),
+])
+def test_logical_elem_match_reads_nested_array_indices(condition, expected):
+    attributes = {"x": [[1]]}
+    assert evalCondition(attributes, {"x": {"$elemMatch": condition}}) is expected
+    # Once x is known, the reducer drops a passing condition and keeps a failing one
+    payload = {"features": {"f": {"defaultValue": False, "rules": [
+        {"condition": {"x": {"$elemMatch": condition}}, "force": True},
+    ]}}}
+    rule = reduce_payload(payload, attributes)["features"]["f"]["rules"][0]
+    assert rule == ({"force": True} if expected else {"condition": {"$not": {}}, "force": None})
 
 
 def test_conditions(evalCondition_data):

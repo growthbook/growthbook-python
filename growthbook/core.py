@@ -315,13 +315,23 @@ def getType(attributeValue: Any) -> str:
     return "unknown"
 
 def getPath(attributes: Dict[str, Any], path: str) -> Any:
-    current = attributes
+    """Read a dotted path. Like JS, only own keys count, so a list exposes its
+    canonical indices ("0", "1", ...) and "length"."""
+    current: Any = attributes
     for segment in path.split("."):
         if isinstance(current, dict) and segment in current:
             current = current[segment]
+        elif isinstance(current, list) and segment == "length":
+            current = len(current)
+        elif isinstance(current, list) and _is_array_index(segment, len(current)):
+            current = current[int(segment)]
         else:
             return None
     return current
+
+def _is_array_index(key: str, length: int) -> bool:
+    """Whether `key` is a canonical index below `length`, such as "0" but not "01" or "-0"."""
+    return key.isascii() and key.isdigit() and (key == "0" or key[0] != "0") and int(key) < length
 
 def evalConditionValue(
     conditionValue: Any, attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
