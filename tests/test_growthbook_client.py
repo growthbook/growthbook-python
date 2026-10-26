@@ -20,7 +20,7 @@ import json
 import threading
 from typing import Any, Dict, Optional
 
-from growthbook.common_types import Experiment, Options
+from growthbook.common_types import Experiment, Feature, FeatureRule, Options
 from growthbook.growthbook_client import (
     GrowthBookClient,
     UserContext,
@@ -1709,5 +1709,30 @@ async def test_skip_all_experiments_flag():
             assert result_normal.value in ["control", "variation"]
             assert result_normal.source == "experiment"
             
+    finally:
+        await client.close()
+
+@pytest.mark.asyncio
+async def test_reduce_payload_includes_feature_objects():
+    # set_features accepts Feature and FeatureRule objects as well as dicts;
+    # reduce_payload has to send them like the dicts they stand for.
+    client = GrowthBookClient()
+    try:
+        await client.set_features({
+            "obj": Feature(defaultValue=True, rules=[FeatureRule(condition={"id": "123"}, force=False)]),
+            "mixed": {"defaultValue": 1, "rules": [FeatureRule(condition={"country": "US"}, force=2)]},
+            "plain": {"defaultValue": "x"},
+        })
+        user = UserContext(attributes={"id": "123"})
+        assert await client.get_feature_value("obj", None, user) is False
+        reduced = client.reduce_payload(user)
+        assert reduced["features"] == {
+            "obj": {"defaultValue": True, "rules": [{"force": False, "hashVersion": 1}]},
+            "mixed": {"defaultValue": 1, "rules": [
+                {"condition": {"country": "US"}, "force": 2, "hashVersion": 1},
+            ]},
+            "plain": {"defaultValue": "x"},
+        }
+        json.dumps(reduced)
     finally:
         await client.close()

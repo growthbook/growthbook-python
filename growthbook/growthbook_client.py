@@ -37,6 +37,7 @@ from .common_types import (
     Experiment,
     build_remote_eval_payload,
     features_from_dict,
+    features_to_dicts,
     snapshot_user_context,
     TrackingBuffer,
     TrackingDedupeKey,
@@ -1210,7 +1211,12 @@ class GrowthBookClient:
                 options=self.options, features=features, saved_groups=saved_groups,
                 contextual_bandits=contextual_bandits
             )
-            self._payload = {**self._payload, **features_data}
+            # Plain dicts, so reduce_payload sends Feature objects passed to
+            # set_features like the dicts they stand for
+            payload = {**self._payload, **features_data}
+            if "features" in features_data:
+                payload["features"] = features_to_dicts(features_data["features"])
+            self._payload = payload
 
     def reduce_payload(
         self,

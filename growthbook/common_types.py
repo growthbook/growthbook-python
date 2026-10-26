@@ -827,6 +827,24 @@ def features_from_dict(features_data: Optional[Dict[str, Any]]) -> Dict[str, "Fe
     return out
 
 
+def features_to_dicts(features_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The payload form of a {key: feature_dict_or_Feature} mapping: Feature and
+    FeatureRule objects become the dicts they stand for, and dict features keep
+    every other field (such as metadata) as they are."""
+    out: Dict[str, Any] = {}
+    for key, feature in (features_data or {}).items():
+        if isinstance(feature, Feature):
+            out[key] = feature.to_dict()
+        elif isinstance(feature, dict) and isinstance(feature.get("rules"), list):
+            out[key] = {
+                **feature,
+                "rules": [r.to_dict() if isinstance(r, FeatureRule) else r for r in feature["rules"]],
+            }
+        else:
+            out[key] = feature
+    return out
+
+
 def build_remote_eval_payload(
     attributes: Optional[Dict[str, Any]],
     forced_variations: Optional[Dict[str, Any]],
