@@ -4,6 +4,7 @@ import math
 import re
 import json
 import warnings
+from decimal import Decimal
 from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
@@ -577,10 +578,45 @@ def _eval_operator_condition(
     logger.debug("Unknown operator: %s", operator)
     return None
 
+def _js_number_to_string(value: Union[int, float]) -> str:
+    """Format a number like JS `String(number)` (ECMAScript Number::toString).
+
+    Integers are converted to doubles first, as JS has only doubles. `repr`
+    gives the shortest digits that round-trip, which are then laid out in
+    fixed notation for decimal exponents from -6 to 21 and in JS-style
+    scientific notation (such as "1e+21" or "1.5e-7") otherwise.
+    """
+    try:
+        x = float(value)
+    except OverflowError:
+        x = math.inf if value > 0 else -math.inf
+    if math.isnan(x):
+        return "NaN"
+    if x == 0:
+        return "0"
+    if x < 0:
+        return "-" + _js_number_to_string(-x)
+    if math.isinf(x):
+        return "Infinity"
+    # x = 0.d1..dk * 10^n
+    _, digit_tuple, exponent = Decimal(repr(x)).normalize().as_tuple()
+    digits = "".join(map(str, digit_tuple))
+    k = len(digits)
+    n = int(exponent) + k
+    if k <= n <= 21:
+        return digits + "0" * (n - k)
+    if 0 < n <= 21:
+        return digits[:n] + "." + digits[n:]
+    if -6 < n <= 0:
+        return "0." + "0" * -n + digits
+    mantissa = digits[0] + ("." + digits[1:] if k > 1 else "")
+    return mantissa + "e" + ("+" if n > 0 else "-") + str(abs(n - 1))
+
+
 def paddedVersionString(input: Any) -> str:
-    # If input is a number, convert to a string
+    # If input is a number, convert to a string the way JS does
     if _is_numeric(input):
-        input = str(input)
+        input = _js_number_to_string(input)
 
     if not input or not isinstance(input, str):
         input = "0"

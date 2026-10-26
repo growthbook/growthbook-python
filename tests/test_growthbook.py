@@ -30,6 +30,7 @@ from growthbook.core import (
     pruneCondition,
     reduce_payload,
     _saved_groups_on_cycles,
+    _js_number_to_string,
 )
 
 from time import time
@@ -269,6 +270,40 @@ def test_reduce_payload_missing_tags_and_projects_never_match_null():
     for key in ("tags", "projects"):
         assert "f" not in reduce_payload(payload, {}, include={key: [None]})["features"]
         assert "f" in reduce_payload(payload, {}, exclude={key: [None]})["features"]
+
+
+@pytest.mark.parametrize("value, expected", [
+    (1, "1"),
+    (1.0, "1"),
+    (1.5, "1.5"),
+    (-1.5, "-1.5"),
+    (100, "100"),
+    (1e21, "1e+21"),
+    (10**21, "1e+21"),
+    (123456789012345680000.0, "123456789012345680000"),
+    (1e-7, "1e-7"),
+    (0.000002, "0.000002"),
+    (123e-20, "1.23e-18"),
+    (1e23, "1e+23"),
+    (-0.0, "0"),
+    (0, "0"),
+    (2**53 + 1, "9007199254740992"),
+    (float("nan"), "NaN"),
+    (float("inf"), "Infinity"),
+    (float("-inf"), "-Infinity"),
+    (10**400, "Infinity"),
+])
+def test_js_number_to_string(value, expected):
+    assert _js_number_to_string(value) == expected
+
+
+@pytest.mark.parametrize("attributes, condition, expected", [
+    ({"a": 1.0}, {"a": {"$veq": 1}}, True),
+    ({"a": 1}, {"a": {"$veq": 1.0}}, True),
+    ({"a": 0.000002}, {"a": {"$vgt": 1.5}}, False),
+])
+def test_numeric_versions_format_like_js(attributes, condition, expected):
+    assert evalCondition(attributes, condition) is expected
 
 
 def test_conditions(evalCondition_data):
