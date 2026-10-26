@@ -197,11 +197,73 @@ def test_saved_groups_on_cycles():
         "b": {"type": "condition", "condition": {"$or": [{"$savedGroup": {"id": "a"}}, {"x": 1}]}},
         "c": {"type": "condition", "condition": {"$not": {"$savedGroup": {"id": "c"}}}},
         "d": {"type": "condition", "condition": {"$savedGroup": {"id": "a"}}},
-        "e": {"type": "list", "attributeKey": "id", "values": ["a", "d"]},
+        "e": {"type": "list", "attributeKey": "id", "values": ["a", "d", "e"]},
+        "f": {"type": "condition", "condition": {"id": {"$inGroup": "g"}}},
+        "g": {"type": "list", "attributeKey": "id", "values": ["f"]},
+        "h": ["h"],
     }
-    # e's values are strings that happen to be group ids, so e references them,
-    # as in the JS SDK; it still isn't on a cycle.
+    # A list's values (or a legacy bare array's) are attribute values that
+    # happen to be group ids, not references, so e, f, g and h aren't on cycles
     assert _saved_groups_on_cycles(groups) == {"a", "b", "c"}
+
+
+def test_reduce_payload_never_walks_list_group_values():
+    # The list's values name other groups, but are attribute values
+    lst = {"type": "list", "attributeKey": "id", "values": ["a", "b", "c"]}
+    payload = {
+        "features": {"f": {"defaultValue": 0, "rules": [
+            {"condition": {"$savedGroup": {"id": "a"}}, "force": 1},
+            {"condition": {"items": {"$elemMatch": {"id": {"$inGroup": "l"}}}}, "force": 2},
+            {"condition": {"$savedGroup": {"id": "c"}}, "force": 3},
+        ]}},
+        "savedGroups": {
+            "a": {"type": "condition", "condition": {"country": "US", "id": {"$inGroup": "l"}}},
+            "b": {"type": "condition", "condition": {"x": 1}},
+            "c": {"type": "condition", "condition": {"country": "US", "y": 1}},
+            "l": lst,
+        },
+    }
+    # a isn't on a cycle through l, c isn't kept as written because l is
+    # under $elemMatch, and b isn't kept just because l names it
+    assert reduce_payload(payload, {"country": "US"})["savedGroups"] == {
+        "a": {"type": "condition", "condition": {"id": {"$inGroup": "l"}}},
+        "l": lst,
+        "c": {"type": "condition", "condition": {"y": 1}},
+    }
+
+
+class _NotWalked(dict):
+    """A dict that fails the test when the saved group walks iterate it"""
+
+    def items(self):  # type: ignore[override]
+        raise AssertionError("walked")
+
+    def values(self):  # type: ignore[override]
+        raise AssertionError("walked")
+
+
+def test_reduce_payload_skips_group_walks_without_saved_groups():
+    payload = {"features": {"f": {"defaultValue": 0, "rules": [
+        {"force": 1, "meta": _NotWalked(x=1)},
+    ]}}}
+    reduced = reduce_payload(payload, {})
+    assert reduced["savedGroups"] == {}
+    assert reduced["features"]["f"]["rules"][0]["force"] == 1
+
+
+@pytest.mark.parametrize("bandits, expected", [
+    (None, None),
+    ({}, {}),
+    ({"cb": {"contexts": []}}, {}),
+])
+def test_reduce_payload_leaves_out_missing_contextual_bandits(bandits, expected):
+    payload = {"features": {"f": {"defaultValue": 0}}, "contextualBandits": bandits}
+    reduced = reduce_payload(payload, {})
+    if expected is None:
+        assert "contextualBandits" not in reduced
+    else:
+        assert reduced["contextualBandits"] == expected
+    assert "contextualBandits" not in reduce_payload({"features": {}}, {})
 
 
 def test_saved_groups_on_long_chains():

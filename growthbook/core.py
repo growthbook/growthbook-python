@@ -1873,6 +1873,12 @@ def _js_truthy(value: Any) -> bool:
     return True
 
 
+def _can_reference_groups(entry: Any) -> bool:
+    """Whether a saved group's contents can reference other groups. A list's
+    values (or a legacy bare array's) are attribute values, never group ids."""
+    return isinstance(entry, dict) and entry.get("type") != "list"
+
+
 def _saved_groups_on_cycles(saved_groups: Dict[str, Any]) -> Set[str]:
     """The saved groups that can reach themselves through saved-group
     references: those in a strongly connected component of more than one group,
@@ -1881,7 +1887,7 @@ def _saved_groups_on_cycles(saved_groups: Dict[str, Any]) -> Set[str]:
     refs: Dict[str, Set[str]] = {}
     for group_id, entry in saved_groups.items():
         found: Set[str] = set()
-        stack: List[Any] = [entry]
+        stack: List[Any] = [entry] if _can_reference_groups(entry) else []
         while stack:
             value = stack.pop()
             if isinstance(value, str):
@@ -2096,9 +2102,11 @@ def reduce_payload(
     # value in a prerequisite), and the groups those reference
     # The walks below use explicit stacks, so long chains of groups can't hit
     # the recursion limit.
+    # Walking the payload is only needed when there are groups to find
+    reduced_parts = [features, experiments, bandits] if saved_groups else []
     as_written: Set[str] = set()
     seen: Set[str] = set()
-    marking: List[Tuple[Any, bool]] = [([features, experiments, bandits], True)]
+    marking: List[Tuple[Any, bool]] = [(reduced_parts, True)]
     while marking:
         value, user = marking.pop()
         if isinstance(value, str):
@@ -2107,7 +2115,8 @@ def reduce_payload(
             if user and value in seen:
                 continue
             (seen if user else as_written).add(value)
-            marking.append((saved_groups[value], user))
+            if _can_reference_groups(saved_groups[value]):
+                marking.append((saved_groups[value], user))
         elif isinstance(value, dict):
             for k, v in value.items():
                 marking.append((v, user and k != "$elemMatch" and k != "parentConditions"))
@@ -2123,7 +2132,7 @@ def reduce_payload(
     # condition groups reduced. This needs no list of the operators that
     # reference groups. Visited depth first, in document order.
     groups: Dict[str, Any] = {}
-    keeping: List[Any] = [[features, experiments, bandits]]
+    keeping: List[Any] = [reduced_parts]
     while keeping:
         value = keeping.pop()
         if isinstance(value, str):
@@ -2140,7 +2149,8 @@ def reduce_payload(
                 if isinstance(condition, dict) and isinstance(entry, dict)
                 else entry
             )
-            keeping.append(groups[value])
+            if _can_reference_groups(entry):
+                keeping.append(groups[value])
         elif isinstance(value, dict):
             keeping.extend(reversed(list(value.values())))
         elif isinstance(value, list):
@@ -2152,7 +2162,9 @@ def reduce_payload(
         "experiments": experiments,
         "savedGroups": groups,
     }
-    # Only when there were any, as with the payload's other optional keys
-    if isinstance(payload.get("contextualBandits"), dict):
+    # Only when there were any, as with the payload's other optional keys.
+    # Left out rather than None, as in the JS SDK.
+    reduced.pop("contextualBandits", None)
+    if _js_truthy(payload.get("contextualBandits")):
         reduced["contextualBandits"] = bandits
     return reduced
