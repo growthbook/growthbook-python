@@ -1871,7 +1871,7 @@ def reduce_payload(
             and not any(has(fields.get(k), v) for k, v in out_fields.items())
         )
 
-    def prune(item: Dict[str, Any]) -> Dict[str, Any]:
+    def prune(item: Dict[str, Any], is_rule: bool) -> Dict[str, Any]:
         # Reduces a rule or an auto experiment
         condition: Any = (
             pruneCondition(known, item["condition"], saved_groups)
@@ -1885,8 +1885,9 @@ def reduce_payload(
         # condition, and a rule's prerequisites are checked before it
         elif condition is False:
             item["condition"] = {"$not": {}}
-            # A force rule that never passes never returns its value
-            if "force" in item:
+            # A force rule that never passes never returns its value. An auto
+            # experiment's forced variation still applies to a sticky bucketed user.
+            if is_rule and "force" in item:
                 item["force"] = None
         elif condition:
             item["condition"] = condition
@@ -1915,7 +1916,7 @@ def reduce_payload(
         rules: Optional[List[Any]] = None
         if feature.get("rules") is not None:
             rules = [
-                prune(rule) for rule in feature["rules"]
+                prune(rule, True) for rule in feature["rules"]
                 if not scoped or rule_in_projects(rule.get("metadata"))
             ]
         # Stored before its parents are added, so a prerequisite cycle ends
@@ -1926,7 +1927,7 @@ def reduce_payload(
     for feature_id, feature in all_features.items():
         if matches(meta_of(feature)):
             add(feature_id)
-    experiments = [prune(e) for e in all_experiments if isinstance(e, dict) and matches(meta_of(e))]
+    experiments = [prune(e, False) for e in all_experiments if isinstance(e, dict) and matches(meta_of(e))]
     for experiment in experiments:
         add_parents(experiment)
     features = dict(added)
@@ -1941,6 +1942,10 @@ def reduce_payload(
         if not isinstance(ref, str) or not ref or ref in bandits or ref not in all_bandits:
             continue
         bandit = all_bandits[ref]
+        # Evaluation tolerates a definition that isn't an object, so it stays
+        if not isinstance(bandit, dict):
+            bandits[ref] = bandit
+            continue
         contexts = []
         for context in bandit.get("contexts") or []:
             pruned = pruneCondition(known, context.get("condition") or {}, saved_groups)
@@ -1948,6 +1953,56 @@ def reduce_payload(
                 continue
             contexts.append({**context, "condition": {} if pruned is True else pruned})
         bandits[ref] = {**bandit, "contexts": contexts}
+
+    # Groups that keep their condition as written: those evaluated against
+    # something other than the user (each item in $elemMatch, or the parent's
+    # value in a prerequisite), and the groups those reference
+    as_written: Set[str] = set()
+    seen: Set[str] = set()
+
+    def mark(value: Any, user: bool) -> None:
+        if isinstance(value, str):
+            if value not in saved_groups or value in as_written:
+                return
+            if user and value in seen:
+                return
+            (seen if user else as_written).add(value)
+            mark(saved_groups[value], user)
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                mark(v, user and k != "$elemMatch" and k != "parentConditions")
+        elif isinstance(value, list):
+            for v in value:
+                mark(v, user)
+
+    mark([features, experiments, bandits], True)
+
+    # A group on a cycle can't be reduced on its own: its result depends on
+    # which group the evaluation entered the cycle from
+    def reaches(start: str, target: str, visited: Set[str]) -> bool:
+        found: List[str] = []
+
+        def collect(value: Any) -> None:
+            if isinstance(value, str):
+                if value in saved_groups:
+                    found.append(value)
+            elif isinstance(value, dict):
+                for v in value.values():
+                    collect(v)
+            elif isinstance(value, list):
+                for v in value:
+                    collect(v)
+
+        collect(saved_groups[start])
+        for group_id in found:
+            if group_id == target:
+                return True
+            if group_id in visited:
+                continue
+            visited.add(group_id)
+            if reaches(group_id, target, visited):
+                return True
+        return False
 
     # Keep each saved group whose id appears as a string anywhere, with
     # condition groups reduced. This needs no list of the operators that
@@ -1958,7 +2013,11 @@ def reduce_payload(
         if isinstance(value, str):
             if value not in saved_groups or value in groups:
                 return
-            condition = _prune_saved_group(known, {"id": value}, saved_groups)
+            condition = (
+                None
+                if value in as_written or reaches(value, value, set())
+                else _prune_saved_group(known, {"id": value}, saved_groups)
+            )
             entry = saved_groups[value]
             groups[value] = (
                 {**entry, "condition": condition}
