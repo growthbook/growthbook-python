@@ -6,6 +6,8 @@ import warnings
 from growthbook import (
     FeatureRule,
     GrowthBook,
+    GrowthBookClient,
+    UserContext,
     Experiment,
     Feature,
     InMemoryStickyBucketService,
@@ -24,6 +26,7 @@ from growthbook.core import (
     inNamespace,
     getEqualWeights,
     evalCondition,
+    pruneCondition,
 )
 
 from time import time
@@ -134,6 +137,31 @@ def test_equal_weights(getEqualWeights_data):
     numVariations, expected = getEqualWeights_data
     weights = getEqualWeights(numVariations)
     assert round_list(weights) == round_list(expected)
+
+
+def test_prune_condition(pruneCondition_data):
+    _, condition, attributes, expected, savedGroups = (pruneCondition_data + [None]*5)[:5]
+    assert pruneCondition(attributes, condition, savedGroups or {}) == expected
+
+
+@pytest.mark.asyncio
+async def test_reduce_payload(reducePayload_data):
+    _, args, expected = reducePayload_data
+    # This SDK has no client-level global attributes, so they're merged into
+    # the user's here, with the user's taking precedence as in the JS client
+    attributes = {**(args.get("globalAttributes") or {}), **(args.get("attributes") or {})}
+    client = GrowthBookClient()
+    try:
+        await client.set_payload(args["payload"])
+        reduced = client.reduce_payload(
+            UserContext(attributes=attributes),
+            include=args.get("include"),
+            exclude=args.get("exclude"),
+            prerequisites=args.get("prerequisites") or "keep",
+        )
+        assert reduced == expected
+    finally:
+        await client.close()
 
 
 def test_conditions(evalCondition_data):

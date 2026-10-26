@@ -69,6 +69,15 @@ class Filter(TypedDict, total=False):
 # leaves). The SDK only picks the first leaf whose condition matches and
 # buckets with that leaf's weights — no model evaluation happens client-side.
 
+class PayloadFilters(TypedDict, total=False):
+    """Filters for reduce_payload. Each list matches when any one of its values
+    does, and every listed filter has to match."""
+    projects: List[str]
+    tags: List[str]
+    # Custom field id -> values to match
+    customFields: Dict[str, List[Any]]
+
+
 class ContextualBanditContext(TypedDict, total=False):
     leafId: Required[int]
     condition: Dict[str, Any]

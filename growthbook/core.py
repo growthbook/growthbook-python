@@ -7,7 +7,7 @@ import warnings
 from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
-from typing import Callable, Optional, Any, Set, Tuple, List, Dict, cast
+from typing import Callable, Optional, Any, Set, Tuple, List, Dict, Union, cast
 from typing_extensions import TypeGuard
 from .common_types import (
     ContextualBanditAssignment,
@@ -16,6 +16,7 @@ from .common_types import (
     FeatureResult,
     Experiment,
     Filter,
+    PayloadFilters,
     Result,
     UserContext,
     VariationMeta,
@@ -73,7 +74,7 @@ def _eval_condition(
         elif key == "$not":
             r = _not(_eval_condition(attributes, value, savedGroups, visited))
         elif key == "$savedGroup":
-            r = _eval_saved_group(attributes, value, savedGroups, visited)
+            r = cast(CondResult, _eval_saved_group(attributes, value, savedGroups, visited))
         elif key == "$savedGroups":
             r = False
         else:
@@ -88,8 +89,12 @@ def _eval_condition(
 def _eval_saved_group(
     attributes: Dict[str, Any], reference: Any, saved_groups: Optional[Dict[str, Any]],
     visited: Optional[Set[str]],
-) -> CondResult:
-    """Resolve a typed saved group, keeping cycle detection local to this branch."""
+    prune: Optional[Callable[..., Any]] = None,
+) -> Any:
+    """Resolve a typed saved group, keeping cycle detection local to this branch.
+
+    With `prune`, an undecided list group returns None and a condition group is
+    pruned instead of evaluated, so the result may be a condition."""
     if not isinstance(reference, dict):
         return False
     group_id = reference.get("id")
@@ -107,6 +112,8 @@ def _eval_saved_group(
         values = entry.get("values")
         if not isinstance(key, str) or not isinstance(values, list):
             return False
+        if prune is not None and not _is_known(attributes, key):
+            return None
         return isIn(values, getPath(attributes, key))
     if entry.get("type") == "condition":
         condition = entry.get("condition")
@@ -114,6 +121,8 @@ def _eval_saved_group(
             return False
         # Allocate the branch guard only when entering a condition group.
         next_visited = visited | {group_id} if visited else {group_id}
+        if prune is not None:
+            return prune(attributes, condition, saved_groups, next_visited)
         return _eval_condition(attributes, condition, saved_groups, next_visited)
     # A group type added after this SDK was built. The client SDK may support it.
     return None
@@ -181,6 +190,106 @@ def _eval_and(
         if r is None:
             result = None
     return result
+
+
+def pruneCondition(
+    attributes: Dict[str, Any], condition: Dict[str, Any],
+    savedGroups: Optional[Dict[str, Any]] = None,
+) -> Union[Dict[str, Any], bool]:
+    """Partially evaluate a condition when only some attributes are known, e.g.
+    on a server. Attributes missing from `attributes` are unknown. Returns a
+    boolean once the result can't depend on them, otherwise the condition minus
+    every branch that is already decided."""
+    return _prune_with_context(attributes, condition, savedGroups, None)
+
+
+def _prune_saved_group(
+    attributes: Dict[str, Any], reference: Any, saved_groups: Dict[str, Any],
+) -> Any:
+    """Prune the saved group a reference points to. Returns its result once
+    decided, otherwise its condition minus every branch that is already decided."""
+    return _eval_saved_group(attributes, reference, saved_groups, None, prune=_prune_with_context)
+
+
+def _prune_with_context(
+    attributes: Dict[str, Any], condition: Dict[str, Any],
+    saved_groups: Optional[Dict[str, Any]], visited: Optional[Set[str]],
+) -> Union[Dict[str, Any], bool]:
+    # One that raises, such as a malformed one, stays as written. Evaluating it
+    # fails as a whole, so no part of it can be decided.
+    try:
+        return _prune_entries(attributes, condition, saved_groups, visited)
+    except _EVAL_ERRORS:
+        return condition
+
+
+def _prune_entries(
+    attributes: Dict[str, Any], condition: Dict[str, Any],
+    saved_groups: Optional[Dict[str, Any]], visited: Optional[Set[str]],
+) -> Union[Dict[str, Any], bool]:
+    out: Dict[str, Any] = {}
+    for key, value in condition.items():
+        r: Any
+        if key in ("$or", "$nor", "$and"):
+            r = _prune_list(attributes, value, saved_groups, visited, key != "$and")
+        elif key == "$not":
+            r = _prune_entries(attributes, value, saved_groups, visited)
+        elif key == "$savedGroup":
+            r = _eval_saved_group(attributes, value, saved_groups, visited, prune=_prune_entries)
+            # Keep an undecided reference as is rather than inlining the group
+            if not isinstance(r, bool):
+                r = None
+        elif key == "$savedGroups":
+            r = False
+        else:
+            # None when the attribute is unknown, or the value uses an operator
+            # this SDK doesn't support, which the client's SDK may
+            r = (
+                _eval_condition_value(value, getPath(attributes, key), saved_groups, visited=visited)
+                if _is_known(attributes, key)
+                else None
+            )
+        # $not and $nor pass when what they hold fails
+        if key in ("$not", "$nor") and isinstance(r, bool):
+            r = not r
+
+        # One failing entry fails the whole condition, and a passing one is dropped
+        if r is False:
+            return False
+        # None is an undecided leaf, which stays as written
+        if r is None:
+            out[key] = value
+        elif r is not True:
+            out[key] = r
+    return out if out else True
+
+
+def _prune_list(
+    attributes: Dict[str, Any], conditions: List[Any],
+    saved_groups: Optional[Dict[str, Any]], visited: Optional[Set[str]], is_or: bool,
+) -> Union[List[Any], bool]:
+    """Prune an $or (or an $and) list. Returns the conditions still undecided,
+    or the list's result once there are none."""
+    out: List[Any] = []
+    for condition in conditions:
+        r = _prune_entries(attributes, condition, saved_groups, visited)
+        # One passing condition decides an $or, and one failing condition an $and
+        if is_or and r is True:
+            return True
+        if not is_or and r is False:
+            return False
+        if not isinstance(r, bool):
+            out.append(r)
+    if out:
+        return out
+    # Every condition failed an $or, or passed an $and. Like evalOr, an empty
+    # $or passes.
+    return len(conditions) == 0 if is_or else True
+
+
+def _is_known(attributes: Any, path: str) -> bool:
+    """A nested path is unknown, since the server may only have part of the object"""
+    return "." not in path and isinstance(attributes, dict) and path in attributes
 
 
 def isOperatorObject(obj: Any) -> bool:
@@ -1681,3 +1790,198 @@ def _getExperimentResult(
         variationWeights=variation_weights,
         banditVersion=bandit_version
     )
+
+
+def _js_truthy(value: Any) -> bool:
+    """JavaScript truthiness, where an empty list or dict counts as true"""
+    if value is None or value is False:
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0 and not (isinstance(value, float) and math.isnan(value))
+    if isinstance(value, str):
+        return value != ""
+    return True
+
+
+def reduce_payload(
+    payload: Dict[str, Any],
+    attributes: Optional[Dict[str, Any]] = None,
+    include: Optional[PayloadFilters] = None,
+    exclude: Optional[PayloadFilters] = None,
+    prerequisites: str = "keep",
+) -> Dict[str, Any]:
+    """Shrink a decrypted SDK payload for a user whose attributes are only
+    partly known, e.g. on a server bootstrapping a client SDK. The result
+    evaluates the same as the full payload for anyone who agrees with the known
+    attributes.
+
+    `include` keeps only the features and auto experiments that match every
+    filter, and `exclude` removes the ones that match any. With
+    `prerequisites="keep"` (the default) the prerequisites of what is kept are
+    sent even when the filters remove them; `"filter"` applies the filters to
+    them too. Mirrors the JS SDK's reducePayload."""
+    known: Dict[str, Any] = attributes or {}
+    inc: Dict[str, Any] = cast(Dict[str, Any], include or {})
+    exc: Dict[str, Any] = cast(Dict[str, Any], exclude or {})
+    saved_groups: Dict[str, Any] = payload.get("savedGroups") or {}
+    all_features: Dict[str, Any] = payload.get("features") or {}
+    all_experiments: List[Any] = payload.get("experiments") or []
+
+    def has(actual: Any, want: Any) -> bool:
+        # Only a list counts, as with $in, and any one of its values is enough
+        return isinstance(want, list) and isIn(want, actual)
+
+    def meta_of(item: Any) -> Dict[str, Any]:
+        meta = item.get("metadata") if isinstance(item, dict) else None
+        return meta if isinstance(meta, dict) else {}
+
+    def rule_in_projects(meta: Any) -> bool:
+        # A rule without projects applies wherever its feature is delivered
+        return (
+            not _js_truthy(inc.get("projects"))
+            or not isinstance(meta, dict)
+            or not _js_truthy(meta.get("projects"))
+            or has(meta.get("projects"), inc.get("projects"))
+        )
+
+    def in_projects(meta: Dict[str, Any]) -> bool:
+        # A feature or experiment has to list one of the projects, or be in all
+        # of them. One without projects is in none, like one without tags.
+        return (
+            not _js_truthy(inc.get("projects"))
+            or _js_truthy(meta.get("allProjects"))
+            or has(meta.get("projects"), inc.get("projects"))
+        )
+
+    def matches(meta: Dict[str, Any]) -> bool:
+        # Kept when it matches every include filter and no exclude filter. Only
+        # listed projects are excluded, so one in all projects stays.
+        fields = meta.get("customFields")
+        fields = fields if isinstance(fields, dict) else {}
+        in_fields = inc.get("customFields")
+        in_fields = in_fields if isinstance(in_fields, dict) else {}
+        out_fields = exc.get("customFields")
+        out_fields = out_fields if isinstance(out_fields, dict) else {}
+        return (
+            in_projects(meta)
+            and (not _js_truthy(inc.get("tags")) or has(meta.get("tags"), inc.get("tags")))
+            and all(has(fields.get(k), v) for k, v in in_fields.items())
+            and not has(meta.get("projects"), exc.get("projects"))
+            and not has(meta.get("tags"), exc.get("tags"))
+            and not any(has(fields.get(k), v) for k, v in out_fields.items())
+        )
+
+    def prune(item: Dict[str, Any]) -> Dict[str, Any]:
+        # Reduces a rule or an auto experiment
+        condition: Any = (
+            pruneCondition(known, item["condition"], saved_groups)
+            if _js_truthy(item.get("condition"))
+            else None
+        )
+        item = dict(item)
+        if condition is True:
+            del item["condition"]
+        # Kept, since sticky buckets and forced variations skip an experiment's
+        # condition, and a rule's prerequisites are checked before it
+        elif condition is False:
+            item["condition"] = {"$not": {}}
+            # A force rule that never passes never returns its value
+            if "force" in item:
+                item["force"] = None
+        elif condition:
+            item["condition"] = condition
+        return item
+
+    # Adds a feature, then the prerequisites the client evaluates for it, even
+    # when the filters drop them. With "filter", only the filters decide,
+    # except for holdouts, which aren't app features and are always kept.
+    added: Dict[str, Any] = {}
+
+    def add_parents(item: Dict[str, Any]) -> None:
+        for parent in item.get("parentConditions") or []:
+            parent_id = parent.get("id") if isinstance(parent, dict) else None
+            if not isinstance(parent_id, str):
+                continue
+            if prerequisites != "filter" or parent_id.startswith("$holdout:"):
+                add(parent_id)
+
+    def add(feature_id: str) -> None:
+        feature = all_features.get(feature_id)
+        if not isinstance(feature, dict) or feature_id in added:
+            return
+        # Rules scoped to other projects aren't served. A prerequisite from
+        # another project keeps its own, as on the server.
+        scoped = in_projects(meta_of(feature))
+        rules: Optional[List[Any]] = None
+        if feature.get("rules") is not None:
+            rules = [
+                prune(rule) for rule in feature["rules"]
+                if not scoped or rule_in_projects(rule.get("metadata"))
+            ]
+        # Stored before its parents are added, so a prerequisite cycle ends
+        added[feature_id] = {**feature, "rules": rules} if rules is not None else feature
+        for rule in rules or []:
+            add_parents(rule)
+
+    for feature_id, feature in all_features.items():
+        if matches(meta_of(feature)):
+            add(feature_id)
+    experiments = [prune(e) for e in all_experiments if isinstance(e, dict) and matches(meta_of(e))]
+    for experiment in experiments:
+        add_parents(experiment)
+    features = dict(added)
+
+    # The contextual bandits that kept rules and experiments use. A context
+    # whose condition never passes can't be the first that does, so it goes.
+    all_bandits: Dict[str, Any] = payload.get("contextualBandits") or {}
+    bandits: Dict[str, Any] = {}
+    items = [rule for f in features.values() for rule in (f.get("rules") or [])] + experiments
+    for item in items:
+        ref = item.get("contextualBanditRef")
+        if not isinstance(ref, str) or not ref or ref in bandits or ref not in all_bandits:
+            continue
+        bandit = all_bandits[ref]
+        contexts = []
+        for context in bandit.get("contexts") or []:
+            pruned = pruneCondition(known, context.get("condition") or {}, saved_groups)
+            if pruned is False:
+                continue
+            contexts.append({**context, "condition": {} if pruned is True else pruned})
+        bandits[ref] = {**bandit, "contexts": contexts}
+
+    # Keep each saved group whose id appears as a string anywhere, with
+    # condition groups reduced. This needs no list of the operators that
+    # reference groups.
+    groups: Dict[str, Any] = {}
+
+    def keep(value: Any) -> None:
+        if isinstance(value, str):
+            if value not in saved_groups or value in groups:
+                return
+            condition = _prune_saved_group(known, {"id": value}, saved_groups)
+            entry = saved_groups[value]
+            groups[value] = (
+                {**entry, "condition": condition}
+                if isinstance(condition, dict) and isinstance(entry, dict)
+                else entry
+            )
+            keep(groups[value])
+        elif isinstance(value, dict):
+            for v in value.values():
+                keep(v)
+        elif isinstance(value, list):
+            for v in value:
+                keep(v)
+
+    keep([features, experiments, bandits])
+
+    reduced: Dict[str, Any] = {
+        **payload,
+        "features": features,
+        "experiments": experiments,
+        "savedGroups": groups,
+    }
+    # Only when there were any, as with the payload's other optional keys
+    if isinstance(payload.get("contextualBandits"), dict):
+        reduced["contextualBandits"] = bandits
+    return reduced
