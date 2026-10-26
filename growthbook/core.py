@@ -592,7 +592,9 @@ def getQueryStringOverride(id: str, url: str, numVariations: int) -> Optional[in
     if id not in qs:
         return None
     variation = qs[id][0]
-    if variation is None or not variation.isdigit():
+    # str.isdigit() also accepts non-ASCII digits such as "²" (which int()
+    # rejects) and "١" (which the JS SDK's parseInt rejects); only 0-9 count.
+    if variation is None or not (variation.isascii() and variation.isdigit()):
         return None
     varId = int(variation)
     if varId < 0 or varId >= numVariations:
