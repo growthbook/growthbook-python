@@ -1803,6 +1803,70 @@ def _js_truthy(value: Any) -> bool:
     return True
 
 
+def _saved_groups_on_cycles(saved_groups: Dict[str, Any]) -> Set[str]:
+    """The saved groups that can reach themselves through saved-group
+    references: those in a strongly connected component of more than one group,
+    or that reference themselves. Each group's references are collected once,
+    and Tarjan's algorithm runs without recursion."""
+    refs: Dict[str, Set[str]] = {}
+    for group_id, entry in saved_groups.items():
+        found: Set[str] = set()
+        stack: List[Any] = [entry]
+        while stack:
+            value = stack.pop()
+            if isinstance(value, str):
+                if value in saved_groups:
+                    found.add(value)
+            elif isinstance(value, dict):
+                stack.extend(value.values())
+            elif isinstance(value, list):
+                stack.extend(value)
+        refs[group_id] = found
+
+    index: Dict[str, int] = {}
+    low: Dict[str, int] = {}
+    path: List[str] = []
+    on_path: Set[str] = set()
+    result: Set[str] = set()
+    for root in refs:
+        if root in index:
+            continue
+        index[root] = low[root] = len(index)
+        path.append(root)
+        on_path.add(root)
+        work = [(root, iter(refs[root]))]
+        while work:
+            node, children = work[-1]
+            descended = False
+            for child in children:
+                if child not in index:
+                    index[child] = low[child] = len(index)
+                    path.append(child)
+                    on_path.add(child)
+                    work.append((child, iter(refs[child])))
+                    descended = True
+                    break
+                if child in on_path:
+                    low[node] = min(low[node], index[child])
+            if descended:
+                continue
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+            if low[node] == index[node]:
+                component: List[str] = []
+                while True:
+                    member = path.pop()
+                    on_path.discard(member)
+                    component.append(member)
+                    if member == node:
+                        break
+                if len(component) > 1 or node in refs[node]:
+                    result.update(component)
+    return result
+
+
 def reduce_payload(
     payload: Dict[str, Any],
     attributes: Optional[Dict[str, Any]] = None,
@@ -1957,65 +2021,44 @@ def reduce_payload(
     # Groups that keep their condition as written: those evaluated against
     # something other than the user (each item in $elemMatch, or the parent's
     # value in a prerequisite), and the groups those reference
+    # The walks below use explicit stacks, so long chains of groups can't hit
+    # the recursion limit.
     as_written: Set[str] = set()
     seen: Set[str] = set()
-
-    def mark(value: Any, user: bool) -> None:
+    marking: List[Tuple[Any, bool]] = [([features, experiments, bandits], True)]
+    while marking:
+        value, user = marking.pop()
         if isinstance(value, str):
             if value not in saved_groups or value in as_written:
-                return
+                continue
             if user and value in seen:
-                return
+                continue
             (seen if user else as_written).add(value)
-            mark(saved_groups[value], user)
+            marking.append((saved_groups[value], user))
         elif isinstance(value, dict):
             for k, v in value.items():
-                mark(v, user and k != "$elemMatch" and k != "parentConditions")
+                marking.append((v, user and k != "$elemMatch" and k != "parentConditions"))
         elif isinstance(value, list):
             for v in value:
-                mark(v, user)
-
-    mark([features, experiments, bandits], True)
+                marking.append((v, user))
 
     # A group on a cycle can't be reduced on its own: its result depends on
     # which group the evaluation entered the cycle from
-    def reaches(start: str, target: str, visited: Set[str]) -> bool:
-        found: List[str] = []
-
-        def collect(value: Any) -> None:
-            if isinstance(value, str):
-                if value in saved_groups:
-                    found.append(value)
-            elif isinstance(value, dict):
-                for v in value.values():
-                    collect(v)
-            elif isinstance(value, list):
-                for v in value:
-                    collect(v)
-
-        collect(saved_groups[start])
-        for group_id in found:
-            if group_id == target:
-                return True
-            if group_id in visited:
-                continue
-            visited.add(group_id)
-            if reaches(group_id, target, visited):
-                return True
-        return False
+    on_cycle = _saved_groups_on_cycles(saved_groups)
 
     # Keep each saved group whose id appears as a string anywhere, with
     # condition groups reduced. This needs no list of the operators that
-    # reference groups.
+    # reference groups. Visited depth first, in document order.
     groups: Dict[str, Any] = {}
-
-    def keep(value: Any) -> None:
+    keeping: List[Any] = [[features, experiments, bandits]]
+    while keeping:
+        value = keeping.pop()
         if isinstance(value, str):
             if value not in saved_groups or value in groups:
-                return
+                continue
             condition = (
                 None
-                if value in as_written or reaches(value, value, set())
+                if value in as_written or value in on_cycle
                 else _prune_saved_group(known, {"id": value}, saved_groups)
             )
             entry = saved_groups[value]
@@ -2024,15 +2067,11 @@ def reduce_payload(
                 if isinstance(condition, dict) and isinstance(entry, dict)
                 else entry
             )
-            keep(groups[value])
+            keeping.append(groups[value])
         elif isinstance(value, dict):
-            for v in value.values():
-                keep(v)
+            keeping.extend(reversed(list(value.values())))
         elif isinstance(value, list):
-            for v in value:
-                keep(v)
-
-    keep([features, experiments, bandits])
+            keeping.extend(reversed(value))
 
     reduced: Dict[str, Any] = {
         **payload,

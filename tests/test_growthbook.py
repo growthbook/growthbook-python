@@ -27,6 +27,8 @@ from growthbook.core import (
     getEqualWeights,
     evalCondition,
     pruneCondition,
+    reduce_payload,
+    _saved_groups_on_cycles,
 )
 
 from time import time
@@ -162,6 +164,61 @@ async def test_reduce_payload(reducePayload_data):
         assert reduced == expected
     finally:
         await client.close()
+
+
+def test_reduce_payload_many_groups_sharing_a_large_list():
+    # Each group's references are collected once, so many condition groups
+    # that share one large list group stay cheap. Groups that aren't on a
+    # cycle are still reduced.
+    big = {"type": "list", "attributeKey": "id", "values": [f"u{i}" for i in range(20000)]}
+    groups = {
+        f"g{i}": {"type": "condition", "condition": {"id": {"$inGroup": "big"}, "country": "US"}}
+        for i in range(300)
+    }
+    payload = {
+        "features": {"f": {"defaultValue": 0, "rules": [
+            {"condition": {"$or": [{"$savedGroup": {"id": g}} for g in groups]}, "force": 1},
+        ]}},
+        "savedGroups": {"big": big, **groups},
+    }
+    assert _saved_groups_on_cycles(payload["savedGroups"]) == set()
+    reduced = reduce_payload(payload, {"country": "US"})
+    assert reduced["savedGroups"]["big"] == big
+    for g in groups:
+        assert reduced["savedGroups"][g] == {"type": "condition", "condition": {"id": {"$inGroup": "big"}}}
+
+
+def test_saved_groups_on_cycles():
+    groups = {
+        "a": {"type": "condition", "condition": {"$savedGroup": {"id": "b"}}},
+        "b": {"type": "condition", "condition": {"$or": [{"$savedGroup": {"id": "a"}}, {"x": 1}]}},
+        "c": {"type": "condition", "condition": {"$not": {"$savedGroup": {"id": "c"}}}},
+        "d": {"type": "condition", "condition": {"$savedGroup": {"id": "a"}}},
+        "e": {"type": "list", "attributeKey": "id", "values": ["a", "d"]},
+    }
+    # e's values are strings that happen to be group ids, so e references them,
+    # as in the JS SDK; it still isn't on a cycle.
+    assert _saved_groups_on_cycles(groups) == {"a", "b", "c"}
+
+
+def test_saved_groups_on_long_chains():
+    # No recursion, so long chains don't hit the recursion limit
+    n = 5000
+    chain = {f"g{i}": {"type": "condition", "condition": {"$savedGroup": {"id": f"g{i + 1}"}, "x": i}}
+             for i in range(n - 1)}
+    chain[f"g{n - 1}"] = {"type": "condition", "condition": {"x": 1}}
+    assert _saved_groups_on_cycles(chain) == set()
+    ring = {**chain, f"g{n - 1}": {"type": "condition", "condition": {"$savedGroup": {"id": "g0"}}}}
+    assert _saved_groups_on_cycles(ring) == set(ring)
+
+    # Referenced through $elemMatch, the whole chain is kept as written
+    payload = {
+        "features": {"f": {"defaultValue": 0, "rules": [
+            {"condition": {"items": {"$elemMatch": {"$savedGroup": {"id": "g0"}}}}, "force": 1},
+        ]}},
+        "savedGroups": chain,
+    }
+    assert reduce_payload(payload, {"x": 1})["savedGroups"] == chain
 
 
 def test_conditions(evalCondition_data):
