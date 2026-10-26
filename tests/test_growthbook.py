@@ -353,6 +353,8 @@ def test_numeric_versions_ignore_decimal_context(rounding, trap):
     ({"4294967296": 1, "4294967295": 2}, {"4294967295": 2, "4294967296": 1}, False),
     ({"-1": 1, "x": 2}, {"x": 2, "-1": 1}, False),
     ({"\u0661": 1, "x": 2}, {"x": 2, "\u0661": 1}, False),
+    # Past Python's int() digit limit, a numeric key is still an ordinary key
+    ({"1" * 5000: 1}, {"1" * 5000: 1}, True),
 ])
 def test_literal_object_equality_matches_json_stringify(attribute, condition, expected):
     assert evalCondition({"a": attribute}, {"a": condition}) is expected

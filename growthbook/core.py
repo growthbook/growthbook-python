@@ -331,7 +331,11 @@ def getPath(attributes: Dict[str, Any], path: str) -> Any:
 
 def _is_array_index(key: str, length: int) -> bool:
     """Whether `key` is a canonical index below `length`, such as "0" but not "01" or "-0"."""
-    return key.isascii() and key.isdigit() and (key == "0" or key[0] != "0") and int(key) < length
+    # An index has at most 10 digits, and checking first keeps int() off huge digit strings
+    return (
+        len(key) <= 10 and key.isascii() and key.isdigit()
+        and (key == "0" or key[0] != "0") and int(key) < length
+    )
 
 def evalConditionValue(
     conditionValue: Any, attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
