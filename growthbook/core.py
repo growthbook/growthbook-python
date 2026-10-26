@@ -365,7 +365,7 @@ def _strict_deep_equal(a: Any, b: Any) -> bool:
     """Literal equality, matching JS, which compares the JSON.stringify output
     of objects and arrays. Every nested value must have the same JSON type, so
     True never equals 1 the way it does with Python's ==, object keys must be
-    in the same order, and 1.0 equals 1."""
+    in the same JS property order, and 1.0 equals 1."""
     ta = getType(a)
     if ta != getType(b):
         return False
@@ -373,10 +373,18 @@ def _strict_deep_equal(a: Any, b: Any) -> bool:
         return len(a) == len(b) and all(_strict_deep_equal(_json_value(x), _json_value(y)) for x, y in zip(a, b))
     if ta == "object":
         return (
-            list(a.keys()) == list(b.keys())
+            _js_key_order(a) == _js_key_order(b)
             and all(_strict_deep_equal(_json_value(a[k]), _json_value(b[k])) for k in a)
         )
     return bool(a == b)
+
+def _js_key_order(obj: Dict[Any, Any]) -> List[Any]:
+    """Keys in JS property order: array-index keys such as "0" or "10" in
+    ascending numeric order, then the other keys in insertion order."""
+    keys = list(obj.keys())
+    indices = [k for k in keys if isinstance(k, str) and _is_array_index(k, 2**32 - 1)]
+    others = [k for k in keys if not (isinstance(k, str) and _is_array_index(k, 2**32 - 1))]
+    return sorted(indices, key=int) + others
 
 def _json_value(v: Any) -> Any:
     """JSON.stringify writes NaN and Infinity as null"""

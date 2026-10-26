@@ -321,6 +321,18 @@ def test_numeric_versions_format_like_js(attributes, condition, expected):
     ([float("nan")], [None], True),
     ({"x": float("inf")}, {"x": None}, True),
     ({"x": [{}]}, {"x": [{}]}, True),
+    # JS orders array-index keys numerically before other keys
+    ({"2": "b", "1": "a"}, {"1": "a", "2": "b"}, True),
+    ({"10": 1, "9": 2}, {"9": 2, "10": 1}, True),
+    ({"x": 1, "1": "a"}, {"1": "a", "x": 1}, True),
+    ({"o": {"2": "b", "1": "a"}}, {"o": {"1": "a", "2": "b"}}, True),
+    ({"4294967294": 1, "0": 2}, {"0": 2, "4294967294": 1}, True),
+    # Keys that aren't canonical indices keep insertion order
+    ({"01": 1, "1": 2}, {"1": 2, "01": 1}, True),
+    ({"02": 1, "01": 2}, {"01": 2, "02": 1}, False),
+    ({"4294967296": 1, "4294967295": 2}, {"4294967295": 2, "4294967296": 1}, False),
+    ({"-1": 1, "x": 2}, {"x": 2, "-1": 1}, False),
+    ({"\u0661": 1, "x": 2}, {"x": 2, "\u0661": 1}, False),
 ])
 def test_literal_object_equality_matches_json_stringify(attribute, condition, expected):
     assert evalCondition({"a": attribute}, {"a": condition}) is expected
