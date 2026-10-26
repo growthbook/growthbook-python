@@ -1,4 +1,5 @@
-"""Literal JSON objects must not be mistaken for operator expressions."""
+"""Literal JSON objects must not be mistaken for operator expressions, except
+`{}`, which has no operators and always passes."""
 
 import pytest
 
@@ -9,10 +10,11 @@ from growthbook.core import evalCondition
 @pytest.mark.asyncio
 @pytest.mark.parametrize("async_client", [False, True])
 @pytest.mark.parametrize("condition, attribute, expected", [
+    # An empty object has no operators, so it passes (spec 0.11.0)
     ({}, {}, True),
-    ({}, {"other": 1}, False),
-    ({}, None, False),
-    ({}, "", False),
+    ({}, {"other": 1}, True),
+    ({}, None, True),
+    ({}, "", True),
     ({"": "match"}, {"": "match"}, True),
     ({"": "match"}, {"": "other"}, False),
     ({"": "match", "$eq": "literal"}, {"": "match", "$eq": "literal"}, True),

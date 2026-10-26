@@ -29,13 +29,29 @@ logger = logging.getLogger("growthbook.core")
 # errored). Matches CONTEXTUAL_BANDIT_FALLBACK_LEAF_ID in the JS SDK.
 CONTEXTUAL_BANDIT_FALLBACK_LEAF_ID = -1
 
+# True or False, or None when the result depends on an operator or saved group
+# type this SDK doesn't support. The public helpers treat None as failing.
+CondResult = Optional[bool]
+
+# Keys a condition can have that aren't attributes, besides $not, which is
+# also an operator on a value
+_CONDITION_OPERATORS = ("$or", "$nor", "$and", "$savedGroup")
+
+# Errors a malformed condition raises while being evaluated
+_EVAL_ERRORS = (TypeError, ValueError, AttributeError, IndexError, RecursionError)
+
+
+def _not(result: CondResult) -> CondResult:
+    return None if result is None else not result
+
+
 def evalCondition(
     attributes: Dict[str, Any], condition: Dict[str, Any],
     savedGroups: Optional[Dict[str, Any]] = None, visited: Optional[Set[str]] = None,
 ) -> bool:
     try:
-        return _eval_condition(attributes, condition, savedGroups, visited)
-    except (TypeError, ValueError, AttributeError, IndexError, RecursionError):
+        return _eval_condition(attributes, condition, savedGroups, visited) is True
+    except _EVAL_ERRORS:
         # Fail the entire condition so $not cannot turn an evaluation error into a match.
         return False
 
@@ -43,35 +59,36 @@ def evalCondition(
 def _eval_condition(
     attributes: Dict[str, Any], condition: Dict[str, Any],
     savedGroups: Optional[Dict[str, Any]], visited: Optional[Set[str]],
-) -> bool:
+) -> CondResult:
     """Evaluate recursively, leaving evaluation error handling to the outer caller."""
+    result: CondResult = True
     for key, value in condition.items():
+        r: CondResult
         if key == "$or":
-            if not evalOr(attributes, value, savedGroups, visited):
-                return False
+            r = _eval_or(attributes, value, savedGroups, visited)
         elif key == "$nor":
-            if evalOr(attributes, value, savedGroups, visited):
-                return False
+            r = _not(_eval_or(attributes, value, savedGroups, visited))
         elif key == "$and":
-            if not evalAnd(attributes, value, savedGroups, visited):
-                return False
+            r = _eval_and(attributes, value, savedGroups, visited)
         elif key == "$not":
-            if _eval_condition(attributes, value, savedGroups, visited):
-                return False
+            r = _not(_eval_condition(attributes, value, savedGroups, visited))
         elif key == "$savedGroup":
-            if not _eval_saved_group(attributes, value, savedGroups, visited):
-                return False
+            r = _eval_saved_group(attributes, value, savedGroups, visited)
         elif key == "$savedGroups":
+            r = False
+        else:
+            r = _eval_condition_value(value, getPath(attributes, key), savedGroups, visited=visited)
+        # One failing entry decides it, wherever an unsupported one is
+        if r is False:
             return False
-        elif not evalConditionValue(value, getPath(attributes, key), savedGroups, visited=visited):
-            return False
-
-    return True
+        if r is None:
+            result = None
+    return result
 
 def _eval_saved_group(
     attributes: Dict[str, Any], reference: Any, saved_groups: Optional[Dict[str, Any]],
     visited: Optional[Set[str]],
-) -> bool:
+) -> CondResult:
     """Resolve a typed saved group, keeping cycle detection local to this branch."""
     if not isinstance(reference, dict):
         return False
@@ -98,7 +115,8 @@ def _eval_saved_group(
         # Allocate the branch guard only when entering a condition group.
         next_visited = visited | {group_id} if visited else {group_id}
         return _eval_condition(attributes, condition, saved_groups, next_visited)
-    return False
+    # A group type added after this SDK was built. The client SDK may support it.
+    return None
 
 
 def _saved_group_values(saved_groups: Optional[Dict[str, Any]], group_id: str) -> Optional[List[Any]]:
@@ -115,30 +133,59 @@ def _saved_group_values(saved_groups: Optional[Dict[str, Any]], group_id: str) -
     return None
 
 
+def _is_new_group_type(entry: Any) -> bool:
+    """A saved group type added after this SDK was built"""
+    return isinstance(entry, dict) and entry.get("type") not in ("list", "condition")
+
+
 def evalOr(
     attributes: Dict[str, Any], conditions: List[Any], savedGroups: Optional[Dict[str, Any]],
     visited: Optional[Set[str]] = None,
 ) -> bool:
+    return _eval_or(attributes, conditions, savedGroups, visited) is True
+
+
+def _eval_or(
+    attributes: Dict[str, Any], conditions: List[Any], savedGroups: Optional[Dict[str, Any]],
+    visited: Optional[Set[str]],
+) -> CondResult:
     if len(conditions) == 0:
         return True
 
+    result: CondResult = False
     for condition in conditions:
-        if _eval_condition(attributes, condition, savedGroups, visited):
+        r = _eval_condition(attributes, condition, savedGroups, visited)
+        if r is True:
             return True
-    return False
+        if r is None:
+            result = None
+    return result
 
 
 def evalAnd(
     attributes: Dict[str, Any], conditions: List[Any], savedGroups: Optional[Dict[str, Any]],
     visited: Optional[Set[str]] = None,
 ) -> bool:
+    return _eval_and(attributes, conditions, savedGroups, visited) is True
+
+
+def _eval_and(
+    attributes: Dict[str, Any], conditions: List[Any], savedGroups: Optional[Dict[str, Any]],
+    visited: Optional[Set[str]],
+) -> CondResult:
+    result: CondResult = True
     for condition in conditions:
-        if not _eval_condition(attributes, condition, savedGroups, visited):
+        r = _eval_condition(attributes, condition, savedGroups, visited)
+        if r is False:
             return False
-    return True
+        if r is None:
+            result = None
+    return result
+
 
 def isOperatorObject(obj: Any) -> bool:
-    return bool(obj) and all(key.startswith("$") for key in obj.keys())
+    # An empty object has no operators, so it passes
+    return isinstance(obj, dict) and all(key.startswith("$") for key in obj.keys())
 
 def _is_numeric(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -171,11 +218,22 @@ def evalConditionValue(
     conditionValue: Any, attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
     insensitive: bool = False, visited: Optional[Set[str]] = None,
 ) -> bool:
-    if isinstance(conditionValue, dict) and isOperatorObject(conditionValue):
+    return _eval_condition_value(conditionValue, attributeValue, savedGroups, insensitive, visited) is True
+
+def _eval_condition_value(
+    conditionValue: Any, attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
+    insensitive: bool = False, visited: Optional[Set[str]] = None,
+) -> CondResult:
+    if isOperatorObject(conditionValue):
+        # This is a special operator condition and we should evaluate each one separately
+        result: CondResult = True
         for key, value in conditionValue.items():
-            if not evalOperatorCondition(key, attributeValue, value, savedGroups, visited):
+            r = _eval_operator_condition(key, attributeValue, value, savedGroups, visited)
+            if r is False:
                 return False
-        return True
+            if r is None:
+                result = None
+        return result
 
     # Simple equality comparison: values of different types never match
     if insensitive and isinstance(conditionValue, str) and isinstance(attributeValue, str):
@@ -203,18 +261,33 @@ def elemMatch(
     condition: Dict[str, Any], attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
     visited: Optional[Set[str]] = None,
 ) -> bool:
+    return _elem_match(condition, attributeValue, savedGroups, visited) is True
+
+def _elem_match(
+    condition: Dict[str, Any], attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
+    visited: Optional[Set[str]],
+) -> CondResult:
     if not isinstance(attributeValue, list):
         return False
 
+    # Operators test each element itself. A condition, including one that only
+    # uses $or, $and, $nor, or $savedGroup, tests each element's fields.
+    on_value = isOperatorObject(condition) and not any(k in _CONDITION_OPERATORS for k in condition)
+    result: CondResult = False
     for item in attributeValue:
-        if isOperatorObject(condition):
-            if evalConditionValue(condition, item, savedGroups, visited=visited):
-                return True
+        # Only skip None elements; falsy values like 0, "" and False are valid
+        # array members and must still be tested against the condition.
+        if item is None:
+            continue
+        if on_value:
+            r = _eval_condition_value(condition, item, savedGroups, visited=visited)
         else:
-            if _eval_condition(item, condition, savedGroups, visited):
-                return True
-
-    return False
+            r = _eval_condition(item, condition, savedGroups, visited)
+        if r is True:
+            return True
+        if r is None:
+            result = None
+    return result
 
 def compare(val1: Any, val2: Any) -> int:
     # IEEE 754: NaN is unordered with everything (including itself), so the
@@ -260,6 +333,12 @@ def evalOperatorCondition(
     operator: str, attributeValue: Any, conditionValue: Any, savedGroups: Any,
     visited: Optional[Set[str]] = None,
 ) -> bool:
+    return _eval_operator_condition(operator, attributeValue, conditionValue, savedGroups, visited) is True
+
+def _eval_operator_condition(
+    operator: str, attributeValue: Any, conditionValue: Any, savedGroups: Any,
+    visited: Optional[Set[str]] = None,
+) -> CondResult:
     if operator == "$eq":
         return _js_strict_equal(attributeValue, conditionValue)
     elif operator == "$ne":
@@ -299,6 +378,8 @@ def evalOperatorCondition(
         if not isinstance(conditionValue, str):
             return False
         values = savedGroups.get(conditionValue) if savedGroups is not None else None
+        if _is_new_group_type(values):
+            return None
         if not isinstance(values, list):
             values = _saved_group_values(savedGroups, conditionValue)
         if values is None:
@@ -349,19 +430,19 @@ def evalOperatorCondition(
             return False
         return not isIn(conditionValue, attributeValue, insensitive=True)
     elif operator == "$elemMatch":
-        return elemMatch(conditionValue, attributeValue, savedGroups, visited)
+        return _elem_match(conditionValue, attributeValue, savedGroups, visited)
     elif operator == "$size":
         if not isinstance(attributeValue, list):
             return False
-        return evalConditionValue(conditionValue, len(attributeValue), savedGroups, visited=visited)
+        return _eval_condition_value(conditionValue, len(attributeValue), savedGroups, visited=visited)
     elif operator == "$all":
         if not isinstance(conditionValue, list):
             return False
-        return isInAll(conditionValue, attributeValue, savedGroups, insensitive=False, visited=visited)
+        return _is_in_all(conditionValue, attributeValue, savedGroups, insensitive=False, visited=visited)
     elif operator == "$alli":
         if not isinstance(conditionValue, list):
             return False
-        return isInAll(conditionValue, attributeValue, savedGroups, insensitive=True, visited=visited)
+        return _is_in_all(conditionValue, attributeValue, savedGroups, insensitive=True, visited=visited)
     elif operator == "$exists":
         if not conditionValue:
             return attributeValue is None
@@ -369,8 +450,13 @@ def evalOperatorCondition(
     elif operator == "$type":
         return bool(getType(attributeValue) == conditionValue)
     elif operator == "$not":
-        return not evalConditionValue(conditionValue, attributeValue, savedGroups, visited=visited)
-    return False
+        return _not(_eval_condition_value(conditionValue, attributeValue, savedGroups, visited=visited))
+    # Keys this SDK knows, but on a condition rather than on a value, where
+    # they never match
+    if operator in _CONDITION_OPERATORS:
+        return False
+    logger.debug("Unknown operator: %s", operator)
+    return None
 
 def paddedVersionString(input: Any) -> str:
     # If input is a number, convert to a string
@@ -464,18 +550,30 @@ def isInAll(
     insensitive: bool = False, visited: Optional[Set[str]] = None,
 ) -> bool:
     """Check if attributeValue (array) contains all elements in conditionValue"""
+    return _is_in_all(conditionValue, attributeValue, savedGroups, insensitive, visited) is True
+
+def _is_in_all(
+    conditionValue: List[Any], attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
+    insensitive: bool = False, visited: Optional[Set[str]] = None,
+) -> CondResult:
     if not isinstance(attributeValue, list):
         return False
-    
+
+    result: CondResult = True
     for cond in conditionValue:
-        passing = False
+        passed: CondResult = False
         for attr in attributeValue:
-            if evalConditionValue(cond, attr, savedGroups, insensitive, visited):
-                passing = True
+            r = _eval_condition_value(cond, attr, savedGroups, insensitive, visited)
+            if r is True:
+                passed = True
                 break
-        if not passing:
+            if r is None:
+                passed = None
+        if passed is False:
             return False
-    return True
+        if passed is None:
+            result = None
+    return result
 
 def _getOrigHashValue(
     eval_context: EvaluationContext,
