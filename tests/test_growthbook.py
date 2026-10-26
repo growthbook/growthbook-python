@@ -251,6 +251,26 @@ def test_logical_elem_match_reads_nested_array_indices(condition, expected):
     assert rule == ({"force": True} if expected else {"condition": {"$not": {}}, "force": None})
 
 
+@pytest.mark.parametrize("fields, included, excluded", [
+    # A missing field is undefined in JS, which never matches null
+    ({}, False, True),
+    ({"region": None}, True, False),
+    ({"region": "eu"}, False, True),
+])
+def test_reduce_payload_custom_field_missing_vs_null(fields, included, excluded):
+    payload = {"features": {"f": {"defaultValue": True, "metadata": {"customFields": fields}}}}
+    flt = {"customFields": {"region": [None]}}
+    assert ("f" in reduce_payload(payload, {}, include=flt)["features"]) is included
+    assert ("f" in reduce_payload(payload, {}, exclude=flt)["features"]) is excluded
+
+
+def test_reduce_payload_missing_tags_and_projects_never_match_null():
+    payload = {"features": {"f": {"defaultValue": True}}}
+    for key in ("tags", "projects"):
+        assert "f" not in reduce_payload(payload, {}, include={key: [None]})["features"]
+        assert "f" in reduce_payload(payload, {}, exclude={key: [None]})["features"]
+
+
 def test_conditions(evalCondition_data):
     _, condition, attributes, expected, savedGroups = (evalCondition_data + [None]*5)[:5]
     assert evalCondition(attributes, condition, savedGroups) == expected

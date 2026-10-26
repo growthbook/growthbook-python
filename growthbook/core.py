@@ -1901,9 +1901,12 @@ def reduce_payload(
     all_features: Dict[str, Any] = payload.get("features") or {}
     all_experiments: List[Any] = payload.get("experiments") or []
 
+    # Stands for a missing key, which is undefined in JS and matches nothing, not even null
+    missing = object()
+
     def has(actual: Any, want: Any) -> bool:
         # Only a list counts, as with $in, and any one of its values is enough
-        return isinstance(want, list) and isIn(want, actual)
+        return isinstance(want, list) and actual is not missing and isIn(want, actual)
 
     def meta_of(item: Any) -> Dict[str, Any]:
         meta = item.get("metadata") if isinstance(item, dict) else None
@@ -1924,7 +1927,7 @@ def reduce_payload(
         return (
             not _js_truthy(inc.get("projects"))
             or _js_truthy(meta.get("allProjects"))
-            or has(meta.get("projects"), inc.get("projects"))
+            or has(meta.get("projects", missing), inc.get("projects"))
         )
 
     def matches(meta: Dict[str, Any]) -> bool:
@@ -1938,11 +1941,11 @@ def reduce_payload(
         out_fields = out_fields if isinstance(out_fields, dict) else {}
         return (
             in_projects(meta)
-            and (not _js_truthy(inc.get("tags")) or has(meta.get("tags"), inc.get("tags")))
-            and all(has(fields.get(k), v) for k, v in in_fields.items())
-            and not has(meta.get("projects"), exc.get("projects"))
-            and not has(meta.get("tags"), exc.get("tags"))
-            and not any(has(fields.get(k), v) for k, v in out_fields.items())
+            and (not _js_truthy(inc.get("tags")) or has(meta.get("tags", missing), inc.get("tags")))
+            and all(has(fields.get(k, missing), v) for k, v in in_fields.items())
+            and not has(meta.get("projects", missing), exc.get("projects"))
+            and not has(meta.get("tags", missing), exc.get("tags"))
+            and not any(has(fields.get(k, missing), v) for k, v in out_fields.items())
         )
 
     def prune(item: Dict[str, Any], is_rule: bool) -> Dict[str, Any]:
