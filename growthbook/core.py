@@ -362,16 +362,25 @@ def _eval_condition_value(
     return _strict_deep_equal(conditionValue, attributeValue)
 
 def _strict_deep_equal(a: Any, b: Any) -> bool:
-    """Structural equality where every nested value must have the same JSON type,
-    so True never equals 1 the way it does with Python's ==."""
+    """Literal equality, matching JS, which compares the JSON.stringify output
+    of objects and arrays. Every nested value must have the same JSON type, so
+    True never equals 1 the way it does with Python's ==, object keys must be
+    in the same order, and 1.0 equals 1."""
     ta = getType(a)
     if ta != getType(b):
         return False
     if ta == "array":
-        return len(a) == len(b) and all(_strict_deep_equal(x, y) for x, y in zip(a, b))
+        return len(a) == len(b) and all(_strict_deep_equal(_json_value(x), _json_value(y)) for x, y in zip(a, b))
     if ta == "object":
-        return a.keys() == b.keys() and all(_strict_deep_equal(a[k], b[k]) for k in a)
+        return (
+            list(a.keys()) == list(b.keys())
+            and all(_strict_deep_equal(_json_value(a[k]), _json_value(b[k])) for k in a)
+        )
     return bool(a == b)
+
+def _json_value(v: Any) -> Any:
+    """JSON.stringify writes NaN and Infinity as null"""
+    return None if isinstance(v, float) and not math.isfinite(v) else v
 
 def _is_orderable(a: Any, b: Any) -> bool:
     """Only two numbers or two strings can be ordered. Booleans are not ordered."""

@@ -306,6 +306,31 @@ def test_numeric_versions_format_like_js(attributes, condition, expected):
     assert evalCondition(attributes, condition) is expected
 
 
+@pytest.mark.parametrize("attribute, condition, expected", [
+    # JS compares JSON.stringify output, so key order matters
+    ({"y": 2, "x": 1}, {"x": 1, "y": 2}, False),
+    ({"x": 1, "y": 2}, {"x": 1, "y": 2}, True),
+    ([{"y": 1, "x": 2}], [{"x": 2, "y": 1}], False),
+    # 1.0 and -0.0 serialize as 1 and 0
+    ({"x": 1.0}, {"x": 1}, True),
+    ([1.0, {"b": -0.0}], [1, {"b": 0}], True),
+    # Booleans and numbers serialize differently
+    ({"x": True}, {"x": 1}, False),
+    ([1], [True], False),
+    # Non-finite numbers serialize as null
+    ([float("nan")], [None], True),
+    ({"x": float("inf")}, {"x": None}, True),
+    ({"x": [{}]}, {"x": [{}]}, True),
+])
+def test_literal_object_equality_matches_json_stringify(attribute, condition, expected):
+    assert evalCondition({"a": attribute}, {"a": condition}) is expected
+    payload = {"features": {"f": {"defaultValue": False, "rules": [
+        {"condition": {"a": condition}, "force": True},
+    ]}}}
+    rule = reduce_payload(payload, {"a": attribute})["features"]["f"]["rules"][0]
+    assert rule == ({"force": True} if expected else {"condition": {"$not": {}}, "force": None})
+
+
 def test_conditions(evalCondition_data):
     _, condition, attributes, expected, savedGroups = (evalCondition_data + [None]*5)[:5]
     assert evalCondition(attributes, condition, savedGroups) == expected
