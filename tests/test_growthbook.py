@@ -98,14 +98,29 @@ def test_get_qs_override(getQueryStringOverride_data):
         "%C2%B2",  # superscript two: str.isdigit() is True but int() raises
         "%E2%91%A0",  # circled digit one: same
         "%D9%A1",  # Arabic-Indic digit one: int() accepts it, the JS SDK does not
+        "1" * 5000,  # past Python's int string conversion limit: int() raises
     ],
+    ids=["superscript", "circled", "arabic-indic", "too-many-digits"],
 )
-def test_get_qs_override_ignores_non_ascii_digits(value):
+def test_get_qs_override_ignores_invalid_values(value):
     url = "https://example.com/?my-test=" + value
     assert getQueryStringOverride("my-test", url, 2) is None
 
     gb = GrowthBook(attributes={"id": "1"}, url=url)
     result = gb.run(Experiment(key="my-test", variations=[0, 1]))
+    assert result.inExperiment is True
+    assert result.hashUsed is True
+    gb.destroy()
+
+
+def test_get_qs_override_ignores_malformed_url():
+    # urlparse() raises "Invalid IPv6 URL" for this host
+    url = "https://[::1/?my-test=1"
+    assert getQueryStringOverride("my-test", url, 2) is None
+
+    gb = GrowthBook(attributes={"id": "1"}, url=url)
+    result = gb.run(Experiment(key="my-test", variations=[0, 1]))
+    assert result.inExperiment is True
     assert result.hashUsed is True
     gb.destroy()
 

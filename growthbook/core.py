@@ -585,7 +585,10 @@ def chooseVariation(n: float, ranges: List[Tuple[float, float]]) -> int:
     return -1
 
 def getQueryStringOverride(id: str, url: str, numVariations: int) -> Optional[int]:
-    res = urlparse(url)
+    try:
+        res = urlparse(url)
+    except ValueError:  # e.g. a malformed host like "https://[::1/"
+        return None
     if not res.query:
         return None
     qs = parse_qs(res.query)
@@ -596,7 +599,10 @@ def getQueryStringOverride(id: str, url: str, numVariations: int) -> Optional[in
     # rejects) and "١" (which the JS SDK's parseInt rejects); only 0-9 count.
     if variation is None or not (variation.isascii() and variation.isdigit()):
         return None
-    varId = int(variation)
+    try:
+        varId = int(variation)
+    except ValueError:  # more digits than Python's int string conversion limit
+        return None
     if varId < 0 or varId >= numVariations:
         return None
     return varId
