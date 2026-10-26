@@ -1736,3 +1736,22 @@ async def test_reduce_payload_includes_feature_objects():
         json.dumps(reduced)
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_reduce_payload_keeps_zero_coverage():
+    # A rule with coverage 0 includes nobody; dropping the 0 would make the
+    # reduced payload include everyone.
+    client = GrowthBookClient()
+    try:
+        await client.set_features({
+            "obj": Feature(defaultValue=False, rules=[FeatureRule(force=True, coverage=0)]),
+            "mixed": {"defaultValue": False, "rules": [FeatureRule(force=True, coverage=0)]},
+        })
+        user = UserContext(attributes={"id": "123"})
+        assert await client.get_feature_value("obj", None, user) is False
+        reduced = client.reduce_payload(user)
+        for key in ("obj", "mixed"):
+            assert reduced["features"][key]["rules"] == [{"force": True, "coverage": 0, "hashVersion": 1}]
+    finally:
+        await client.close()

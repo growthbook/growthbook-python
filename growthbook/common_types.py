@@ -426,7 +426,8 @@ class FeatureRule(object):
             data["variations"] = self.variations
         if self.weights is not None:
             data["weights"] = self.weights
-        if self.coverage and self.coverage != 1:
+        # 0 is kept: a rule with no coverage includes nobody
+        if self.coverage is not None and self.coverage != 1:
             data["coverage"] = self.coverage
         if self.condition is not None:
             data["condition"] = self.condition
