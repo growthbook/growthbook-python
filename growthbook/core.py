@@ -4,7 +4,6 @@ import math
 import re
 import json
 import warnings
-from decimal import Decimal
 from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
@@ -616,10 +615,14 @@ def _js_number_to_string(value: Union[int, float]) -> str:
     if math.isinf(x):
         return "Infinity"
     # x = 0.d1..dk * 10^n
-    _, digit_tuple, exponent = Decimal(repr(x)).normalize().as_tuple()
-    digits = "".join(map(str, digit_tuple))
+    # repr gives forms such as "1.5", "0.0001", "1e+16" or "1.5e-07"; read its
+    # digits and exponent as text so the decimal context can't affect them
+    mantissa, _, exp = repr(x).partition("e")
+    whole, _, fraction = mantissa.partition(".")
+    padded = (whole + fraction).lstrip("0")
+    digits = padded.rstrip("0")
     k = len(digits)
-    n = int(exponent) + k
+    n = int(exp or "0") - len(fraction) + len(padded)
     if k <= n <= 21:
         return digits + "0" * (n - k)
     if 0 < n <= 21:

@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 
+import decimal
 import json
 import os
 import warnings
@@ -304,6 +305,25 @@ def test_js_number_to_string(value, expected):
 ])
 def test_numeric_versions_format_like_js(attributes, condition, expected):
     assert evalCondition(attributes, condition) is expected
+
+
+@pytest.mark.parametrize("rounding, trap", [
+    (decimal.ROUND_HALF_EVEN, None),
+    (decimal.ROUND_DOWN, None),
+    (decimal.ROUND_HALF_EVEN, decimal.Inexact),
+    (decimal.ROUND_HALF_EVEN, decimal.Rounded),
+])
+def test_numeric_versions_ignore_decimal_context(rounding, trap):
+    # The application's decimal context must not change number formatting
+    with decimal.localcontext() as ctx:
+        ctx.prec = 2
+        ctx.rounding = rounding
+        if trap:
+            ctx.traps[trap] = True
+        assert evalCondition({"a": 1.21}, {"a": {"$veq": 1.24}}) is False
+        assert evalCondition({"a": 1.21}, {"a": {"$veq": 1.21}}) is True
+        assert _js_number_to_string(123456789.123) == "123456789.123"
+        assert _js_number_to_string(1.5e-7) == "1.5e-7"
 
 
 @pytest.mark.parametrize("attribute, condition, expected", [
