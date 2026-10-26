@@ -627,7 +627,8 @@ def _isIncludedInRollout(
     if range:
         return inRange(n, range)
     elif coverage is not None:
-        return n <= coverage
+        # Half-open, like inRange: a coverage of k/10000 includes exactly k buckets
+        return n < coverage
 
     return True
 
