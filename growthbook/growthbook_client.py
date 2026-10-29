@@ -1323,7 +1323,7 @@ class GrowthBookClient:
             name: _hash_string(value)
             for name, value in user_context.attributes.items()
             if _is_hashable(value)
-        }
+        } if self.options.sticky_bucket_service else {}
         sticky_assignments = await self._refresh_sticky_buckets(sticky_attributes)
 
         # Intentionally the SHARED cached dict, not a copy: core mutates it in
