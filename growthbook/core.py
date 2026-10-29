@@ -781,7 +781,11 @@ def _is_hashable(value: Any) -> bool:
     if isinstance(value, bool):
         return False
     if isinstance(value, (int, float)):
-        return value != 0 and math.isfinite(value)
+        try:
+            return value != 0 and math.isfinite(value)
+        except OverflowError:
+            # An int too large for a double is Infinity in JS
+            return False
     return False
 
 def _hash_string(value: Any) -> str:

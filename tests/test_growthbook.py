@@ -714,7 +714,7 @@ def test_feature_usage_callback_error_handling():
     gb.destroy()
 
 
-@pytest.mark.parametrize("user_id", [True, False, 0, 0.0, "", None, [], ["1"], {}, {"a": 1}, float("inf")])
+@pytest.mark.parametrize("user_id", [True, False, 0, 0.0, "", None, [], ["1"], {}, {"a": 1}, float("inf"), 10**400])
 def test_unhashable_ids_use_the_fallback_attribute(user_id):
     # Only non-empty strings and finite non-zero numbers identify a user (as
     # in JS); anything else counts as missing and the fallback is used
@@ -758,8 +758,9 @@ def test_numeric_ids_hash_like_js_strings():
 
 def test_hash_uses_utf16_code_units():
     # JS hashes UTF-16 code units, so an astral character is two units
-    assert gbhash("", "😀", 1) == gbhash("", "😀", 1)
-    assert gbhash("seed", "é", 2) == 0.7092 or gbhash("seed", "é", 2) is not None
+    # Expected values from the JS SDK
+    assert gbhash("", "😀", 2) == 0.4971
+    assert gbhash("", "josé", 1) == 0.586
 
 
 def test_filters_exclude_users_without_a_hash_value():

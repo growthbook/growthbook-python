@@ -19,7 +19,7 @@ from datetime import datetime
 from growthbook import FeatureRepository, feature_repo
 from contextlib import asynccontextmanager
 
-from .core import _eval_feature_and_report, reduce_payload, run_experiment
+from .core import _eval_feature_and_report, _hash_string, _is_hashable, reduce_payload, run_experiment
 from .common_types import (
     T,
     AsyncEventLogger,
@@ -1317,8 +1317,14 @@ class GrowthBookClient:
                 **self._context_callbacks(tracking_buffer),
             )
 
-        # Get sticky bucket assignments if needed
-        sticky_assignments = await self._refresh_sticky_buckets(user_context.attributes)
+        # Get sticky bucket assignments if needed. Values are formatted the way
+        # evaluation saves them, so {"id": 1.0} reads the "id||1" doc.
+        sticky_attributes = {
+            name: _hash_string(value)
+            for name, value in user_context.attributes.items()
+            if _is_hashable(value)
+        }
+        sticky_assignments = await self._refresh_sticky_buckets(sticky_attributes)
 
         # Intentionally the SHARED cached dict, not a copy: core mutates it in
         # place when an experiment assigns a new sticky bucket, which is what

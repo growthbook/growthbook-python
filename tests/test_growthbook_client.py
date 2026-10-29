@@ -18,7 +18,7 @@ import asyncio
 import os
 import json
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from growthbook.common_types import Experiment, Feature, FeatureRule, Options
 from growthbook.growthbook_client import (
@@ -954,6 +954,31 @@ async def test_sticky_bucket_fetched_per_evaluation():
             assert service.get_all_calls == 2  # sequential evals refetch
             await client.eval_feature("read-feature", UserContext(attributes={"id": "user-2"}))
             assert service.get_all_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_sticky_bucket_fetch_formats_attributes_like_evaluation():
+    """Sticky docs are saved under the formatted hash value ("id||1" for
+    1.0), so the fetch must ask for the same keys, and skip values that
+    can't be hash values."""
+    service = AsyncInMemoryStickyBucketService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service)
+    fetched: List[Dict[str, str]] = []
+    original = service.get_all_assignments
+
+    async def recording_get_all_assignments(attributes: Dict[str, str]) -> Dict[str, Dict]:
+        fetched.append(dict(attributes))
+        return await original(attributes)
+
+    service.get_all_assignments = recording_get_all_assignments  # type: ignore[method-assign]
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            await client.eval_feature("read-feature", UserContext(
+                attributes={"id": 1.0, "deviceId": 1.5, "loggedIn": True, "company": ""}))
+
+    assert fetched == [{"id": "1", "deviceId": "1.5"}]
 
 
 @pytest.mark.asyncio
