@@ -429,6 +429,18 @@ def _elem_match(
             result = None
     return result
 
+def _compare_non_ascii_strings(val1: Any, val2: Any) -> Optional[int]:
+    """Order two strings by UTF-16 code units like JS, or None if not two non-ASCII strings.
+
+    A character above U+FFFF (a surrogate pair) sorts below U+E000..U+FFFF in
+    JS. Big-endian UTF-16 bytes compare in that order.
+    """
+    if not (isinstance(val1, str) and isinstance(val2, str)) or (val1.isascii() and val2.isascii()):
+        return None
+    units1 = val1.encode("utf-16-be", "surrogatepass")
+    units2 = val2.encode("utf-16-be", "surrogatepass")
+    return (units1 > units2) - (units1 < units2)
+
 def compare(val1: Any, val2: Any) -> int:
     # IEEE 754: NaN is unordered with everything (including itself), so the
     # "0 if neither > nor <" fallthrough below would wrongly report equal.
@@ -438,6 +450,10 @@ def compare(val1: Any, val2: Any) -> int:
         raise ValueError("NaN")
     if isinstance(val2, float) and math.isnan(val2):
         raise ValueError("NaN")
+
+    utf16 = _compare_non_ascii_strings(val1, val2)
+    if utf16 is not None:
+        return utf16
 
     if val1 > val2:
         return 1
@@ -754,31 +770,63 @@ def _is_in_all(
             result = None
     return result
 
+def _is_hashable(value: Any) -> bool:
+    """Whether an attribute value can identify a user, like the JS SDK's `isHashable`.
+
+    Only non-empty strings and finite, non-zero numbers count. Booleans never
+    do, even though `bool` is a subclass of `int`.
+    """
+    if isinstance(value, str):
+        return value != ""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        return value != 0 and math.isfinite(value)
+    return False
+
+def _hash_string(value: Any) -> str:
+    """Format a hashable attribute value the way JS `String()` does."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return _js_number_to_string(value)
+    return ""
+
 def _getOrigHashValue(
     eval_context: EvaluationContext,
     attr: Optional[str] = "id",
     fallbackAttr: Optional[str] = None
-) -> Tuple[str, str]:
+) -> Tuple[str, Any]:
+    """Return the hash attribute name and its raw value ("" when missing).
+
+    A value that isn't hashable (see `_is_hashable`) counts as missing, and
+    then the fallback attribute is tried with the same rule. Callers decide
+    whether a fallback applies (experiments use it only with sticky bucketing).
+    """
     # attr = attr or "id" -- Fix for the flaky behavior of sticky bucket assignment
     actual_attr: str = attr if attr is not None else "id"
-    val = ""
+    attributes = eval_context.user.attributes
+    val: Any = ""
 
-    if actual_attr in eval_context.user.attributes:
-        val = "" if eval_context.user.attributes[actual_attr] is None else eval_context.user.attributes[actual_attr]
+    if _is_hashable(attributes.get(actual_attr)):
+        val = attributes[actual_attr]
 
     # If no match, try fallback
-    if (not val or val == "") and fallbackAttr and eval_context.global_ctx.options.sticky_bucket_service:
-        if fallbackAttr in eval_context.user.attributes:
-            val = "" if eval_context.user.attributes[fallbackAttr] is None else eval_context.user.attributes[fallbackAttr]
-
-        if val:
-            actual_attr = fallbackAttr
+    if not val and fallbackAttr and _is_hashable(attributes.get(fallbackAttr)):
+        val = attributes[fallbackAttr]
+        actual_attr = fallbackAttr
 
     return (actual_attr, val)
 
 def _getHashValue(eval_context: EvaluationContext, attr: Optional[str] = None, fallbackAttr: Optional[str] = None) -> Tuple[str, str]:
     (attr, val) = _getOrigHashValue(attr=attr, fallbackAttr=fallbackAttr, eval_context=eval_context)
-    return (attr, str(val))
+    return (attr, _hash_string(val))
+
+def _experiment_fallback_attribute(experiment: Experiment[Any], eval_context: EvaluationContext) -> Optional[str]:
+    """Experiments only use their fallback attribute when sticky bucketing is on, like JS."""
+    if eval_context.global_ctx.options.sticky_bucket_service and not experiment.disableStickyBucketing:
+        return experiment.fallbackAttribute
+    return None
 
 def _isIncludedInRollout(
     seed: str,
@@ -813,13 +861,14 @@ def _isIncludedInRollout(
 
 def _isFilteredOut(filters: List[Filter], eval_context: EvaluationContext) -> bool:
     for filter in filters:
-        (_, hash_value) = _getHashValue(attr=filter.get("attribute", "id"), eval_context=eval_context)  
+        # A user without a hash value (or an unknown hash version) is filtered out, like JS
+        (_, hash_value) = _getHashValue(attr=filter.get("attribute", "id"), eval_context=eval_context)
         if hash_value == "":
-            return False
+            return True
 
         n = gbhash(filter.get("seed", ""), hash_value, filter.get("hashVersion", 2))
         if n is None:
-            return False
+            return True
 
         filtered = False
         for range in filter["ranges"]:
@@ -832,13 +881,15 @@ def _isFilteredOut(filters: List[Filter], eval_context: EvaluationContext) -> bo
 
 
 def fnv1a32(s: str) -> int:
+    """FNV-1a 32 over UTF-16 code units, like the JS SDK's `charCodeAt` loop."""
     hval = 0x811C9DC5
     if s.isascii():
         for b in s.encode():
             hval = ((hval ^ b) * 0x01000193) & 0xFFFFFFFF
     else:
-        for ch in s:
-            hval = ((hval ^ ord(ch)) * 0x01000193) & 0xFFFFFFFF
+        data = s.encode("utf-16-le", "surrogatepass")
+        for i in range(0, len(data), 2):
+            hval = ((hval ^ (data[i] | (data[i + 1] << 8))) * 0x01000193) & 0xFFFFFFFF
     return hval
 
 def inNamespace(userId: str, namespace: Tuple[str, float, float]) -> bool:
@@ -1566,7 +1617,11 @@ def _run_experiment(experiment: Experiment[Any],
         return _getExperimentResult(experiment=experiment, featureId=featureId, evalContext=evalContext)
 
     # 6. Get the user hash attribute and value
-    (hashAttribute, hashValue) = _getHashValue(attr=experiment.hashAttribute, fallbackAttr=experiment.fallbackAttribute, eval_context=evalContext)
+    (hashAttribute, hashValue) = _getHashValue(
+        attr=experiment.hashAttribute,
+        fallbackAttr=_experiment_fallback_attribute(experiment, evalContext),
+        eval_context=evalContext,
+    )
     if not hashValue:
         logger.debug(
             "Skip experiment %s because user's hashAttribute value is empty",
@@ -1824,7 +1879,7 @@ def _getExperimentResult(
         meta = experiment.meta[variationId]
 
     (hashAttribute, hashValue) = _getOrigHashValue(attr=experiment.hashAttribute,
-                                                    fallbackAttr=experiment.fallbackAttribute,
+                                                    fallbackAttr=_experiment_fallback_attribute(experiment, evalContext),
                                                     eval_context=evalContext)
 
     # Contextual bandit exposure metadata is only reported for real hashed

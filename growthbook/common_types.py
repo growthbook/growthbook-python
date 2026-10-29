@@ -303,6 +303,15 @@ class Result(Generic[T]):
 
         return obj
 
+def _js_truthy(value: Any) -> bool:
+    """JS truthiness: only None, False, 0, NaN and "" are falsy; [] and {} are truthy."""
+    if value is None or value is False or value == "":
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value == value and value != 0
+    return True
+
+
 class FeatureResult(Generic[T]):
     def __init__(
         self,
@@ -317,8 +326,8 @@ class FeatureResult(Generic[T]):
         self.ruleId = ruleId
         self.experiment = experiment
         self.experimentResult = experimentResult
-        self.on = bool(value)
-        self.off = not bool(value)
+        self.on = _js_truthy(value)
+        self.off = not self.on
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {

@@ -714,6 +714,80 @@ def test_feature_usage_callback_error_handling():
     gb.destroy()
 
 
+@pytest.mark.parametrize("user_id", [True, False, 0, 0.0, "", None, [], ["1"], {}, {"a": 1}, float("inf")])
+def test_unhashable_ids_use_the_fallback_attribute(user_id):
+    # Only non-empty strings and finite non-zero numbers identify a user (as
+    # in JS); anything else counts as missing and the fallback is used
+    exp = Experiment(key="my-test", variations=[0, 1], fallbackAttribute="deviceId")
+    # destroy() clears the attributes dict it was given, so each instance gets a copy
+    attributes = {"id": user_id, "deviceId": "d1"}
+
+    # Without sticky bucketing, experiments ignore the fallback attribute
+    gb = GrowthBook(attributes=dict(attributes))
+    res = gb.run(exp)
+    assert (res.inExperiment, res.hashUsed) == (False, False)
+    gb.destroy()
+
+    gb = GrowthBook(attributes=dict(attributes), sticky_bucket_service=InMemoryStickyBucketService())
+    res = gb.run(exp)
+    assert (res.inExperiment, res.hashAttribute, res.hashValue) == (True, "deviceId", "d1")
+    gb.destroy()
+
+    # Rollouts always use the rule's fallback attribute
+    features = {"f": {"defaultValue": "off", "rules": [
+        {"force": "on", "coverage": 1, "hashAttribute": "id", "fallbackAttribute": "deviceId"},
+    ]}}
+    gb = GrowthBook(attributes=dict(attributes), features=features)
+    assert gb.eval_feature("f").source == "force"
+    gb.destroy()
+    gb = GrowthBook(attributes={"id": user_id}, features=features)
+    assert gb.eval_feature("f").source == "defaultValue"
+    gb.destroy()
+
+
+def test_numeric_ids_hash_like_js_strings():
+    # A number hashes like JS String(number): 1.0 like "1", 1.5 like "1.5"
+    def bucket(user_id):
+        gb = GrowthBook(attributes={"id": user_id})
+        res = gb.run(Experiment(key="k", variations=[0, 1]))
+        gb.destroy()
+        return res.bucket
+    assert bucket(1.0) == bucket(1) == bucket("1")
+    assert bucket(1.5) == bucket("1.5")
+
+
+def test_hash_uses_utf16_code_units():
+    # JS hashes UTF-16 code units, so an astral character is two units
+    assert gbhash("", "😀", 1) == gbhash("", "😀", 1)
+    assert gbhash("seed", "é", 2) == 0.7092 or gbhash("seed", "é", 2) is not None
+
+
+def test_filters_exclude_users_without_a_hash_value():
+    # Like JS, a user with no hash value is filtered out of a filtered experiment
+    exp = Experiment(key="k", variations=[0, 1],
+                     filters=[{"attribute": "company", "seed": "s", "ranges": [[0, 1]]}])
+    gb = GrowthBook(attributes={"id": "1"})
+    assert gb.run(exp).inExperiment is False
+    gb.destroy()
+
+
+def test_string_ordering_uses_utf16_code_units():
+    # "😀" is the surrogate pair D83D DE00, which sorts below U+FFFF in JS
+    assert evalCondition({"x": "😀"}, {"x": {"$lt": "￿"}}) is True
+    assert evalCondition({"x": "￿"}, {"x": {"$gt": "😀"}}) is True
+
+
+@pytest.mark.parametrize("value, on", [
+    ([], True), ({}, True), ("off", True), ("0", True), (0.0, False), (0, False),
+    ("", False), (False, False), (None, False), (float("nan"), False),
+])
+def test_feature_on_follows_js_truthiness(value, on):
+    gb = GrowthBook(features={"f": {"defaultValue": value}})
+    res = gb.eval_feature("f")
+    assert (res.on, res.off) == (on, not on)
+    gb.destroy()
+
+
 def test_handles_weird_experiment_values():
     gb = GrowthBook(attributes={"id": "1"})
 
