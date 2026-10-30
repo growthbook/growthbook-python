@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from urllib3.response import BaseHTTPResponse
 
 from .core import _eval_feature_and_report, _getHashValue, run_experiment
+from .remote_saved_groups import RemoteSavedGroupsCache, is_missing_remote_group_ids, with_remote_group_ids
 
 logger = logging.getLogger("growthbook")
 
@@ -941,8 +942,14 @@ class GrowthBook(object):
         # a client SDK (see get_deferred_tracking_calls). Independent of
         # on_experiment_viewed.
         defer_tracking: bool = False,
+        # After defer_tracking so every earlier positional index is preserved.
+        # The remote saved groups the user is in, resolved by the app (see
+        # set_remote_group_ids).
+        remote_group_ids: Optional[List[str]] = None,
+        remoteGroupIds: Optional[List[str]] = None,
     ) -> None:
         remote_eval = remote_eval or remoteEval
+        self._remote_group_ids = remote_group_ids if remote_group_ids is not None else remoteGroupIds
         saved_groups = saved_groups if saved_groups is not None else savedGroups
         contextual_bandits = contextual_bandits if contextual_bandits is not None else contextualBandits
         cache_key_attributes = cache_key_attributes if cache_key_attributes is not None else cacheKeyAttributes
@@ -968,6 +975,8 @@ class GrowthBook(object):
         self._url = url
         self._features: Dict[str, Feature] = {}
         self._saved_groups = saved_groups if saved_groups is not None else {}
+        self._warned_missing_remote_group_ids = False
+        self._remote_saved_groups_cache = RemoteSavedGroupsCache()
         self._contextual_bandits = contextual_bandits if contextual_bandits is not None else {}
         self._api_host = api_host
         self._client_key = client_key
@@ -1077,7 +1086,7 @@ class GrowthBook(object):
 
     def _remote_eval_payload(self) -> Dict[str, Any]:
         return build_remote_eval_payload(
-            self._attributes, self._forcedVariations, self._url,
+            with_remote_group_ids(self._attributes, self._remote_group_ids), self._forcedVariations, self._url,
             forced_features=self._forcedFeatures,
         )
 
@@ -1299,6 +1308,23 @@ class GrowthBook(object):
         if self._remoteEval and self._client_key:
             self.load_features()
 
+    def set_remote_group_ids(self, remote_group_ids: Optional[List[str]]) -> None:
+        """Set the remote saved groups the user is in. A remote saved group keeps
+        its members outside the payload, so the app resolves the user's groups
+        and passes their ids here. Conditions read them as the
+        `__gb_remoteGroupIds` attribute, over any value the attributes set for
+        it, and remote evaluation sends them too.
+
+        Pass None while the groups are unresolved: rules that use remote groups
+        then fail, including "not in group". Don't pass [] for that — it means
+        "in no group", so "not in group" rules match."""
+        self._remote_group_ids = list(remote_group_ids) if remote_group_ids is not None else None
+        if self._remoteEval and self._client_key:
+            self.load_features()
+
+    def get_remote_group_ids(self) -> Optional[List[str]]:
+        return self._remote_group_ids
+
     @deprecated("getAttributes is deprecated, use get_attributes instead")
     def getAttributes(self) -> Dict[str, Any]:
         return self.get_attributes()
@@ -1441,7 +1467,8 @@ class GrowthBook(object):
         the user_context the callback sees in a stale, inconsistent state.
 
         """
-        self._user_ctx.attributes = self._attributes
+        self._user_ctx.attributes = with_remote_group_ids(self._attributes, self._remote_group_ids)
+        self._user_ctx.remote_group_ids = self._remote_group_ids
         self._user_ctx.url = self._url
         self._user_ctx.overrides = self._overrides
         self._user_ctx.forced_variations = self._forcedVariations
@@ -1461,6 +1488,7 @@ class GrowthBook(object):
         """
         # Centralized sync (see _sync_user_ctx_from_instance for rationale).
         self._sync_user_ctx_from_instance()
+        self._warn_if_remote_group_ids_missing()
         # global_ctx.options.url is not part of _user_ctx; still needs updating.
         self._global_ctx.options.url = self._url
         return EvaluationContext(
@@ -1475,6 +1503,21 @@ class GrowthBook(object):
             feature_usage_cb = self._feature_usage if self._featureUsageCallback else None,
             tracking_buffer = self._deferred_buffer,
         )
+
+    def _warn_if_remote_group_ids_missing(self) -> None:
+        """Logs once when the payload has remote saved groups but the user has no
+        remote group ids, since every rule using them will then fail. Logs no
+        attribute values."""
+        if self._warned_missing_remote_group_ids:
+            return
+        if is_missing_remote_group_ids(
+            self._attributes, self._remote_group_ids, self._saved_groups, self._remote_saved_groups_cache,
+        ):
+            self._warned_missing_remote_group_ids = True
+            logger.warning(
+                "The payload has remote saved groups, but the user has no remote group ids. "
+                "Rules using them won't match. See set_remote_group_ids."
+            )
 
     def _get_eval_context(self) -> EvaluationContext:
         # Lazy refresh: ensure features are fresh before evaluation, then build
