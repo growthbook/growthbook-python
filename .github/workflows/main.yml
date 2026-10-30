@@ -1,5 +1,11 @@
 name: Build
-on: [push]
+
+# Pull requests get CI from the pull_request event; release-please's pushes to its release branch
+# don't start push workflows, so a push-only trigger left release PRs untested
+on:
+  push:
+    branches: [main]
+  pull_request:
 jobs:
   build:
     runs-on: ubuntu-22.04

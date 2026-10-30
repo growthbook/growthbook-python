@@ -1,5 +1,22 @@
 # Changelog
 
+## [4.0.0](https://github.com/growthbook/growthbook-python/compare/v3.2.2...v4.0.0) (2026-10-30)
+
+
+### ⚠ BREAKING CHANGES
+
+* Targeting conditions are strict about types: values are no longer converted between types, negated operators always give the opposite result of their positive form, booleans are not ordered, and version operators need two strings or two numbers. Conditions that use an operator or saved group type the SDK does not support always fail, even under $not or $nor. Only strings and numbers can be hash attributes; other values (booleans, arrays, objects, 0 and "") count as missing. Percentage rollouts no longer include one extra hash bucket. Hashing uses UTF-16 code units, like the JavaScript SDK, which changes bucketing only for ids and experiment or feature keys that contain characters outside the Basic Multilingual Plane, such as emoji. Experiments use fallbackAttribute only when sticky bucketing is enabled.
+
+### Features
+
+* add GrowthBookClient.reduce_payload and core.reduce_payload to shrink a payload to what one user needs ([6a9b3fd](https://github.com/growthbook/growthbook-python/commit/6a9b3fdd2a6b9d4ad985466ed736ffc9cbe3642a))
+* align with spec 0.12.0 (strict types, condition edge cases, bucketing, payload reduction) ([#153](https://github.com/growthbook/growthbook-python/issues/153)) ([6a9b3fd](https://github.com/growthbook/growthbook-python/commit/6a9b3fdd2a6b9d4ad985466ed736ffc9cbe3642a))
+
+
+### Bug Fixes
+
+* ignore non-ASCII digits in query string overrides ([#154](https://github.com/growthbook/growthbook-python/issues/154)) ([cbbd34b](https://github.com/growthbook/growthbook-python/commit/cbbd34bd4304111a88faf98593630edd11231ad7))
+
 ## [3.2.2](https://github.com/growthbook/growthbook-python/compare/v3.2.1...v3.2.2) (2026-10-19)
 
 
