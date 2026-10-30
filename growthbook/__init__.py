@@ -12,6 +12,7 @@ from .common_types import (
     FeatureUsageCallback,
     JSONValue,
     Options,
+    PayloadFilters,
     Result,
     TrackingBuffer,
     TrackingCallback,
@@ -64,6 +65,7 @@ __all__ = [
     "UserContext",
     "FeatureRefreshStrategy",
     "TrackingBuffer",
+    "PayloadFilters",
     # Data model
     "Experiment",
     "Result",

@@ -69,6 +69,15 @@ class Filter(TypedDict, total=False):
 # leaves). The SDK only picks the first leaf whose condition matches and
 # buckets with that leaf's weights — no model evaluation happens client-side.
 
+class PayloadFilters(TypedDict, total=False):
+    """Filters for reduce_payload. Each list matches when any one of its values
+    does, and every listed filter has to match."""
+    projects: List[str]
+    tags: List[str]
+    # Custom field id -> values to match
+    customFields: Dict[str, List[Any]]
+
+
 class ContextualBanditContext(TypedDict, total=False):
     leafId: Required[int]
     condition: Dict[str, Any]
@@ -294,6 +303,15 @@ class Result(Generic[T]):
 
         return obj
 
+def _js_truthy(value: Any) -> bool:
+    """JS truthiness: only None, False, 0, NaN and "" are falsy; [] and {} are truthy."""
+    if value is None or value is False or value == "":
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value == value and value != 0
+    return True
+
+
 class FeatureResult(Generic[T]):
     def __init__(
         self,
@@ -308,8 +326,8 @@ class FeatureResult(Generic[T]):
         self.ruleId = ruleId
         self.experiment = experiment
         self.experimentResult = experimentResult
-        self.on = bool(value)
-        self.off = not bool(value)
+        self.on = _js_truthy(value)
+        self.off = not self.on
 
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {
@@ -417,7 +435,8 @@ class FeatureRule(object):
             data["variations"] = self.variations
         if self.weights is not None:
             data["weights"] = self.weights
-        if self.coverage and self.coverage != 1:
+        # 0 is kept: a rule with no coverage includes nobody
+        if self.coverage is not None and self.coverage != 1:
             data["coverage"] = self.coverage
         if self.condition is not None:
             data["condition"] = self.condition
@@ -815,6 +834,24 @@ def features_from_dict(features_data: Optional[Dict[str, Any]]) -> Dict[str, "Fe
                 rules=feature.get("rules", []),
                 defaultValue=feature.get("defaultValue", None),
             )
+    return out
+
+
+def features_to_dicts(features_data: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    """The payload form of a {key: feature_dict_or_Feature} mapping: Feature and
+    FeatureRule objects become the dicts they stand for, and dict features keep
+    every other field (such as metadata) as they are."""
+    out: Dict[str, Any] = {}
+    for key, feature in (features_data or {}).items():
+        if isinstance(feature, Feature):
+            out[key] = feature.to_dict()
+        elif isinstance(feature, dict) and isinstance(feature.get("rules"), list):
+            out[key] = {
+                **feature,
+                "rules": [r.to_dict() if isinstance(r, FeatureRule) else r for r in feature["rules"]],
+            }
+        else:
+            out[key] = feature
     return out
 
 

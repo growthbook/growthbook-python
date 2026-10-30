@@ -19,13 +19,14 @@ from datetime import datetime
 from growthbook import FeatureRepository, feature_repo
 from contextlib import asynccontextmanager
 
-from .core import _eval_feature_and_report, run_experiment
+from .core import _eval_feature_and_report, _hash_string, _is_hashable, reduce_payload, run_experiment
 from .common_types import (
     T,
     AsyncEventLogger,
     Feature,
     GlobalContext,
     Options,
+    PayloadFilters,
     Result,
     UserContext,
     EvaluationContext,
@@ -36,6 +37,7 @@ from .common_types import (
     Experiment,
     build_remote_eval_payload,
     features_from_dict,
+    features_to_dicts,
     snapshot_user_context,
     TrackingBuffer,
     TrackingDedupeKey,
@@ -708,6 +710,9 @@ class GrowthBookClient:
         )
         
         self._global_context: Optional[GlobalContext] = None
+        # The decrypted payload as received, for reduce_payload. Swapped
+        # together with _global_context.
+        self._payload: Dict[str, Any] = {}
         self._context_lock = asyncio.Lock()
         
         # Initialize plugins
@@ -1206,6 +1211,32 @@ class GrowthBookClient:
                 options=self.options, features=features, saved_groups=saved_groups,
                 contextual_bandits=contextual_bandits
             )
+            # Plain dicts, so reduce_payload sends Feature objects passed to
+            # set_features like the dicts they stand for
+            payload = {**self._payload, **features_data}
+            if "features" in features_data:
+                payload["features"] = features_to_dicts(features_data["features"])
+            self._payload = payload
+
+    def reduce_payload(
+        self,
+        user_context: Optional[UserContext] = None,
+        include: Optional[PayloadFilters] = None,
+        exclude: Optional[PayloadFilters] = None,
+        prerequisites: str = "keep",
+    ) -> Dict[str, Any]:
+        """Shrink the loaded payload for a user whose attributes are only
+        partly known, e.g. during server-side rendering, to bootstrap a client
+        SDK. The result evaluates the same as the full payload for anyone who
+        agrees with `user_context.attributes`, the attributes known here.
+
+        `include` keeps only the features and auto experiments that match every
+        filter (`projects`, `tags`, `customFields`), and `exclude` removes the
+        ones that match any. With `prerequisites="keep"` (the default) the
+        prerequisites of what is kept are sent even when the filters remove
+        them; `"filter"` applies the filters to them too."""
+        attributes = user_context.attributes if user_context is not None else {}
+        return reduce_payload(self._payload, attributes, include, exclude, prerequisites)
 
     async def __aenter__(self) -> "GrowthBookClient":
         await self.initialize()
@@ -1286,8 +1317,14 @@ class GrowthBookClient:
                 **self._context_callbacks(tracking_buffer),
             )
 
-        # Get sticky bucket assignments if needed
-        sticky_assignments = await self._refresh_sticky_buckets(user_context.attributes)
+        # Get sticky bucket assignments if needed. Values are formatted the way
+        # evaluation saves them, so {"id": 1.0} reads the "id||1" doc.
+        sticky_attributes = {
+            name: _hash_string(value)
+            for name, value in user_context.attributes.items()
+            if _is_hashable(value)
+        } if self.options.sticky_bucket_service else {}
+        sticky_assignments = await self._refresh_sticky_buckets(sticky_attributes)
 
         # Intentionally the SHARED cached dict, not a copy: core mutates it in
         # place when an experiment assigns a new sticky bucket, which is what
@@ -1409,6 +1446,7 @@ class GrowthBookClient:
         # Clear context
         async with self._context_lock:
             self._global_context = None
+            self._payload = {}
             
         # Cleanup plugins
         self._cleanup_plugins()

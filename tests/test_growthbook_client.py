@@ -18,9 +18,9 @@ import asyncio
 import os
 import json
 import threading
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
-from growthbook.common_types import Experiment, Options
+from growthbook.common_types import Experiment, Feature, FeatureRule, Options
 from growthbook.growthbook_client import (
     GrowthBookClient,
     UserContext,
@@ -957,6 +957,31 @@ async def test_sticky_bucket_fetched_per_evaluation():
 
 
 @pytest.mark.asyncio
+async def test_sticky_bucket_fetch_formats_attributes_like_evaluation():
+    """Sticky docs are saved under the formatted hash value ("id||1" for
+    1.0), so the fetch must ask for the same keys, and skip values that
+    can't be hash values."""
+    service = AsyncInMemoryStickyBucketService()
+    EnhancedFeatureRepository._instances = {}
+    p1, p2, p3, opts = _sticky_client_ctx(service)
+    fetched: List[Dict[str, str]] = []
+    original = service.get_all_assignments
+
+    async def recording_get_all_assignments(attributes: Dict[str, str]) -> Dict[str, Dict]:
+        fetched.append(dict(attributes))
+        return await original(attributes)
+
+    service.get_all_assignments = recording_get_all_assignments  # type: ignore[method-assign]
+
+    with p1, p2, p3:
+        async with GrowthBookClient(opts) as client:
+            await client.eval_feature("read-feature", UserContext(
+                attributes={"id": 1.0, "deviceId": 1.5, "loggedIn": True, "company": ""}))
+
+    assert fetched == [{"id": "1", "deviceId": "1.5"}]
+
+
+@pytest.mark.asyncio
 async def test_sticky_bucket_distinct_users_fetch_in_parallel():
     """Fetches for DIFFERENT attribute sets must overlap, not serialize.
     With the first user's fetch still parked behind the gate, the other
@@ -1709,5 +1734,49 @@ async def test_skip_all_experiments_flag():
             assert result_normal.value in ["control", "variation"]
             assert result_normal.source == "experiment"
             
+    finally:
+        await client.close()
+
+@pytest.mark.asyncio
+async def test_reduce_payload_includes_feature_objects():
+    # set_features accepts Feature and FeatureRule objects as well as dicts;
+    # reduce_payload has to send them like the dicts they stand for.
+    client = GrowthBookClient()
+    try:
+        await client.set_features({
+            "obj": Feature(defaultValue=True, rules=[FeatureRule(condition={"id": "123"}, force=False)]),
+            "mixed": {"defaultValue": 1, "rules": [FeatureRule(condition={"country": "US"}, force=2)]},
+            "plain": {"defaultValue": "x"},
+        })
+        user = UserContext(attributes={"id": "123"})
+        assert await client.get_feature_value("obj", None, user) is False
+        reduced = client.reduce_payload(user)
+        assert reduced["features"] == {
+            "obj": {"defaultValue": True, "rules": [{"force": False, "hashVersion": 1}]},
+            "mixed": {"defaultValue": 1, "rules": [
+                {"condition": {"country": "US"}, "force": 2, "hashVersion": 1},
+            ]},
+            "plain": {"defaultValue": "x"},
+        }
+        json.dumps(reduced)
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_reduce_payload_keeps_zero_coverage():
+    # A rule with coverage 0 includes nobody; dropping the 0 would make the
+    # reduced payload include everyone.
+    client = GrowthBookClient()
+    try:
+        await client.set_features({
+            "obj": Feature(defaultValue=False, rules=[FeatureRule(force=True, coverage=0)]),
+            "mixed": {"defaultValue": False, "rules": [FeatureRule(force=True, coverage=0)]},
+        })
+        user = UserContext(attributes={"id": "123"})
+        assert await client.get_feature_value("obj", None, user) is False
+        reduced = client.reduce_payload(user)
+        for key in ("obj", "mixed"):
+            assert reduced["features"][key]["rules"] == [{"force": True, "coverage": 0, "hashVersion": 1}]
     finally:
         await client.close()

@@ -7,7 +7,7 @@ import warnings
 from functools import lru_cache
 
 from urllib.parse import urlparse, parse_qs
-from typing import Callable, Optional, Any, Set, Tuple, List, Dict, cast
+from typing import Callable, Optional, Any, Set, Tuple, List, Dict, Union, cast
 from typing_extensions import TypeGuard
 from .common_types import (
     ContextualBanditAssignment,
@@ -16,6 +16,7 @@ from .common_types import (
     FeatureResult,
     Experiment,
     Filter,
+    PayloadFilters,
     Result,
     UserContext,
     VariationMeta,
@@ -29,13 +30,29 @@ logger = logging.getLogger("growthbook.core")
 # errored). Matches CONTEXTUAL_BANDIT_FALLBACK_LEAF_ID in the JS SDK.
 CONTEXTUAL_BANDIT_FALLBACK_LEAF_ID = -1
 
+# True or False, or None when the result depends on an operator or saved group
+# type this SDK doesn't support. The public helpers treat None as failing.
+CondResult = Optional[bool]
+
+# Keys a condition can have that aren't attributes, besides $not, which is
+# also an operator on a value
+_CONDITION_OPERATORS = ("$or", "$nor", "$and", "$savedGroup")
+
+# Errors a malformed condition raises while being evaluated
+_EVAL_ERRORS = (TypeError, ValueError, AttributeError, IndexError, RecursionError)
+
+
+def _not(result: CondResult) -> CondResult:
+    return None if result is None else not result
+
+
 def evalCondition(
     attributes: Dict[str, Any], condition: Dict[str, Any],
     savedGroups: Optional[Dict[str, Any]] = None, visited: Optional[Set[str]] = None,
 ) -> bool:
     try:
-        return _eval_condition(attributes, condition, savedGroups, visited)
-    except (TypeError, ValueError, AttributeError, IndexError, RecursionError):
+        return _eval_condition(attributes, condition, savedGroups, visited) is True
+    except _EVAL_ERRORS:
         # Fail the entire condition so $not cannot turn an evaluation error into a match.
         return False
 
@@ -43,36 +60,41 @@ def evalCondition(
 def _eval_condition(
     attributes: Dict[str, Any], condition: Dict[str, Any],
     savedGroups: Optional[Dict[str, Any]], visited: Optional[Set[str]],
-) -> bool:
+) -> CondResult:
     """Evaluate recursively, leaving evaluation error handling to the outer caller."""
+    result: CondResult = True
     for key, value in condition.items():
+        r: CondResult
         if key == "$or":
-            if not evalOr(attributes, value, savedGroups, visited):
-                return False
+            r = _eval_or(attributes, value, savedGroups, visited)
         elif key == "$nor":
-            if evalOr(attributes, value, savedGroups, visited):
-                return False
+            r = _not(_eval_or(attributes, value, savedGroups, visited))
         elif key == "$and":
-            if not evalAnd(attributes, value, savedGroups, visited):
-                return False
+            r = _eval_and(attributes, value, savedGroups, visited)
         elif key == "$not":
-            if _eval_condition(attributes, value, savedGroups, visited):
-                return False
+            r = _not(_eval_condition(attributes, value, savedGroups, visited))
         elif key == "$savedGroup":
-            if not _eval_saved_group(attributes, value, savedGroups, visited):
-                return False
+            r = cast(CondResult, _eval_saved_group(attributes, value, savedGroups, visited))
         elif key == "$savedGroups":
+            r = False
+        else:
+            r = _eval_condition_value(value, getPath(attributes, key), savedGroups, visited=visited)
+        # One failing entry decides it, wherever an unsupported one is
+        if r is False:
             return False
-        elif not evalConditionValue(value, getPath(attributes, key), savedGroups, visited=visited):
-            return False
-
-    return True
+        if r is None:
+            result = None
+    return result
 
 def _eval_saved_group(
     attributes: Dict[str, Any], reference: Any, saved_groups: Optional[Dict[str, Any]],
     visited: Optional[Set[str]],
-) -> bool:
-    """Resolve a typed saved group, keeping cycle detection local to this branch."""
+    prune: Optional[Callable[..., Any]] = None,
+) -> Any:
+    """Resolve a typed saved group, keeping cycle detection local to this branch.
+
+    With `prune`, an undecided list group returns None and a condition group is
+    pruned instead of evaluated, so the result may be a condition."""
     if not isinstance(reference, dict):
         return False
     group_id = reference.get("id")
@@ -90,6 +112,8 @@ def _eval_saved_group(
         values = entry.get("values")
         if not isinstance(key, str) or not isinstance(values, list):
             return False
+        if prune is not None and not _is_known(attributes, key):
+            return None
         return isIn(values, getPath(attributes, key))
     if entry.get("type") == "condition":
         condition = entry.get("condition")
@@ -97,8 +121,11 @@ def _eval_saved_group(
             return False
         # Allocate the branch guard only when entering a condition group.
         next_visited = visited | {group_id} if visited else {group_id}
+        if prune is not None:
+            return prune(attributes, condition, saved_groups, next_visited)
         return _eval_condition(attributes, condition, saved_groups, next_visited)
-    return False
+    # A group type added after this SDK was built. The client SDK may support it.
+    return None
 
 
 def _saved_group_values(saved_groups: Optional[Dict[str, Any]], group_id: str) -> Optional[List[Any]]:
@@ -115,30 +142,159 @@ def _saved_group_values(saved_groups: Optional[Dict[str, Any]], group_id: str) -
     return None
 
 
+def _is_new_group_type(entry: Any) -> bool:
+    """A saved group type added after this SDK was built"""
+    return isinstance(entry, dict) and entry.get("type") not in ("list", "condition")
+
+
 def evalOr(
     attributes: Dict[str, Any], conditions: List[Any], savedGroups: Optional[Dict[str, Any]],
     visited: Optional[Set[str]] = None,
 ) -> bool:
+    return _eval_or(attributes, conditions, savedGroups, visited) is True
+
+
+def _eval_or(
+    attributes: Dict[str, Any], conditions: List[Any], savedGroups: Optional[Dict[str, Any]],
+    visited: Optional[Set[str]],
+) -> CondResult:
     if len(conditions) == 0:
         return True
 
+    result: CondResult = False
     for condition in conditions:
-        if _eval_condition(attributes, condition, savedGroups, visited):
+        r = _eval_condition(attributes, condition, savedGroups, visited)
+        if r is True:
             return True
-    return False
+        if r is None:
+            result = None
+    return result
 
 
 def evalAnd(
     attributes: Dict[str, Any], conditions: List[Any], savedGroups: Optional[Dict[str, Any]],
     visited: Optional[Set[str]] = None,
 ) -> bool:
+    return _eval_and(attributes, conditions, savedGroups, visited) is True
+
+
+def _eval_and(
+    attributes: Dict[str, Any], conditions: List[Any], savedGroups: Optional[Dict[str, Any]],
+    visited: Optional[Set[str]],
+) -> CondResult:
+    result: CondResult = True
     for condition in conditions:
-        if not _eval_condition(attributes, condition, savedGroups, visited):
+        r = _eval_condition(attributes, condition, savedGroups, visited)
+        if r is False:
             return False
-    return True
+        if r is None:
+            result = None
+    return result
+
+
+def pruneCondition(
+    attributes: Dict[str, Any], condition: Dict[str, Any],
+    savedGroups: Optional[Dict[str, Any]] = None,
+) -> Union[Dict[str, Any], bool]:
+    """Partially evaluate a condition when only some attributes are known, e.g.
+    on a server. Attributes missing from `attributes` are unknown. Returns a
+    boolean once the result can't depend on them, otherwise the condition minus
+    every branch that is already decided."""
+    return _prune_with_context(attributes, condition, savedGroups, None)
+
+
+def _prune_saved_group(
+    attributes: Dict[str, Any], reference: Any, saved_groups: Dict[str, Any],
+) -> Any:
+    """Prune the saved group a reference points to. Returns its result once
+    decided, otherwise its condition minus every branch that is already decided."""
+    return _eval_saved_group(attributes, reference, saved_groups, None, prune=_prune_with_context)
+
+
+def _prune_with_context(
+    attributes: Dict[str, Any], condition: Dict[str, Any],
+    saved_groups: Optional[Dict[str, Any]], visited: Optional[Set[str]],
+) -> Union[Dict[str, Any], bool]:
+    # One that raises, such as a malformed one, stays as written. Evaluating it
+    # fails as a whole, so no part of it can be decided.
+    try:
+        return _prune_entries(attributes, condition, saved_groups, visited)
+    except _EVAL_ERRORS:
+        return condition
+
+
+def _prune_entries(
+    attributes: Dict[str, Any], condition: Dict[str, Any],
+    saved_groups: Optional[Dict[str, Any]], visited: Optional[Set[str]],
+) -> Union[Dict[str, Any], bool]:
+    out: Dict[str, Any] = {}
+    for key, value in condition.items():
+        r: Any
+        if key in ("$or", "$nor", "$and"):
+            r = _prune_list(attributes, value, saved_groups, visited, key != "$and")
+        elif key == "$not":
+            r = _prune_entries(attributes, value, saved_groups, visited)
+        elif key == "$savedGroup":
+            r = _eval_saved_group(attributes, value, saved_groups, visited, prune=_prune_entries)
+            # Keep an undecided reference as is rather than inlining the group
+            if not isinstance(r, bool):
+                r = None
+        elif key == "$savedGroups":
+            r = False
+        else:
+            # None when the attribute is unknown, or the value uses an operator
+            # this SDK doesn't support, which the client's SDK may
+            r = (
+                _eval_condition_value(value, getPath(attributes, key), saved_groups, visited=visited)
+                if _is_known(attributes, key)
+                else None
+            )
+        # $not and $nor pass when what they hold fails
+        if key in ("$not", "$nor") and isinstance(r, bool):
+            r = not r
+
+        # One failing entry fails the whole condition, and a passing one is dropped
+        if r is False:
+            return False
+        # None is an undecided leaf, which stays as written
+        if r is None:
+            out[key] = value
+        elif r is not True:
+            out[key] = r
+    return out if out else True
+
+
+def _prune_list(
+    attributes: Dict[str, Any], conditions: List[Any],
+    saved_groups: Optional[Dict[str, Any]], visited: Optional[Set[str]], is_or: bool,
+) -> Union[List[Any], bool]:
+    """Prune an $or (or an $and) list. Returns the conditions still undecided,
+    or the list's result once there are none."""
+    out: List[Any] = []
+    for condition in conditions:
+        r = _prune_entries(attributes, condition, saved_groups, visited)
+        # One passing condition decides an $or, and one failing condition an $and
+        if is_or and r is True:
+            return True
+        if not is_or and r is False:
+            return False
+        if not isinstance(r, bool):
+            out.append(r)
+    if out:
+        return out
+    # Every condition failed an $or, or passed an $and. Like evalOr, an empty
+    # $or passes.
+    return len(conditions) == 0 if is_or else True
+
+
+def _is_known(attributes: Any, path: str) -> bool:
+    """A nested path is unknown, since the server may only have part of the object"""
+    return "." not in path and isinstance(attributes, dict) and path in attributes
+
 
 def isOperatorObject(obj: Any) -> bool:
-    return bool(obj) and all(key.startswith("$") for key in obj.keys())
+    # An empty object has no operators, so it passes
+    return isinstance(obj, dict) and all(key.startswith("$") for key in obj.keys())
 
 def _is_numeric(v: Any) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool)
@@ -159,46 +315,131 @@ def getType(attributeValue: Any) -> str:
     return "unknown"
 
 def getPath(attributes: Dict[str, Any], path: str) -> Any:
-    current = attributes
+    """Read a dotted path. Like JS, only own keys count, so a list exposes its
+    canonical indices ("0", "1", ...) and "length"."""
+    current: Any = attributes
     for segment in path.split("."):
         if isinstance(current, dict) and segment in current:
             current = current[segment]
+        elif isinstance(current, list) and segment == "length":
+            current = len(current)
+        elif isinstance(current, list) and _is_array_index(segment, len(current)):
+            current = current[int(segment)]
         else:
             return None
     return current
+
+def _is_array_index(key: str, length: int) -> bool:
+    """Whether `key` is a canonical index below `length`, such as "0" but not "01" or "-0"."""
+    # An index has at most 10 digits, and checking first keeps int() off huge digit strings
+    return (
+        len(key) <= 10 and key.isascii() and key.isdigit()
+        and (key == "0" or key[0] != "0") and int(key) < length
+    )
 
 def evalConditionValue(
     conditionValue: Any, attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
     insensitive: bool = False, visited: Optional[Set[str]] = None,
 ) -> bool:
-    if isinstance(conditionValue, dict) and isOperatorObject(conditionValue):
+    return _eval_condition_value(conditionValue, attributeValue, savedGroups, insensitive, visited) is True
+
+def _eval_condition_value(
+    conditionValue: Any, attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
+    insensitive: bool = False, visited: Optional[Set[str]] = None,
+) -> CondResult:
+    if isOperatorObject(conditionValue):
+        # This is a special operator condition and we should evaluate each one separately
+        result: CondResult = True
         for key, value in conditionValue.items():
-            if not evalOperatorCondition(key, attributeValue, value, savedGroups, visited):
+            r = _eval_operator_condition(key, attributeValue, value, savedGroups, visited)
+            if r is False:
                 return False
-        return True
-    
-    # Simple equality comparison with optional case-insensitivity
+            if r is None:
+                result = None
+        return result
+
+    # Simple equality comparison: values of different types never match
     if insensitive and isinstance(conditionValue, str) and isinstance(attributeValue, str):
         return conditionValue.lower() == attributeValue.lower()
-    
-    return bool(conditionValue == attributeValue)
+
+    return _strict_deep_equal(conditionValue, attributeValue)
+
+def _strict_deep_equal(a: Any, b: Any) -> bool:
+    """Literal equality, matching JS, which compares the JSON.stringify output
+    of objects and arrays. Every nested value must have the same JSON type, so
+    True never equals 1 the way it does with Python's ==, object keys must be
+    in the same JS property order, and 1.0 equals 1."""
+    ta = getType(a)
+    if ta != getType(b):
+        return False
+    if ta == "array":
+        return len(a) == len(b) and all(_strict_deep_equal(_json_value(x), _json_value(y)) for x, y in zip(a, b))
+    if ta == "object":
+        return (
+            _js_key_order(a) == _js_key_order(b)
+            and all(_strict_deep_equal(_json_value(a[k]), _json_value(b[k])) for k in a)
+        )
+    return bool(a == b)
+
+def _js_key_order(obj: Dict[Any, Any]) -> List[Any]:
+    """Keys in JS property order: array-index keys such as "0" or "10" in
+    ascending numeric order, then the other keys in insertion order."""
+    keys = list(obj.keys())
+    indices = [k for k in keys if isinstance(k, str) and _is_array_index(k, 2**32 - 1)]
+    others = [k for k in keys if not (isinstance(k, str) and _is_array_index(k, 2**32 - 1))]
+    return sorted(indices, key=int) + others
+
+def _json_value(v: Any) -> Any:
+    """JSON.stringify writes NaN and Infinity as null"""
+    return None if isinstance(v, float) and not math.isfinite(v) else v
+
+def _is_orderable(a: Any, b: Any) -> bool:
+    """Only two numbers or two strings can be ordered. Booleans are not ordered."""
+    return (_is_numeric(a) and _is_numeric(b)) or (isinstance(a, str) and isinstance(b, str))
 
 def elemMatch(
     condition: Dict[str, Any], attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
     visited: Optional[Set[str]] = None,
 ) -> bool:
+    return _elem_match(condition, attributeValue, savedGroups, visited) is True
+
+def _elem_match(
+    condition: Dict[str, Any], attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
+    visited: Optional[Set[str]],
+) -> CondResult:
     if not isinstance(attributeValue, list):
         return False
 
+    # Operators test each element itself. A condition, including one that only
+    # uses $or, $and, $nor, or $savedGroup, tests each element's fields.
+    on_value = isOperatorObject(condition) and not any(k in _CONDITION_OPERATORS for k in condition)
+    result: CondResult = False
     for item in attributeValue:
-        if isOperatorObject(condition):
-            if evalConditionValue(condition, item, savedGroups, visited=visited):
-                return True
+        # Only skip None elements; falsy values like 0, "" and False are valid
+        # array members and must still be tested against the condition.
+        if item is None:
+            continue
+        if on_value:
+            r = _eval_condition_value(condition, item, savedGroups, visited=visited)
         else:
-            if _eval_condition(item, condition, savedGroups, visited):
-                return True
+            r = _eval_condition(item, condition, savedGroups, visited)
+        if r is True:
+            return True
+        if r is None:
+            result = None
+    return result
 
-    return False
+def _compare_non_ascii_strings(val1: Any, val2: Any) -> Optional[int]:
+    """Order two strings by UTF-16 code units like JS, or None if not two non-ASCII strings.
+
+    A character above U+FFFF (a surrogate pair) sorts below U+E000..U+FFFF in
+    JS. Big-endian UTF-16 bytes compare in that order.
+    """
+    if not (isinstance(val1, str) and isinstance(val2, str)) or (val1.isascii() and val2.isascii()):
+        return None
+    units1 = val1.encode("utf-16-be", "surrogatepass")
+    units2 = val2.encode("utf-16-be", "surrogatepass")
+    return (units1 > units2) - (units1 < units2)
 
 def compare(val1: Any, val2: Any) -> int:
     # IEEE 754: NaN is unordered with everything (including itself), so the
@@ -210,17 +451,9 @@ def compare(val1: Any, val2: Any) -> int:
     if isinstance(val2, float) and math.isnan(val2):
         raise ValueError("NaN")
 
-    if _is_numeric(val1) and not _is_numeric(val2):
-        if (val2 is None):
-            val2 = 0
-        else:
-            val2 = float(val2)
-
-    if _is_numeric(val2) and not _is_numeric(val1):
-        if (val1 is None):
-            val1 = 0
-        else:
-            val1 = float(val1)
+    utf16 = _compare_non_ascii_strings(val1, val2)
+    if utf16 is not None:
+        return utf16
 
     if val1 > val2:
         return 1
@@ -229,9 +462,7 @@ def compare(val1: Any, val2: Any) -> int:
     return 0
 
 def _js_strict_equal(a: Any, b: Any) -> bool:
-    """JS === semantics for $eq/$ne. Routed here instead of compare() so
-    $lt/$gt keep their JS-aligned coercion via compare() while $eq stays
-    strict.
+    """JS === semantics for $eq/$ne.
 
     Three buckets:
 
@@ -258,46 +489,53 @@ def evalOperatorCondition(
     operator: str, attributeValue: Any, conditionValue: Any, savedGroups: Any,
     visited: Optional[Set[str]] = None,
 ) -> bool:
+    return _eval_operator_condition(operator, attributeValue, conditionValue, savedGroups, visited) is True
+
+def _eval_operator_condition(
+    operator: str, attributeValue: Any, conditionValue: Any, savedGroups: Any,
+    visited: Optional[Set[str]] = None,
+) -> CondResult:
     if operator == "$eq":
         return _js_strict_equal(attributeValue, conditionValue)
     elif operator == "$ne":
         return not _js_strict_equal(attributeValue, conditionValue)
-    elif operator == "$lt":
-        try:
-            return compare(attributeValue, conditionValue) < 0
-        except Exception:
+    elif operator in ("$lt", "$lte", "$gt", "$gte"):
+        if not _is_orderable(attributeValue, conditionValue):
             return False
-    elif operator == "$lte":
         try:
-            return compare(attributeValue, conditionValue) <= 0
-        except Exception:
+            result = compare(attributeValue, conditionValue)
+        except ValueError:
             return False
-    elif operator == "$gt":
-        try:
-            return compare(attributeValue, conditionValue) > 0
-        except Exception:
-            return False
-    elif operator == "$gte":
-        try:
-            return compare(attributeValue, conditionValue) >= 0
-        except Exception:
-            return False
-    elif operator == "$veq":
-        return paddedVersionString(attributeValue) == paddedVersionString(conditionValue)
-    elif operator == "$vne":
-        return paddedVersionString(attributeValue) != paddedVersionString(conditionValue)
-    elif operator == "$vlt":
-        return paddedVersionString(attributeValue) < paddedVersionString(conditionValue)
-    elif operator == "$vlte":
-        return paddedVersionString(attributeValue) <= paddedVersionString(conditionValue)
-    elif operator == "$vgt":
-        return paddedVersionString(attributeValue) > paddedVersionString(conditionValue)
-    elif operator == "$vgte":
-        return paddedVersionString(attributeValue) >= paddedVersionString(conditionValue)
+        if operator == "$lt":
+            return result < 0
+        if operator == "$lte":
+            return result <= 0
+        if operator == "$gt":
+            return result > 0
+        return result >= 0
+    elif operator in ("$veq", "$vne", "$vlt", "$vlte", "$vgt", "$vgte"):
+        # $vne is the negation of $veq, so it matches on a type mismatch
+        if not _is_orderable(attributeValue, conditionValue):
+            return operator == "$vne"
+        actual = paddedVersionString(attributeValue)
+        expected = paddedVersionString(conditionValue)
+        if operator == "$veq":
+            return actual == expected
+        if operator == "$vne":
+            return actual != expected
+        if operator == "$vlt":
+            return actual < expected
+        if operator == "$vlte":
+            return actual <= expected
+        if operator == "$vgt":
+            return actual > expected
+        return actual >= expected
     elif operator in ("$inGroup", "$notInGroup"):
         if not isinstance(conditionValue, str):
             return False
         values = savedGroups.get(conditionValue) if savedGroups is not None else None
+        if _is_new_group_type(values):
+            return None
         if not isinstance(values, list):
             values = _saved_group_values(savedGroups, conditionValue)
         if values is None:
@@ -348,19 +586,19 @@ def evalOperatorCondition(
             return False
         return not isIn(conditionValue, attributeValue, insensitive=True)
     elif operator == "$elemMatch":
-        return elemMatch(conditionValue, attributeValue, savedGroups, visited)
+        return _elem_match(conditionValue, attributeValue, savedGroups, visited)
     elif operator == "$size":
         if not isinstance(attributeValue, list):
             return False
-        return evalConditionValue(conditionValue, len(attributeValue), savedGroups, visited=visited)
+        return _eval_condition_value(conditionValue, len(attributeValue), savedGroups, visited=visited)
     elif operator == "$all":
         if not isinstance(conditionValue, list):
             return False
-        return isInAll(conditionValue, attributeValue, savedGroups, insensitive=False, visited=visited)
+        return _is_in_all(conditionValue, attributeValue, savedGroups, insensitive=False, visited=visited)
     elif operator == "$alli":
         if not isinstance(conditionValue, list):
             return False
-        return isInAll(conditionValue, attributeValue, savedGroups, insensitive=True, visited=visited)
+        return _is_in_all(conditionValue, attributeValue, savedGroups, insensitive=True, visited=visited)
     elif operator == "$exists":
         if not conditionValue:
             return attributeValue is None
@@ -368,13 +606,57 @@ def evalOperatorCondition(
     elif operator == "$type":
         return bool(getType(attributeValue) == conditionValue)
     elif operator == "$not":
-        return not evalConditionValue(conditionValue, attributeValue, savedGroups, visited=visited)
-    return False
+        return _not(_eval_condition_value(conditionValue, attributeValue, savedGroups, visited=visited))
+    # Keys this SDK knows, but on a condition rather than on a value, where
+    # they never match
+    if operator in _CONDITION_OPERATORS:
+        return False
+    logger.debug("Unknown operator: %s", operator)
+    return None
+
+def _js_number_to_string(value: Union[int, float]) -> str:
+    """Format a number like JS `String(number)` (ECMAScript Number::toString).
+
+    Integers are converted to doubles first, as JS has only doubles. `repr`
+    gives the shortest digits that round-trip, which are then laid out in
+    fixed notation for decimal exponents from -6 to 21 and in JS-style
+    scientific notation (such as "1e+21" or "1.5e-7") otherwise.
+    """
+    try:
+        x = float(value)
+    except OverflowError:
+        x = math.inf if value > 0 else -math.inf
+    if math.isnan(x):
+        return "NaN"
+    if x == 0:
+        return "0"
+    if x < 0:
+        return "-" + _js_number_to_string(-x)
+    if math.isinf(x):
+        return "Infinity"
+    # x = 0.d1..dk * 10^n
+    # repr gives forms such as "1.5", "0.0001", "1e+16" or "1.5e-07"; read its
+    # digits and exponent as text so the decimal context can't affect them
+    mantissa, _, exp = repr(x).partition("e")
+    whole, _, fraction = mantissa.partition(".")
+    padded = (whole + fraction).lstrip("0")
+    digits = padded.rstrip("0")
+    k = len(digits)
+    n = int(exp or "0") - len(fraction) + len(padded)
+    if k <= n <= 21:
+        return digits + "0" * (n - k)
+    if 0 < n <= 21:
+        return digits[:n] + "." + digits[n:]
+    if -6 < n <= 0:
+        return "0." + "0" * -n + digits
+    mantissa = digits[0] + ("." + digits[1:] if k > 1 else "")
+    return mantissa + "e" + ("+" if n > 0 else "-") + str(abs(n - 1))
+
 
 def paddedVersionString(input: Any) -> str:
-    # If input is a number, convert to a string
+    # If input is a number, convert to a string the way JS does
     if _is_numeric(input):
-        input = str(input)
+        input = _js_number_to_string(input)
 
     if not input or not isinstance(input, str):
         input = "0"
@@ -416,13 +698,12 @@ def isIn(conditionValue: List[Any], attributeValue: Any, insensitive: bool = Fal
         # Do an intersection if attribute is an array (insensitive)
         if isinstance(attributeValue, list):
             return any(
-                case_fold(el) == case_fold(exp) and isinstance(el, bool) == isinstance(exp, bool)
+                _js_strict_equal(case_fold(el), case_fold(exp))
                 for el in attributeValue
                 for exp in conditionValue
             )
         return any(
-            case_fold(attributeValue) == case_fold(exp)
-            and isinstance(attributeValue, bool) == isinstance(exp, bool)
+            _js_strict_equal(case_fold(attributeValue), case_fold(exp))
             for exp in conditionValue
         )
     
@@ -439,6 +720,9 @@ def isIn(conditionValue: List[Any], attributeValue: Any, insensitive: bool = Fal
             pass
         return any(_js_strict_equal(value, expected)
                    for value in attributeValue for expected in conditionValue)
+    # JS includes() compares objects by reference, so an object never matches
+    if isinstance(attributeValue, dict):
+        return False
     if attributeValue == 0 or attributeValue == 1:
         return _contains_boolean_or_number(conditionValue, attributeValue)
     return attributeValue in conditionValue
@@ -461,44 +745,92 @@ def isInAll(
     insensitive: bool = False, visited: Optional[Set[str]] = None,
 ) -> bool:
     """Check if attributeValue (array) contains all elements in conditionValue"""
+    return _is_in_all(conditionValue, attributeValue, savedGroups, insensitive, visited) is True
+
+def _is_in_all(
+    conditionValue: List[Any], attributeValue: Any, savedGroups: Optional[Dict[str, Any]],
+    insensitive: bool = False, visited: Optional[Set[str]] = None,
+) -> CondResult:
     if not isinstance(attributeValue, list):
         return False
-    
+
+    result: CondResult = True
     for cond in conditionValue:
-        passing = False
+        passed: CondResult = False
         for attr in attributeValue:
-            if evalConditionValue(cond, attr, savedGroups, insensitive, visited):
-                passing = True
+            r = _eval_condition_value(cond, attr, savedGroups, insensitive, visited)
+            if r is True:
+                passed = True
                 break
-        if not passing:
+            if r is None:
+                passed = None
+        if passed is False:
             return False
-    return True
+        if passed is None:
+            result = None
+    return result
+
+def _is_hashable(value: Any) -> bool:
+    """Whether an attribute value can identify a user, like the JS SDK's `isHashable`.
+
+    Only non-empty strings and finite, non-zero numbers count. Booleans never
+    do, even though `bool` is a subclass of `int`.
+    """
+    if isinstance(value, str):
+        return value != ""
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, (int, float)):
+        try:
+            return value != 0 and math.isfinite(value)
+        except OverflowError:
+            # An int too large for a double is Infinity in JS
+            return False
+    return False
+
+def _hash_string(value: Any) -> str:
+    """Format a hashable attribute value the way JS `String()` does."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return _js_number_to_string(value)
+    return ""
 
 def _getOrigHashValue(
     eval_context: EvaluationContext,
     attr: Optional[str] = "id",
     fallbackAttr: Optional[str] = None
-) -> Tuple[str, str]:
+) -> Tuple[str, Any]:
+    """Return the hash attribute name and its raw value ("" when missing).
+
+    A value that isn't hashable (see `_is_hashable`) counts as missing, and
+    then the fallback attribute is tried with the same rule. Callers decide
+    whether a fallback applies (experiments use it only with sticky bucketing).
+    """
     # attr = attr or "id" -- Fix for the flaky behavior of sticky bucket assignment
     actual_attr: str = attr if attr is not None else "id"
-    val = ""
+    attributes = eval_context.user.attributes
+    val: Any = ""
 
-    if actual_attr in eval_context.user.attributes:
-        val = "" if eval_context.user.attributes[actual_attr] is None else eval_context.user.attributes[actual_attr]
+    if _is_hashable(attributes.get(actual_attr)):
+        val = attributes[actual_attr]
 
     # If no match, try fallback
-    if (not val or val == "") and fallbackAttr and eval_context.global_ctx.options.sticky_bucket_service:
-        if fallbackAttr in eval_context.user.attributes:
-            val = "" if eval_context.user.attributes[fallbackAttr] is None else eval_context.user.attributes[fallbackAttr]
-
-        if val:
-            actual_attr = fallbackAttr
+    if not val and fallbackAttr and _is_hashable(attributes.get(fallbackAttr)):
+        val = attributes[fallbackAttr]
+        actual_attr = fallbackAttr
 
     return (actual_attr, val)
 
 def _getHashValue(eval_context: EvaluationContext, attr: Optional[str] = None, fallbackAttr: Optional[str] = None) -> Tuple[str, str]:
     (attr, val) = _getOrigHashValue(attr=attr, fallbackAttr=fallbackAttr, eval_context=eval_context)
-    return (attr, str(val))
+    return (attr, _hash_string(val))
+
+def _experiment_fallback_attribute(experiment: Experiment[Any], eval_context: EvaluationContext) -> Optional[str]:
+    """Experiments only use their fallback attribute when sticky bucketing is on, like JS."""
+    if eval_context.global_ctx.options.sticky_bucket_service and not experiment.disableStickyBucketing:
+        return experiment.fallbackAttribute
+    return None
 
 def _isIncludedInRollout(
     seed: str,
@@ -526,19 +858,21 @@ def _isIncludedInRollout(
     if range:
         return inRange(n, range)
     elif coverage is not None:
-        return n <= coverage
+        # Half-open, like inRange: a coverage of k/10000 includes exactly k buckets
+        return n < coverage
 
     return True
 
 def _isFilteredOut(filters: List[Filter], eval_context: EvaluationContext) -> bool:
     for filter in filters:
-        (_, hash_value) = _getHashValue(attr=filter.get("attribute", "id"), eval_context=eval_context)  
+        # A user without a hash value (or an unknown hash version) is filtered out, like JS
+        (_, hash_value) = _getHashValue(attr=filter.get("attribute", "id"), eval_context=eval_context)
         if hash_value == "":
-            return False
+            return True
 
         n = gbhash(filter.get("seed", ""), hash_value, filter.get("hashVersion", 2))
         if n is None:
-            return False
+            return True
 
         filtered = False
         for range in filter["ranges"]:
@@ -551,13 +885,15 @@ def _isFilteredOut(filters: List[Filter], eval_context: EvaluationContext) -> bo
 
 
 def fnv1a32(s: str) -> int:
+    """FNV-1a 32 over UTF-16 code units, like the JS SDK's `charCodeAt` loop."""
     hval = 0x811C9DC5
     if s.isascii():
         for b in s.encode():
             hval = ((hval ^ b) * 0x01000193) & 0xFFFFFFFF
     else:
-        for ch in s:
-            hval = ((hval ^ ord(ch)) * 0x01000193) & 0xFFFFFFFF
+        data = s.encode("utf-16-le", "surrogatepass")
+        for i in range(0, len(data), 2):
+            hval = ((hval ^ (data[i] | (data[i + 1] << 8))) * 0x01000193) & 0xFFFFFFFF
     return hval
 
 def inNamespace(userId: str, namespace: Tuple[str, float, float]) -> bool:
@@ -1285,7 +1621,11 @@ def _run_experiment(experiment: Experiment[Any],
         return _getExperimentResult(experiment=experiment, featureId=featureId, evalContext=evalContext)
 
     # 6. Get the user hash attribute and value
-    (hashAttribute, hashValue) = _getHashValue(attr=experiment.hashAttribute, fallbackAttr=experiment.fallbackAttribute, eval_context=evalContext)
+    (hashAttribute, hashValue) = _getHashValue(
+        attr=experiment.hashAttribute,
+        fallbackAttr=_experiment_fallback_attribute(experiment, evalContext),
+        eval_context=evalContext,
+    )
     if not hashValue:
         logger.debug(
             "Skip experiment %s because user's hashAttribute value is empty",
@@ -1543,7 +1883,7 @@ def _getExperimentResult(
         meta = experiment.meta[variationId]
 
     (hashAttribute, hashValue) = _getOrigHashValue(attr=experiment.hashAttribute,
-                                                    fallbackAttr=experiment.fallbackAttribute,
+                                                    fallbackAttr=_experiment_fallback_attribute(experiment, evalContext),
                                                     eval_context=evalContext)
 
     # Contextual bandit exposure metadata is only reported for real hashed
@@ -1579,3 +1919,311 @@ def _getExperimentResult(
         variationWeights=variation_weights,
         banditVersion=bandit_version
     )
+
+
+def _js_truthy(value: Any) -> bool:
+    """JavaScript truthiness, where an empty list or dict counts as true"""
+    if value is None or value is False:
+        return False
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return value != 0 and not (isinstance(value, float) and math.isnan(value))
+    if isinstance(value, str):
+        return value != ""
+    return True
+
+
+def _can_reference_groups(entry: Any) -> bool:
+    """Whether a saved group's contents can reference other groups. A list's
+    values (or a legacy bare array's) are attribute values, never group ids."""
+    return isinstance(entry, dict) and entry.get("type") != "list"
+
+
+def _saved_groups_on_cycles(saved_groups: Dict[str, Any]) -> Set[str]:
+    """The saved groups that can reach themselves through saved-group
+    references: those in a strongly connected component of more than one group,
+    or that reference themselves. Each group's references are collected once,
+    and Tarjan's algorithm runs without recursion."""
+    refs: Dict[str, Set[str]] = {}
+    for group_id, entry in saved_groups.items():
+        found: Set[str] = set()
+        stack: List[Any] = [entry] if _can_reference_groups(entry) else []
+        while stack:
+            value = stack.pop()
+            if isinstance(value, str):
+                if value in saved_groups:
+                    found.add(value)
+            elif isinstance(value, dict):
+                stack.extend(value.values())
+            elif isinstance(value, list):
+                stack.extend(value)
+        refs[group_id] = found
+
+    index: Dict[str, int] = {}
+    low: Dict[str, int] = {}
+    path: List[str] = []
+    on_path: Set[str] = set()
+    result: Set[str] = set()
+    for root in refs:
+        if root in index:
+            continue
+        index[root] = low[root] = len(index)
+        path.append(root)
+        on_path.add(root)
+        work = [(root, iter(refs[root]))]
+        while work:
+            node, children = work[-1]
+            descended = False
+            for child in children:
+                if child not in index:
+                    index[child] = low[child] = len(index)
+                    path.append(child)
+                    on_path.add(child)
+                    work.append((child, iter(refs[child])))
+                    descended = True
+                    break
+                if child in on_path:
+                    low[node] = min(low[node], index[child])
+            if descended:
+                continue
+            work.pop()
+            if work:
+                parent = work[-1][0]
+                low[parent] = min(low[parent], low[node])
+            if low[node] == index[node]:
+                component: List[str] = []
+                while True:
+                    member = path.pop()
+                    on_path.discard(member)
+                    component.append(member)
+                    if member == node:
+                        break
+                if len(component) > 1 or node in refs[node]:
+                    result.update(component)
+    return result
+
+
+def reduce_payload(
+    payload: Dict[str, Any],
+    attributes: Optional[Dict[str, Any]] = None,
+    include: Optional[PayloadFilters] = None,
+    exclude: Optional[PayloadFilters] = None,
+    prerequisites: str = "keep",
+) -> Dict[str, Any]:
+    """Shrink a decrypted SDK payload for a user whose attributes are only
+    partly known, e.g. on a server bootstrapping a client SDK. The result
+    evaluates the same as the full payload for anyone who agrees with the known
+    attributes.
+
+    `include` keeps only the features and auto experiments that match every
+    filter, and `exclude` removes the ones that match any. With
+    `prerequisites="keep"` (the default) the prerequisites of what is kept are
+    sent even when the filters remove them; `"filter"` applies the filters to
+    them too. Mirrors the JS SDK's reducePayload."""
+    known: Dict[str, Any] = attributes or {}
+    inc: Dict[str, Any] = cast(Dict[str, Any], include or {})
+    exc: Dict[str, Any] = cast(Dict[str, Any], exclude or {})
+    saved_groups: Dict[str, Any] = payload.get("savedGroups") or {}
+    all_features: Dict[str, Any] = payload.get("features") or {}
+    all_experiments: List[Any] = payload.get("experiments") or []
+
+    # Stands for a missing key, which is undefined in JS and matches nothing, not even null
+    missing = object()
+
+    def has(actual: Any, want: Any) -> bool:
+        # Only a list counts, as with $in, and any one of its values is enough
+        return isinstance(want, list) and actual is not missing and isIn(want, actual)
+
+    def meta_of(item: Any) -> Dict[str, Any]:
+        meta = item.get("metadata") if isinstance(item, dict) else None
+        return meta if isinstance(meta, dict) else {}
+
+    def rule_in_projects(meta: Any) -> bool:
+        # A rule without projects applies wherever its feature is delivered
+        return (
+            not _js_truthy(inc.get("projects"))
+            or not isinstance(meta, dict)
+            or not _js_truthy(meta.get("projects"))
+            or has(meta.get("projects"), inc.get("projects"))
+        )
+
+    def in_projects(meta: Dict[str, Any]) -> bool:
+        # A feature or experiment has to list one of the projects, or be in all
+        # of them. One without projects is in none, like one without tags.
+        return (
+            not _js_truthy(inc.get("projects"))
+            or _js_truthy(meta.get("allProjects"))
+            or has(meta.get("projects", missing), inc.get("projects"))
+        )
+
+    def matches(meta: Dict[str, Any]) -> bool:
+        # Kept when it matches every include filter and no exclude filter. Only
+        # listed projects are excluded, so one in all projects stays.
+        fields = meta.get("customFields")
+        fields = fields if isinstance(fields, dict) else {}
+        in_fields = inc.get("customFields")
+        in_fields = in_fields if isinstance(in_fields, dict) else {}
+        out_fields = exc.get("customFields")
+        out_fields = out_fields if isinstance(out_fields, dict) else {}
+        return (
+            in_projects(meta)
+            and (not _js_truthy(inc.get("tags")) or has(meta.get("tags", missing), inc.get("tags")))
+            and all(has(fields.get(k, missing), v) for k, v in in_fields.items())
+            and not has(meta.get("projects", missing), exc.get("projects"))
+            and not has(meta.get("tags", missing), exc.get("tags"))
+            and not any(has(fields.get(k, missing), v) for k, v in out_fields.items())
+        )
+
+    def prune(item: Dict[str, Any], is_rule: bool) -> Dict[str, Any]:
+        # Reduces a rule or an auto experiment
+        condition: Any = (
+            pruneCondition(known, item["condition"], saved_groups)
+            if _js_truthy(item.get("condition"))
+            else None
+        )
+        item = dict(item)
+        if condition is True:
+            del item["condition"]
+        # Kept, since sticky buckets and forced variations skip an experiment's
+        # condition, and a rule's prerequisites are checked before it
+        elif condition is False:
+            item["condition"] = {"$not": {}}
+            # A force rule that never passes never returns its value. An auto
+            # experiment's forced variation still applies to a sticky bucketed user.
+            if is_rule and "force" in item:
+                item["force"] = None
+        elif condition:
+            item["condition"] = condition
+        return item
+
+    # Adds a feature, then the prerequisites the client evaluates for it, even
+    # when the filters drop them. With "filter", only the filters decide,
+    # except for holdouts, which aren't app features and are always kept.
+    added: Dict[str, Any] = {}
+
+    def add_parents(item: Dict[str, Any]) -> None:
+        for parent in item.get("parentConditions") or []:
+            parent_id = parent.get("id") if isinstance(parent, dict) else None
+            if not isinstance(parent_id, str):
+                continue
+            if prerequisites != "filter" or parent_id.startswith("$holdout:"):
+                add(parent_id)
+
+    def add(feature_id: str) -> None:
+        feature = all_features.get(feature_id)
+        if not isinstance(feature, dict) or feature_id in added:
+            return
+        # Rules scoped to other projects aren't served. A prerequisite from
+        # another project keeps its own, as on the server.
+        scoped = in_projects(meta_of(feature))
+        rules: Optional[List[Any]] = None
+        if feature.get("rules") is not None:
+            rules = [
+                prune(rule, True) for rule in feature["rules"]
+                if not scoped or rule_in_projects(rule.get("metadata"))
+            ]
+        # Stored before its parents are added, so a prerequisite cycle ends
+        added[feature_id] = {**feature, "rules": rules} if rules is not None else feature
+        for rule in rules or []:
+            add_parents(rule)
+
+    for feature_id, feature in all_features.items():
+        if matches(meta_of(feature)):
+            add(feature_id)
+    experiments = [prune(e, False) for e in all_experiments if isinstance(e, dict) and matches(meta_of(e))]
+    for experiment in experiments:
+        add_parents(experiment)
+    features = dict(added)
+
+    # The contextual bandits that kept rules and experiments use. A context
+    # whose condition never passes can't be the first that does, so it goes.
+    all_bandits: Dict[str, Any] = payload.get("contextualBandits") or {}
+    bandits: Dict[str, Any] = {}
+    items = [rule for f in features.values() for rule in (f.get("rules") or [])] + experiments
+    for item in items:
+        ref = item.get("contextualBanditRef")
+        if not isinstance(ref, str) or not ref or ref in bandits or ref not in all_bandits:
+            continue
+        bandit = all_bandits[ref]
+        # Evaluation tolerates a definition that isn't an object, so it stays
+        if not isinstance(bandit, dict):
+            bandits[ref] = bandit
+            continue
+        contexts = []
+        for context in bandit.get("contexts") or []:
+            pruned = pruneCondition(known, context.get("condition") or {}, saved_groups)
+            if pruned is False:
+                continue
+            contexts.append({**context, "condition": {} if pruned is True else pruned})
+        bandits[ref] = {**bandit, "contexts": contexts}
+
+    # Groups that keep their condition as written: those evaluated against
+    # something other than the user (each item in $elemMatch, or the parent's
+    # value in a prerequisite), and the groups those reference
+    # The walks below use explicit stacks, so long chains of groups can't hit
+    # the recursion limit.
+    # Walking the payload is only needed when there are groups to find
+    reduced_parts = [features, experiments, bandits] if saved_groups else []
+    as_written: Set[str] = set()
+    seen: Set[str] = set()
+    marking: List[Tuple[Any, bool]] = [(reduced_parts, True)]
+    while marking:
+        value, user = marking.pop()
+        if isinstance(value, str):
+            if value not in saved_groups or value in as_written:
+                continue
+            if user and value in seen:
+                continue
+            (seen if user else as_written).add(value)
+            if _can_reference_groups(saved_groups[value]):
+                marking.append((saved_groups[value], user))
+        elif isinstance(value, dict):
+            for k, v in value.items():
+                marking.append((v, user and k != "$elemMatch" and k != "parentConditions"))
+        elif isinstance(value, list):
+            for v in value:
+                marking.append((v, user))
+
+    # A group on a cycle can't be reduced on its own: its result depends on
+    # which group the evaluation entered the cycle from
+    on_cycle = _saved_groups_on_cycles(saved_groups)
+
+    # Keep each saved group whose id appears as a string anywhere, with
+    # condition groups reduced. This needs no list of the operators that
+    # reference groups. Visited depth first, in document order.
+    groups: Dict[str, Any] = {}
+    keeping: List[Any] = [reduced_parts]
+    while keeping:
+        value = keeping.pop()
+        if isinstance(value, str):
+            if value not in saved_groups or value in groups:
+                continue
+            condition = (
+                None
+                if value in as_written or value in on_cycle
+                else _prune_saved_group(known, {"id": value}, saved_groups)
+            )
+            entry = saved_groups[value]
+            groups[value] = (
+                {**entry, "condition": condition}
+                if isinstance(condition, dict) and isinstance(entry, dict)
+                else entry
+            )
+            if _can_reference_groups(entry):
+                keeping.append(groups[value])
+        elif isinstance(value, dict):
+            keeping.extend(reversed(list(value.values())))
+        elif isinstance(value, list):
+            keeping.extend(reversed(value))
+
+    reduced: Dict[str, Any] = {
+        **payload,
+        "features": features,
+        "experiments": experiments,
+        "savedGroups": groups,
+    }
+    # Only when there were any, as with the payload's other optional keys.
+    # Left out rather than None, as in the JS SDK.
+    reduced.pop("contextualBandits", None)
+    if _js_truthy(payload.get("contextualBandits")):
+        reduced["contextualBandits"] = bandits
+    return reduced

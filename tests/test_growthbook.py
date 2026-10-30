@@ -1,11 +1,14 @@
 #!/usr/bin/env python
 
+import decimal
 import json
 import os
 import warnings
 from growthbook import (
     FeatureRule,
     GrowthBook,
+    GrowthBookClient,
+    UserContext,
     Experiment,
     Feature,
     InMemoryStickyBucketService,
@@ -24,6 +27,11 @@ from growthbook.core import (
     inNamespace,
     getEqualWeights,
     evalCondition,
+    getPath,
+    pruneCondition,
+    reduce_payload,
+    _saved_groups_on_cycles,
+    _js_number_to_string,
 )
 
 from time import time
@@ -136,6 +144,289 @@ def test_equal_weights(getEqualWeights_data):
     assert round_list(weights) == round_list(expected)
 
 
+def test_prune_condition(pruneCondition_data):
+    _, condition, attributes, expected, savedGroups = (pruneCondition_data + [None]*5)[:5]
+    assert pruneCondition(attributes, condition, savedGroups or {}) == expected
+
+
+@pytest.mark.asyncio
+async def test_reduce_payload(reducePayload_data):
+    _, args, expected = reducePayload_data
+    # This SDK has no client-level global attributes, so they're merged into
+    # the user's here, with the user's taking precedence as in the JS client
+    attributes = {**(args.get("globalAttributes") or {}), **(args.get("attributes") or {})}
+    client = GrowthBookClient()
+    try:
+        await client.set_payload(args["payload"])
+        reduced = client.reduce_payload(
+            UserContext(attributes=attributes),
+            include=args.get("include"),
+            exclude=args.get("exclude"),
+            prerequisites=args.get("prerequisites") or "keep",
+        )
+        assert reduced == expected
+    finally:
+        await client.close()
+
+
+def test_reduce_payload_many_groups_sharing_a_large_list():
+    # Each group's references are collected once, so many condition groups
+    # that share one large list group stay cheap. Groups that aren't on a
+    # cycle are still reduced.
+    big = {"type": "list", "attributeKey": "id", "values": [f"u{i}" for i in range(20000)]}
+    groups = {
+        f"g{i}": {"type": "condition", "condition": {"id": {"$inGroup": "big"}, "country": "US"}}
+        for i in range(300)
+    }
+    payload = {
+        "features": {"f": {"defaultValue": 0, "rules": [
+            {"condition": {"$or": [{"$savedGroup": {"id": g}} for g in groups]}, "force": 1},
+        ]}},
+        "savedGroups": {"big": big, **groups},
+    }
+    assert _saved_groups_on_cycles(payload["savedGroups"]) == set()
+    reduced = reduce_payload(payload, {"country": "US"})
+    assert reduced["savedGroups"]["big"] == big
+    for g in groups:
+        assert reduced["savedGroups"][g] == {"type": "condition", "condition": {"id": {"$inGroup": "big"}}}
+
+
+def test_saved_groups_on_cycles():
+    groups = {
+        "a": {"type": "condition", "condition": {"$savedGroup": {"id": "b"}}},
+        "b": {"type": "condition", "condition": {"$or": [{"$savedGroup": {"id": "a"}}, {"x": 1}]}},
+        "c": {"type": "condition", "condition": {"$not": {"$savedGroup": {"id": "c"}}}},
+        "d": {"type": "condition", "condition": {"$savedGroup": {"id": "a"}}},
+        "e": {"type": "list", "attributeKey": "id", "values": ["a", "d", "e"]},
+        "f": {"type": "condition", "condition": {"id": {"$inGroup": "g"}}},
+        "g": {"type": "list", "attributeKey": "id", "values": ["f"]},
+        "h": ["h"],
+    }
+    # A list's values (or a legacy bare array's) are attribute values that
+    # happen to be group ids, not references, so e, f, g and h aren't on cycles
+    assert _saved_groups_on_cycles(groups) == {"a", "b", "c"}
+
+
+def test_reduce_payload_never_walks_list_group_values():
+    # The list's values name other groups, but are attribute values
+    lst = {"type": "list", "attributeKey": "id", "values": ["a", "b", "c"]}
+    payload = {
+        "features": {"f": {"defaultValue": 0, "rules": [
+            {"condition": {"$savedGroup": {"id": "a"}}, "force": 1},
+            {"condition": {"items": {"$elemMatch": {"id": {"$inGroup": "l"}}}}, "force": 2},
+            {"condition": {"$savedGroup": {"id": "c"}}, "force": 3},
+        ]}},
+        "savedGroups": {
+            "a": {"type": "condition", "condition": {"country": "US", "id": {"$inGroup": "l"}}},
+            "b": {"type": "condition", "condition": {"x": 1}},
+            "c": {"type": "condition", "condition": {"country": "US", "y": 1}},
+            "l": lst,
+        },
+    }
+    # a isn't on a cycle through l, c isn't kept as written because l is
+    # under $elemMatch, and b isn't kept just because l names it
+    assert reduce_payload(payload, {"country": "US"})["savedGroups"] == {
+        "a": {"type": "condition", "condition": {"id": {"$inGroup": "l"}}},
+        "l": lst,
+        "c": {"type": "condition", "condition": {"y": 1}},
+    }
+
+
+class _NotWalked(dict):
+    """A dict that fails the test when the saved group walks iterate it"""
+
+    def items(self):  # type: ignore[override]
+        raise AssertionError("walked")
+
+    def values(self):  # type: ignore[override]
+        raise AssertionError("walked")
+
+
+def test_reduce_payload_skips_group_walks_without_saved_groups():
+    payload = {"features": {"f": {"defaultValue": 0, "rules": [
+        {"force": 1, "meta": _NotWalked(x=1)},
+    ]}}}
+    reduced = reduce_payload(payload, {})
+    assert reduced["savedGroups"] == {}
+    assert reduced["features"]["f"]["rules"][0]["force"] == 1
+
+
+@pytest.mark.parametrize("bandits, expected", [
+    (None, None),
+    ({}, {}),
+    ({"cb": {"contexts": []}}, {}),
+])
+def test_reduce_payload_leaves_out_missing_contextual_bandits(bandits, expected):
+    payload = {"features": {"f": {"defaultValue": 0}}, "contextualBandits": bandits}
+    reduced = reduce_payload(payload, {})
+    if expected is None:
+        assert "contextualBandits" not in reduced
+    else:
+        assert reduced["contextualBandits"] == expected
+    assert "contextualBandits" not in reduce_payload({"features": {}}, {})
+
+
+def test_saved_groups_on_long_chains():
+    # No recursion, so long chains don't hit the recursion limit
+    n = 5000
+    chain = {f"g{i}": {"type": "condition", "condition": {"$savedGroup": {"id": f"g{i + 1}"}, "x": i}}
+             for i in range(n - 1)}
+    chain[f"g{n - 1}"] = {"type": "condition", "condition": {"x": 1}}
+    assert _saved_groups_on_cycles(chain) == set()
+    ring = {**chain, f"g{n - 1}": {"type": "condition", "condition": {"$savedGroup": {"id": "g0"}}}}
+    assert _saved_groups_on_cycles(ring) == set(ring)
+
+    # Referenced through $elemMatch, the whole chain is kept as written
+    payload = {
+        "features": {"f": {"defaultValue": 0, "rules": [
+            {"condition": {"items": {"$elemMatch": {"$savedGroup": {"id": "g0"}}}}, "force": 1},
+        ]}},
+        "savedGroups": chain,
+    }
+    assert reduce_payload(payload, {"x": 1})["savedGroups"] == chain
+
+
+def test_get_path_reads_array_own_keys():
+    # Like JS, an array's own keys are its canonical indices and "length"
+    assert getPath([5, 6], "1") == 6
+    assert getPath({"a": [1, 2]}, "a.length") == 2
+    assert getPath({"a": [[1, 2]]}, "a.0.1") == 2
+    for path in ("2", "01", "-0", "-1", "+1", " 1", "1.0", "", "len", "count"):
+        assert getPath([5, 6], path) is None
+
+
+@pytest.mark.parametrize("condition, expected", [
+    ({"$or": [{"0": 1}]}, True),
+    ({"$and": [{"0": 1}, {"length": 1}]}, True),
+    ({"$or": [{"length": 2}]}, False),
+    ({"$or": [{"1": 1}]}, False),
+    ({"$or": [{"01": 1}]}, False),
+    ({"$nor": [{"0": 2}]}, True),
+    ({"0": 1}, True),
+])
+def test_logical_elem_match_reads_nested_array_indices(condition, expected):
+    attributes = {"x": [[1]]}
+    assert evalCondition(attributes, {"x": {"$elemMatch": condition}}) is expected
+    # Once x is known, the reducer drops a passing condition and keeps a failing one
+    payload = {"features": {"f": {"defaultValue": False, "rules": [
+        {"condition": {"x": {"$elemMatch": condition}}, "force": True},
+    ]}}}
+    rule = reduce_payload(payload, attributes)["features"]["f"]["rules"][0]
+    assert rule == ({"force": True} if expected else {"condition": {"$not": {}}, "force": None})
+
+
+@pytest.mark.parametrize("fields, included, excluded", [
+    # A missing field is undefined in JS, which never matches null
+    ({}, False, True),
+    ({"region": None}, True, False),
+    ({"region": "eu"}, False, True),
+])
+def test_reduce_payload_custom_field_missing_vs_null(fields, included, excluded):
+    payload = {"features": {"f": {"defaultValue": True, "metadata": {"customFields": fields}}}}
+    flt = {"customFields": {"region": [None]}}
+    assert ("f" in reduce_payload(payload, {}, include=flt)["features"]) is included
+    assert ("f" in reduce_payload(payload, {}, exclude=flt)["features"]) is excluded
+
+
+def test_reduce_payload_missing_tags_and_projects_never_match_null():
+    payload = {"features": {"f": {"defaultValue": True}}}
+    for key in ("tags", "projects"):
+        assert "f" not in reduce_payload(payload, {}, include={key: [None]})["features"]
+        assert "f" in reduce_payload(payload, {}, exclude={key: [None]})["features"]
+
+
+@pytest.mark.parametrize("value, expected", [
+    (1, "1"),
+    (1.0, "1"),
+    (1.5, "1.5"),
+    (-1.5, "-1.5"),
+    (100, "100"),
+    (1e21, "1e+21"),
+    (10**21, "1e+21"),
+    (123456789012345680000.0, "123456789012345680000"),
+    (1e-7, "1e-7"),
+    (0.000002, "0.000002"),
+    (123e-20, "1.23e-18"),
+    (1e23, "1e+23"),
+    (-0.0, "0"),
+    (0, "0"),
+    (2**53 + 1, "9007199254740992"),
+    (float("nan"), "NaN"),
+    (float("inf"), "Infinity"),
+    (float("-inf"), "-Infinity"),
+    (10**400, "Infinity"),
+])
+def test_js_number_to_string(value, expected):
+    assert _js_number_to_string(value) == expected
+
+
+@pytest.mark.parametrize("attributes, condition, expected", [
+    ({"a": 1.0}, {"a": {"$veq": 1}}, True),
+    ({"a": 1}, {"a": {"$veq": 1.0}}, True),
+    ({"a": 0.000002}, {"a": {"$vgt": 1.5}}, False),
+])
+def test_numeric_versions_format_like_js(attributes, condition, expected):
+    assert evalCondition(attributes, condition) is expected
+
+
+@pytest.mark.parametrize("rounding, trap", [
+    (decimal.ROUND_HALF_EVEN, None),
+    (decimal.ROUND_DOWN, None),
+    (decimal.ROUND_HALF_EVEN, decimal.Inexact),
+    (decimal.ROUND_HALF_EVEN, decimal.Rounded),
+])
+def test_numeric_versions_ignore_decimal_context(rounding, trap):
+    # The application's decimal context must not change number formatting
+    with decimal.localcontext() as ctx:
+        ctx.prec = 2
+        ctx.rounding = rounding
+        if trap:
+            ctx.traps[trap] = True
+        assert evalCondition({"a": 1.21}, {"a": {"$veq": 1.24}}) is False
+        assert evalCondition({"a": 1.21}, {"a": {"$veq": 1.21}}) is True
+        assert _js_number_to_string(123456789.123) == "123456789.123"
+        assert _js_number_to_string(1.5e-7) == "1.5e-7"
+
+
+@pytest.mark.parametrize("attribute, condition, expected", [
+    # JS compares JSON.stringify output, so key order matters
+    ({"y": 2, "x": 1}, {"x": 1, "y": 2}, False),
+    ({"x": 1, "y": 2}, {"x": 1, "y": 2}, True),
+    ([{"y": 1, "x": 2}], [{"x": 2, "y": 1}], False),
+    # 1.0 and -0.0 serialize as 1 and 0
+    ({"x": 1.0}, {"x": 1}, True),
+    ([1.0, {"b": -0.0}], [1, {"b": 0}], True),
+    # Booleans and numbers serialize differently
+    ({"x": True}, {"x": 1}, False),
+    ([1], [True], False),
+    # Non-finite numbers serialize as null
+    ([float("nan")], [None], True),
+    ({"x": float("inf")}, {"x": None}, True),
+    ({"x": [{}]}, {"x": [{}]}, True),
+    # JS orders array-index keys numerically before other keys
+    ({"2": "b", "1": "a"}, {"1": "a", "2": "b"}, True),
+    ({"10": 1, "9": 2}, {"9": 2, "10": 1}, True),
+    ({"x": 1, "1": "a"}, {"1": "a", "x": 1}, True),
+    ({"o": {"2": "b", "1": "a"}}, {"o": {"1": "a", "2": "b"}}, True),
+    ({"4294967294": 1, "0": 2}, {"0": 2, "4294967294": 1}, True),
+    # Keys that aren't canonical indices keep insertion order
+    ({"01": 1, "1": 2}, {"1": 2, "01": 1}, True),
+    ({"02": 1, "01": 2}, {"01": 2, "02": 1}, False),
+    ({"4294967296": 1, "4294967295": 2}, {"4294967295": 2, "4294967296": 1}, False),
+    ({"-1": 1, "x": 2}, {"x": 2, "-1": 1}, False),
+    ({"\u0661": 1, "x": 2}, {"x": 2, "\u0661": 1}, False),
+    # Past Python's int() digit limit, a numeric key is still an ordinary key
+    ({"1" * 5000: 1}, {"1" * 5000: 1}, True),
+])
+def test_literal_object_equality_matches_json_stringify(attribute, condition, expected):
+    assert evalCondition({"a": attribute}, {"a": condition}) is expected
+    payload = {"features": {"f": {"defaultValue": False, "rules": [
+        {"condition": {"a": condition}, "force": True},
+    ]}}}
+    rule = reduce_payload(payload, {"a": attribute})["features"]["f"]["rules"][0]
+    assert rule == ({"force": True} if expected else {"condition": {"$not": {}}, "force": None})
+
+
 def test_conditions(evalCondition_data):
     _, condition, attributes, expected, savedGroups = (evalCondition_data + [None]*5)[:5]
     assert evalCondition(attributes, condition, savedGroups) == expected
@@ -172,10 +463,11 @@ def test_version_comparison_normalizes_unhashable_values():
         {"version": ["1.2.3"]},
         {"version": {"$vgt": "1.0.0"}},
     ) is False
+    # An object condition value is not a version, so it never matches
     assert evalCondition(
         {"version": "1.0.0"},
         {"version": {"$vgt": {"version": "0.9.0"}}},
-    ) is True
+    ) is False
 
 
 def test_decrypt(decrypt_data):
@@ -419,6 +711,81 @@ def test_feature_usage_callback_error_handling():
     # Should work with is_on as well
     assert gb.is_on("feature-1") is True
     
+    gb.destroy()
+
+
+@pytest.mark.parametrize("user_id", [True, False, 0, 0.0, "", None, [], ["1"], {}, {"a": 1}, float("inf"), 10**400])
+def test_unhashable_ids_use_the_fallback_attribute(user_id):
+    # Only non-empty strings and finite non-zero numbers identify a user (as
+    # in JS); anything else counts as missing and the fallback is used
+    exp = Experiment(key="my-test", variations=[0, 1], fallbackAttribute="deviceId")
+    # destroy() clears the attributes dict it was given, so each instance gets a copy
+    attributes = {"id": user_id, "deviceId": "d1"}
+
+    # Without sticky bucketing, experiments ignore the fallback attribute
+    gb = GrowthBook(attributes=dict(attributes))
+    res = gb.run(exp)
+    assert (res.inExperiment, res.hashUsed) == (False, False)
+    gb.destroy()
+
+    gb = GrowthBook(attributes=dict(attributes), sticky_bucket_service=InMemoryStickyBucketService())
+    res = gb.run(exp)
+    assert (res.inExperiment, res.hashAttribute, res.hashValue) == (True, "deviceId", "d1")
+    gb.destroy()
+
+    # Rollouts always use the rule's fallback attribute
+    features = {"f": {"defaultValue": "off", "rules": [
+        {"force": "on", "coverage": 1, "hashAttribute": "id", "fallbackAttribute": "deviceId"},
+    ]}}
+    gb = GrowthBook(attributes=dict(attributes), features=features)
+    assert gb.eval_feature("f").source == "force"
+    gb.destroy()
+    gb = GrowthBook(attributes={"id": user_id}, features=features)
+    assert gb.eval_feature("f").source == "defaultValue"
+    gb.destroy()
+
+
+def test_numeric_ids_hash_like_js_strings():
+    # A number hashes like JS String(number): 1.0 like "1", 1.5 like "1.5"
+    def bucket(user_id):
+        gb = GrowthBook(attributes={"id": user_id})
+        res = gb.run(Experiment(key="k", variations=[0, 1]))
+        gb.destroy()
+        return res.bucket
+    assert bucket(1.0) == bucket(1) == bucket("1")
+    assert bucket(1.5) == bucket("1.5")
+
+
+def test_hash_uses_utf16_code_units():
+    # JS hashes UTF-16 code units, so an astral character is two units
+    # Expected values from the JS SDK
+    assert gbhash("", "😀", 2) == 0.4971
+    assert gbhash("", "josé", 1) == 0.586
+
+
+def test_filters_exclude_users_without_a_hash_value():
+    # Like JS, a user with no hash value is filtered out of a filtered experiment
+    exp = Experiment(key="k", variations=[0, 1],
+                     filters=[{"attribute": "company", "seed": "s", "ranges": [[0, 1]]}])
+    gb = GrowthBook(attributes={"id": "1"})
+    assert gb.run(exp).inExperiment is False
+    gb.destroy()
+
+
+def test_string_ordering_uses_utf16_code_units():
+    # "😀" is the surrogate pair D83D DE00, which sorts below U+FFFF in JS
+    assert evalCondition({"x": "😀"}, {"x": {"$lt": "￿"}}) is True
+    assert evalCondition({"x": "￿"}, {"x": {"$gt": "😀"}}) is True
+
+
+@pytest.mark.parametrize("value, on", [
+    ([], True), ({}, True), ("off", True), ("0", True), (0.0, False), (0, False),
+    ("", False), (False, False), (None, False), (float("nan"), False),
+])
+def test_feature_on_follows_js_truthiness(value, on):
+    gb = GrowthBook(features={"f": {"defaultValue": value}})
+    res = gb.eval_feature("f")
+    assert (res.on, res.off) == (on, not on)
     gb.destroy()
 
 
