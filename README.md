@@ -419,6 +419,38 @@ When loading a payload yourself, use `gb.set_payload(payload)` or
 Receiving v2 payloads requires a registered SDK version with this capability
 and **All Saved Groups** under the SDK Connection's **Pass Saved Groups by reference**.
 
+### Remote saved groups
+
+A **remote** saved group keeps its members outside the payload, for lists too
+large to ship (millions of ids). The payload only says which attribute the
+group is about, `{"type": "remote", "attributeKey": "account_id"}`, so the SDK
+needs the ids of the groups the user is in. Conditions read them as the
+`__gb_remoteGroupIds` attribute, and remote evaluation sends them too.
+
+With `GrowthBookClient`, resolve them per user. `redis_resolver` reads the sets
+GrowthBook's loader writes to Redis (`SMEMBERS gb:member:<attribute>:<value>`);
+any async callable `(attributes, groups) -> ids` works as a resolver:
+
+```python
+import redis.asyncio as redis
+from growthbook.remote_saved_groups import redis_resolver
+
+resolver = redis_resolver(redis.Redis())
+user = await client.add_remote_saved_groups(UserContext(attributes={"account_id": "a1"}), resolver)
+result = await client.eval_feature("my-feature", user)
+```
+
+Or set them directly: `UserContext(remote_group_ids=["grp_vip"])` for
+`GrowthBookClient`, `GrowthBook(remote_group_ids=[...])` or
+`gb.set_remote_group_ids([...])` for `GrowthBook`. Setting them wins over an
+attribute of that name, which also works on its own.
+
+Leave them unset (`None`) while they are unresolved: rules that use remote
+groups then fail, including "not in group" rules, and one warning is logged.
+An empty list means the user is in no group, which is what lets "not in group"
+rules match. If the resolver raises, `add_remote_saved_groups` logs it and
+returns the context unchanged.
+
 ## GrowthBook class
 
 The GrowthBook constructor has the following parameters:

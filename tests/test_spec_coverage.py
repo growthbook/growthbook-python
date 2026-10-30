@@ -29,13 +29,13 @@ RUN_SECTIONS = {
     "savedGroupReferencesV2.evalCondition": "test_saved_groups.py",
     "savedGroupReferencesV2.feature": "test_saved_groups.py",
     "savedGroupReferencesV2.run": "test_saved_groups.py",
+    "savedGroupReferencesRemote.evalCondition": "test_remote_saved_groups.py",
+    "savedGroupReferencesRemote.feature": "test_remote_saved_groups.py",
 }
 
 # Sections the tests don't run, and why
 EXCLUDED_SECTIONS = {
     "urlRedirect": "URL redirect experiments are a browser feature",
-    "savedGroupReferencesRemote.evalCondition": "Remote saved groups aren't implemented yet",
-    "savedGroupReferencesRemote.feature": "Remote saved groups aren't implemented yet",
 }
 
 
