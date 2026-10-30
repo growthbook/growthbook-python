@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     from urllib3.response import BaseHTTPResponse
 
 from .core import _eval_feature_and_report, _getHashValue, run_experiment
-from .remote_saved_groups import is_missing_remote_group_ids, with_remote_group_ids
+from .remote_saved_groups import RemoteSavedGroupsCache, is_missing_remote_group_ids, with_remote_group_ids
 
 logger = logging.getLogger("growthbook")
 
@@ -976,6 +976,7 @@ class GrowthBook(object):
         self._features: Dict[str, Feature] = {}
         self._saved_groups = saved_groups if saved_groups is not None else {}
         self._warned_missing_remote_group_ids = False
+        self._remote_saved_groups_cache = RemoteSavedGroupsCache()
         self._contextual_bandits = contextual_bandits if contextual_bandits is not None else {}
         self._api_host = api_host
         self._client_key = client_key
@@ -1509,7 +1510,9 @@ class GrowthBook(object):
         attribute values."""
         if self._warned_missing_remote_group_ids:
             return
-        if is_missing_remote_group_ids(self._attributes, self._remote_group_ids, self._saved_groups):
+        if is_missing_remote_group_ids(
+            self._attributes, self._remote_group_ids, self._saved_groups, self._remote_saved_groups_cache,
+        ):
             self._warned_missing_remote_group_ids = True
             logger.warning(
                 "The payload has remote saved groups, but the user has no remote group ids. "

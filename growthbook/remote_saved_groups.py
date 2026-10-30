@@ -30,31 +30,47 @@ class RemoteSavedGroup(_RemoteSavedGroupRequired, total=False):
 # remote groups use, keyed by `attributeKey`). Returns the group ids.
 SavedGroupResolver = Callable[[Dict[str, Any], List[RemoteSavedGroup]], Awaitable[List[str]]]
 
-# Evaluation checks for remote groups often, so each payload is scanned once.
-# One entry is enough: the client swaps in a new saved groups dict per payload.
-_last_scan: Optional[Tuple[Any, List[RemoteSavedGroup]]] = None
-
 
 def get_remote_saved_groups(saved_groups: Optional[Dict[str, Any]]) -> List[RemoteSavedGroup]:
     """The payload's remote saved groups. Only v2 payloads carry the metadata
-    this reads."""
-    global _last_scan
+    this reads.
+
+    A new list of new entries on every call, so a caller (a resolver included)
+    can't change what the next call sees. To check often, use
+    RemoteSavedGroupsCache."""
     if not saved_groups:
         return []
-    last = _last_scan
-    if last is not None and last[0] is saved_groups:
-        return last[1]
     groups: List[RemoteSavedGroup] = []
     for group_id, entry in saved_groups.items():
-        # A remote entry without an attribute gives a resolver nothing to look up,
-        # so its rules fail closed
+        # A remote entry without an attribute gives a resolver nothing to look up.
+        # Evaluation treats references to it as undecided.
         if isinstance(entry, dict) and entry.get("type") == "remote" and isinstance(entry.get("attributeKey"), str):
             group: RemoteSavedGroup = {"id": group_id, "attributeKey": entry["attributeKey"]}
             if entry.get("valuesFrom"):
                 group["valuesFrom"] = entry["valuesFrom"]
             groups.append(group)
-    _last_scan = (saved_groups, groups)
     return groups
+
+
+class RemoteSavedGroupsCache:
+    """Whether one client's saved groups have remote entries, scanned once per
+    payload. A client swaps in a new saved groups dict per payload, so one slot
+    per client is enough; keeping it per client means two clients with
+    different payloads don't evict each other."""
+
+    __slots__ = ("_source", "_has_remote")
+
+    def __init__(self) -> None:
+        self._source: Optional[Dict[str, Any]] = None
+        self._has_remote = False
+
+    def has_remote_groups(self, saved_groups: Optional[Dict[str, Any]]) -> bool:
+        if not saved_groups:
+            return False
+        if saved_groups is not self._source:
+            self._source = saved_groups
+            self._has_remote = len(get_remote_saved_groups(saved_groups)) > 0
+        return self._has_remote
 
 
 def _get_path(attributes: Dict[str, Any], path: str) -> Any:
@@ -121,14 +137,16 @@ def is_missing_remote_group_ids(
     attributes: Optional[Dict[str, Any]],
     remote_group_ids: Optional[List[str]],
     saved_groups: Optional[Dict[str, Any]],
+    cache: Optional[RemoteSavedGroupsCache] = None,
 ) -> bool:
     """Whether the payload has remote groups but the user has no remote group
-    ids, so every rule using them will fail."""
-    return (
-        remote_group_ids is None
-        and not isinstance((attributes or {}).get(REMOTE_GROUP_IDS_ATTRIBUTE), list)
-        and len(get_remote_saved_groups(saved_groups)) > 0
-    )
+    ids, so every rule using them will fail. The cheap checks come first, and
+    `cache` spares rescanning the same payload."""
+    if remote_group_ids is not None or isinstance((attributes or {}).get(REMOTE_GROUP_IDS_ATTRIBUTE), list):
+        return False
+    if cache is not None:
+        return cache.has_remote_groups(saved_groups)
+    return len(get_remote_saved_groups(saved_groups)) > 0
 
 
 def with_remote_group_ids(attributes: Dict[str, Any], remote_group_ids: Optional[List[str]]) -> Dict[str, Any]:

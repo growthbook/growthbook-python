@@ -21,6 +21,7 @@ from contextlib import asynccontextmanager
 
 from .core import _eval_feature_and_report, _hash_string, _is_hashable, reduce_payload, run_experiment
 from .remote_saved_groups import (
+    RemoteSavedGroupsCache,
     SavedGroupResolver,
     get_remote_saved_groups,
     is_missing_remote_group_ids,
@@ -54,6 +55,10 @@ from .common_types import (
 )
 
 logger = logging.getLogger("growthbook.growthbook_client")
+
+# How many times add_remote_saved_groups looks the groups up while payload
+# refreshes keep replacing them, before it leaves them unresolved
+_REMOTE_GROUP_LOOKUP_ATTEMPTS = 3
 
 class SingletonMeta(type):
     """One instance per (class, api_host, client_key). Two GrowthBookClients
@@ -718,6 +723,7 @@ class GrowthBookClient:
         
         self._global_context: Optional[GlobalContext] = None
         self._warned_missing_remote_group_ids = False
+        self._remote_saved_groups_cache = RemoteSavedGroupsCache()
         # The decrypted payload as received, for reduce_payload. Swapped
         # together with _global_context.
         self._payload: Dict[str, Any] = {}
@@ -1285,24 +1291,26 @@ class GrowthBookClient:
         Requires a saved group references v2 payload for group metadata. With
         inline/v1 payloads, resolve membership in the app and set
         `remote_group_ids` on the UserContext directly instead."""
-        saved_groups = self._global_context.saved_groups if self._global_context else None
-        # No remote entries doesn't mean no remote rules: payloads for SDKs
-        # without remote support check __gb_remoteGroupIds directly. Leaving it
-        # unset makes those rules fail closed; [] would let every "not in group"
-        # rule match.
-        if not get_remote_saved_groups(saved_groups):
-            return user_context
         try:
-            remote_group_ids = await resolve_remote_group_ids(user_context.attributes, saved_groups, resolver)
-            # A refresh during the lookup can add groups the result doesn't
-            # cover, and a missing group would pass "not in group" rules. Look up
-            # once more for the new payload.
-            current = self._global_context.saved_groups if self._global_context else None
-            if current is not saved_groups:
-                if not get_remote_saved_groups(current):
+            # A refresh during a lookup can add groups the result doesn't cover,
+            # and a missing group would pass "not in group" rules. So the result
+            # only counts if the payload is still the one it was looked up for.
+            for _ in range(_REMOTE_GROUP_LOOKUP_ATTEMPTS):
+                saved_groups = self._global_context.saved_groups if self._global_context else None
+                # No remote entries doesn't mean no remote rules: payloads for
+                # SDKs without remote support check __gb_remoteGroupIds directly.
+                # Leaving it unset makes those rules fail closed; [] would let
+                # every "not in group" rule match.
+                if not get_remote_saved_groups(saved_groups):
                     return user_context
-                remote_group_ids = await resolve_remote_group_ids(user_context.attributes, current, resolver)
-            return replace(user_context, remote_group_ids=remote_group_ids)
+                remote_group_ids = await resolve_remote_group_ids(user_context.attributes, saved_groups, resolver)
+                current = self._global_context.saved_groups if self._global_context else None
+                if current is saved_groups:
+                    return replace(user_context, remote_group_ids=remote_group_ids)
+            # Still changing: leave the groups unresolved, so their rules fail
+            # closed, rather than return ids that miss the newest groups
+            logger.warning("Saved groups kept changing during the remote group lookup; leaving them unresolved")
+            return user_context
         except Exception:
             logger.exception("Could not resolve remote saved groups")
             return user_context
@@ -1316,7 +1324,9 @@ class GrowthBookClient:
         if self._warned_missing_remote_group_ids:
             return
         remote_group_ids = getattr(user_context, "remote_group_ids", None)
-        if is_missing_remote_group_ids(user_context.attributes, remote_group_ids, saved_groups):
+        if is_missing_remote_group_ids(
+            user_context.attributes, remote_group_ids, saved_groups, self._remote_saved_groups_cache,
+        ):
             self._warned_missing_remote_group_ids = True
             logger.warning(
                 "The payload has remote saved groups, but the user has no remote group ids. "
