@@ -127,8 +127,12 @@ def _eval_saved_group(
         return _eval_condition(attributes, condition, saved_groups, next_visited)
     if entry.get("type") == "remote":
         # The ids live outside the payload: the user's groups arrive resolved,
-        # in REMOTE_GROUP_IDS_ATTRIBUTE. Another attribute needs a derived
-        # group, which isn't supported yet.
+        # in REMOTE_GROUP_IDS_ATTRIBUTE. A resolver can't look up an entry
+        # without an attribute, so its absence from the ids means nothing:
+        # undecided, so it fails under $not too.
+        if not isinstance(entry.get("attributeKey"), str):
+            return None
+        # Another attribute needs a derived group, which isn't supported yet
         if "attributeKey" in reference and reference["attributeKey"] != entry.get("attributeKey"):
             return False
         if prune is not None and not _is_known(attributes, REMOTE_GROUP_IDS_ATTRIBUTE):

@@ -244,3 +244,81 @@ def test_prune_condition_keeps_a_remote_reference_while_the_ids_are_unknown():
     assert pruneCondition({"account_id": "a1"}, condition, SAVED_GROUPS) == condition
     assert pruneCondition({REMOTE_GROUP_IDS_ATTRIBUTE: ["grp_vip"]}, condition, SAVED_GROUPS) is True
     assert pruneCondition({REMOTE_GROUP_IDS_ATTRIBUTE: []}, condition, SAVED_GROUPS) is False
+
+
+@pytest.mark.asyncio
+async def test_add_remote_saved_groups_leaves_groups_unresolved_while_the_payload_keeps_changing():
+    client = GrowthBookClient(Options())
+    calls = []
+
+    async def resolver(attributes, groups):
+        # Every lookup sees a refresh land before it returns
+        calls.append(len(calls))
+        await client.set_payload({"features": {}, "savedGroups": {**SAVED_GROUPS, f"grp_{len(calls)}": {
+            "type": "remote", "attributeKey": "account_id"}}})
+        return ["grp_vip"]
+
+    try:
+        await client.set_payload({"features": {}, "savedGroups": SAVED_GROUPS})
+        user = UserContext(attributes={"account_id": "a1"})
+        assert await client.add_remote_saved_groups(user, resolver) is user
+        assert len(calls) == 3
+    finally:
+        await client.close()
+
+
+def test_a_remote_group_without_an_attribute_is_undecided():
+    saved_groups = {**SAVED_GROUPS, "grp_bad": {"type": "remote"}}
+    attributes = {"account_id": "a1", REMOTE_GROUP_IDS_ATTRIBUTE: ["grp_vip"]}
+    not_in_bad = {"$not": {"$savedGroup": {"id": "grp_bad"}}, REMOTE_GROUP_IDS_ATTRIBUTE: {"$exists": True}}
+
+    # A resolver never looked it up, so its absence from the ids can't put the
+    # user outside it
+    assert evalCondition(attributes, {"$savedGroup": {"id": "grp_bad"}}, saved_groups) is False
+    assert evalCondition(attributes, not_in_bad, saved_groups) is False
+    assert pruneCondition(attributes, {"$savedGroup": {"id": "grp_bad"}}, saved_groups) == {
+        "$savedGroup": {"id": "grp_bad"}}
+    assert [g["id"] for g in get_remote_saved_groups(saved_groups)] == ["grp_vip"]
+
+
+@pytest.mark.asyncio
+async def test_a_resolver_cannot_change_what_later_lookups_see():
+    async def greedy(attributes, groups):
+        groups[0]["attributeKey"] = "changed"
+        groups.clear()
+        return []
+
+    seen = []
+
+    async def recording(attributes, groups):
+        seen.append(groups)
+        return []
+
+    await resolve_remote_group_ids({"account_id": "a1"}, SAVED_GROUPS, greedy)
+    await resolve_remote_group_ids({"account_id": "a1"}, SAVED_GROUPS, recording)
+    assert seen == [[{"id": "grp_vip", "attributeKey": "account_id"}]]
+
+
+def test_remote_saved_groups_cache_is_per_client(monkeypatch):
+    import growthbook.remote_saved_groups as module
+
+    scans = []
+    original = module.get_remote_saved_groups
+
+    def counting(saved_groups):
+        scans.append(saved_groups)
+        return original(saved_groups)
+
+    monkeypatch.setattr(module, "get_remote_saved_groups", counting)
+    first, second = module.RemoteSavedGroupsCache(), module.RemoteSavedGroupsCache()
+    local_only = {"admins": {"type": "list", "attributeKey": "id", "values": ["u_1"]}}
+
+    # Two clients with different payloads alternate without evicting each other
+    for _ in range(3):
+        assert first.has_remote_groups(SAVED_GROUPS) is True
+        assert second.has_remote_groups(local_only) is False
+    assert len(scans) == 2
+
+    # A new payload is scanned again
+    assert first.has_remote_groups(dict(local_only)) is False
+    assert len(scans) == 3
