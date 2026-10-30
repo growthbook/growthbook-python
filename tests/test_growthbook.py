@@ -470,6 +470,32 @@ def test_version_comparison_normalizes_unhashable_values():
     ) is False
 
 
+def test_padded_version_string_strips_one_leading_v_and_build_metadata():
+    # growthbook/growthbook#7401: one leading `v` and everything from the first `+` are stripped
+    plain = paddedVersionString("1.2.3")
+    assert paddedVersionString("v1.2.3") == plain
+    assert paddedVersionString("vv1.2.3") == "v1-    2-    3-~"
+    assert paddedVersionString("1.2.3+build") == plain
+    assert paddedVersionString("v1.2.3+build+more.1-2") == plain
+    assert paddedVersionString("1.2.3+") == plain
+    assert paddedVersionString("+build") == ""
+
+
+def test_padded_version_string_cuts_at_the_first_plus_even_when_a_newline_follows():
+    # The regex kept "+build\nmore": `.` doesn't match a newline
+    plain = paddedVersionString("1.2.3")
+    assert paddedVersionString("1.2.3+build\nmore") == plain
+    assert paddedVersionString("1.2.3+\n") == plain
+
+
+def test_padded_version_string_runs_in_linear_time_on_many_plus_characters():
+    # Quadratic for the regex: every `+` started a `.*` that failed at "\nx" (20 000 took a second)
+    input = "+" * 40000 + "\nx"
+    start = time()
+    paddedVersionString(input)
+    assert time() - start < 0.5
+
+
 def test_decrypt(decrypt_data):
     _, encrypted, key, expected = decrypt_data
     try:
