@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import inspect
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import random
 import logging
 from types import TracebackType
@@ -20,6 +20,13 @@ from growthbook import FeatureRepository, feature_repo
 from contextlib import asynccontextmanager
 
 from .core import _eval_feature_and_report, _hash_string, _is_hashable, reduce_payload, run_experiment
+from .remote_saved_groups import (
+    SavedGroupResolver,
+    get_remote_saved_groups,
+    is_missing_remote_group_ids,
+    resolve_remote_group_ids,
+    with_remote_group_ids,
+)
 from .common_types import (
     T,
     AsyncEventLogger,
@@ -710,6 +717,7 @@ class GrowthBookClient:
         )
         
         self._global_context: Optional[GlobalContext] = None
+        self._warned_missing_remote_group_ids = False
         # The decrypted payload as received, for reduce_payload. Swapped
         # together with _global_context.
         self._payload: Dict[str, Any] = {}
@@ -1151,7 +1159,7 @@ class GrowthBookClient:
 
     def _remote_eval_payload(self, user_context: UserContext) -> Dict[str, Any]:
         return build_remote_eval_payload(
-            user_context.attributes,
+            with_remote_group_ids(user_context.attributes, getattr(user_context, "remote_group_ids", None)),
             user_context.forced_variations,
             user_context.url,
             forced_features=user_context.forced_features,
@@ -1268,6 +1276,53 @@ class GrowthBookClient:
             "tracking_buffer": tracking_buffer,
         }
 
+    async def add_remote_saved_groups(
+        self, user_context: UserContext, resolver: SavedGroupResolver,
+    ) -> UserContext:
+        """A copy of `user_context` with the user's remote saved groups from
+        `resolver`, or `user_context` unchanged if the resolver fails.
+
+        Requires a saved group references v2 payload for group metadata. With
+        inline/v1 payloads, resolve membership in the app and set
+        `remote_group_ids` on the UserContext directly instead."""
+        saved_groups = self._global_context.saved_groups if self._global_context else None
+        # No remote entries doesn't mean no remote rules: payloads for SDKs
+        # without remote support check __gb_remoteGroupIds directly. Leaving it
+        # unset makes those rules fail closed; [] would let every "not in group"
+        # rule match.
+        if not get_remote_saved_groups(saved_groups):
+            return user_context
+        try:
+            remote_group_ids = await resolve_remote_group_ids(user_context.attributes, saved_groups, resolver)
+            # A refresh during the lookup can add groups the result doesn't
+            # cover, and a missing group would pass "not in group" rules. Look up
+            # once more for the new payload.
+            current = self._global_context.saved_groups if self._global_context else None
+            if current is not saved_groups:
+                if not get_remote_saved_groups(current):
+                    return user_context
+                remote_group_ids = await resolve_remote_group_ids(user_context.attributes, current, resolver)
+            return replace(user_context, remote_group_ids=remote_group_ids)
+        except Exception:
+            logger.exception("Could not resolve remote saved groups")
+            return user_context
+
+    def _warn_if_remote_group_ids_missing(
+        self, user_context: UserContext, saved_groups: Optional[Dict[str, Any]],
+    ) -> None:
+        """Logs once when the payload has remote saved groups but the user has no
+        remote group ids, since every rule using them will then fail. Logs no
+        attribute values."""
+        if self._warned_missing_remote_group_ids:
+            return
+        remote_group_ids = getattr(user_context, "remote_group_ids", None)
+        if is_missing_remote_group_ids(user_context.attributes, remote_group_ids, saved_groups):
+            self._warned_missing_remote_group_ids = True
+            logger.warning(
+                "The payload has remote saved groups, but the user has no remote group ids. "
+                "Rules using them won't match. See add_remote_saved_groups."
+            )
+
     async def create_evaluation_context(
         self,
         user_context: UserContext,
@@ -1292,6 +1347,15 @@ class GrowthBookClient:
         caller_context = user_context
         if self.options.remote_eval or self.options.sticky_bucket_service is not None:
             user_context = snapshot_user_context(user_context)
+        self._warn_if_remote_group_ids_missing(user_context, global_context.saved_groups)
+        # getattr: duck-typed user contexts predate the field
+        remote_group_ids = getattr(user_context, "remote_group_ids", None)
+        if remote_group_ids is not None:
+            # Conditions read the ids as the __gb_remoteGroupIds attribute. A copy,
+            # so the caller's attributes are left as they were.
+            user_context = replace(
+                user_context, attributes=with_remote_group_ids(user_context.attributes, remote_group_ids),
+            )
 
         if self.options.remote_eval and self._features_repository:
             # Per-user POST + cache: features come from the proxy filtered for

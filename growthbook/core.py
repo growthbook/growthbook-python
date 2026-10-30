@@ -21,6 +21,7 @@ from .common_types import (
     UserContext,
     VariationMeta,
 )
+from .remote_saved_groups import REMOTE_GROUP_IDS_ATTRIBUTE
 
 
 logger = logging.getLogger("growthbook.core")
@@ -124,6 +125,16 @@ def _eval_saved_group(
         if prune is not None:
             return prune(attributes, condition, saved_groups, next_visited)
         return _eval_condition(attributes, condition, saved_groups, next_visited)
+    if entry.get("type") == "remote":
+        # The ids live outside the payload: the user's groups arrive resolved,
+        # in REMOTE_GROUP_IDS_ATTRIBUTE. Another attribute needs a derived
+        # group, which isn't supported yet.
+        if "attributeKey" in reference and reference["attributeKey"] != entry.get("attributeKey"):
+            return False
+        if prune is not None and not _is_known(attributes, REMOTE_GROUP_IDS_ATTRIBUTE):
+            return None
+        group_ids = getPath(attributes, REMOTE_GROUP_IDS_ATTRIBUTE)
+        return isinstance(group_ids, list) and group_id in group_ids
     # A group type added after this SDK was built. The client SDK may support it.
     return None
 
