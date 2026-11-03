@@ -1425,3 +1425,93 @@ async def test_async_non_remote_eval_still_works():
     client._features_repository.cache.cache.clear() if hasattr(client._features_repository.cache, "cache") else None
     assert await client.initialize() is True
     assert await client.get_feature_value("flag1", "fallback", UserContext(attributes={"id": "u1"})) == "cdn-value"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("old_outcome", ["success", "none", "error", "cancel"])
+@pytest.mark.parametrize("old_finishes_first", [True, False])
+async def test_async_inflight_generation_survives_old_request_completion(
+    old_outcome, old_finishes_first
+):
+    entered = [asyncio.Event(), asyncio.Event()]
+    release = [asyncio.Event(), asyncio.Event()]
+    calls = 0
+    old_response = {"features": {"f": {"defaultValue": "old"}}, "savedGroups": {}}
+    fresh_response = {"features": {"f": {"defaultValue": "fresh"}}, "savedGroups": {}}
+
+    async def post_handler(*args, **kwargs):
+        nonlocal calls
+        index = calls
+        calls += 1
+        assert index < 2, "A request in the new generation was not coalesced"
+        entered[index].set()
+        await release[index].wait()
+        if index == 1:
+            return fresh_response
+        if old_outcome == "error":
+            raise RuntimeError("Old request failed")
+        return None if old_outcome == "none" else old_response
+
+    client = await _make_async_client(post_handler)
+    user = UserContext(attributes={"id": "generation-user"})
+    repository = client._features_repository
+    tasks = []
+
+    async def evaluate():
+        return await client.get_feature_value("f", "fallback", user)
+
+    async def finish_old():
+        if old_outcome == "cancel":
+            old.cancel()
+        else:
+            release[0].set()
+        results = await asyncio.gather(old, old_waiter, return_exceptions=True)
+        if old_outcome == "cancel":
+            assert all(isinstance(result, asyncio.CancelledError) for result in results)
+        elif old_outcome == "error":
+            assert all(isinstance(result, RuntimeError) for result in results)
+        else:
+            expected = "fallback" if old_outcome == "none" else "old"
+            assert results == [expected, expected]
+
+    try:
+        old = asyncio.create_task(evaluate())
+        tasks.append(old)
+        await asyncio.wait_for(entered[0].wait(), timeout=5)
+        old_waiter = asyncio.create_task(evaluate())
+        tasks.append(old_waiter)
+        await asyncio.sleep(0)
+
+        # An SSE invalidation permits a new request for the same user before
+        # the previous generation completes.
+        await repository._handle_sse_event({"type": "features-updated"})
+        fresh = asyncio.create_task(evaluate())
+        tasks.append(fresh)
+        await asyncio.wait_for(entered[1].wait(), timeout=5)
+        new_key, new_inflight = next(iter(repository._remote_eval_inflight.items()))
+
+        if old_finishes_first:
+            await finish_old()
+            assert repository._remote_eval_inflight.get(new_key) is new_inflight
+            assert not repository._remote_eval_cache, "Old data repopulated the cache"
+            fresh_waiter = asyncio.create_task(evaluate())
+            tasks.append(fresh_waiter)
+            await asyncio.sleep(0)
+            assert calls == 2
+            release[1].set()
+            assert await fresh_waiter == "fresh"
+            assert await fresh == "fresh"
+        else:
+            release[1].set()
+            assert await fresh == "fresh"
+            await finish_old()
+
+        assert await evaluate() == "fresh"
+        assert calls == 2
+        assert not repository._remote_eval_inflight
+        assert next(iter(repository._remote_eval_cache.values()))[0] == fresh_response
+    finally:
+        for gate in release:
+            gate.set()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await client.close()

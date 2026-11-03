@@ -288,7 +288,8 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             # derives it from BaseException). Without cleanup on cancellation
             # the inflight map leaks the cache_key forever and any waiters
             # blocked on `await existing` hang indefinitely.
-            self._remote_eval_inflight.pop(cache_key, None)
+            if self._remote_eval_inflight.get(cache_key) is inflight:
+                self._remote_eval_inflight.pop(cache_key, None)
             if not inflight.done():
                 if isinstance(e, asyncio.CancelledError):
                     # Cancel the inflight Future instead of `set_exception(e)`.
@@ -302,14 +303,12 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                     inflight.set_exception(e)
             raise
 
-        # If `flush_remote_eval_cache()` ran while we were awaiting the POST,
-        # the cache_key is no longer in `_remote_eval_inflight` — the response
-        # we just got is from BEFORE the invalidation signal, so writing it to
-        # the cache would silently re-populate stale data the proxy just told
-        # us to drop. Still resolve waiters with the response (they observed
-        # the pre-flush request and have a right to its answer), but skip the
-        # cache write so future eval calls trigger a fresh POST.
-        was_flushed = self._remote_eval_inflight.pop(cache_key, None) is None
+        # A flush may have replaced this entry with a newer request for the
+        # same key. Only the request that still owns the entry may remove it
+        # and populate the cache. Pre-flush waiters still receive their answer.
+        was_flushed = self._remote_eval_inflight.get(cache_key) is not inflight
+        if not was_flushed:
+            self._remote_eval_inflight.pop(cache_key, None)
         if response is not None and not was_flushed:
             stale_at = time.monotonic() + effective_stale_ttl
             self._remote_eval_cache[cache_key] = (response, stale_at)
