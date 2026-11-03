@@ -1465,7 +1465,9 @@ async def test_async_inflight_generation_survives_old_request_completion(
             old.cancel()
         else:
             release[0].set()
-        results = await asyncio.gather(old, old_waiter, return_exceptions=True)
+        results = await asyncio.wait_for(
+            asyncio.gather(old, old_waiter, return_exceptions=True), timeout=5
+        )
         if old_outcome == "cancel":
             assert all(isinstance(result, asyncio.CancelledError) for result in results)
         elif old_outcome == "error":
@@ -1499,19 +1501,24 @@ async def test_async_inflight_generation_survives_old_request_completion(
             await asyncio.sleep(0)
             assert calls == 2
             release[1].set()
-            assert await fresh_waiter == "fresh"
-            assert await fresh == "fresh"
+            assert await asyncio.wait_for(fresh_waiter, timeout=5) == "fresh"
+            assert await asyncio.wait_for(fresh, timeout=5) == "fresh"
         else:
             release[1].set()
-            assert await fresh == "fresh"
+            assert await asyncio.wait_for(fresh, timeout=5) == "fresh"
             await finish_old()
 
-        assert await evaluate() == "fresh"
+        assert await asyncio.wait_for(evaluate(), timeout=5) == "fresh"
         assert calls == 2
         assert not repository._remote_eval_inflight
         assert next(iter(repository._remote_eval_cache.values()))[0] == fresh_response
     finally:
         for gate in release:
             gate.set()
-        await asyncio.gather(*tasks, return_exceptions=True)
-        await client.close()
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        await asyncio.wait_for(
+            asyncio.gather(*tasks, return_exceptions=True), timeout=5
+        )
+        await asyncio.wait_for(client.close(), timeout=5)
