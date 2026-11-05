@@ -191,9 +191,9 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         # already atomic from asyncio's perspective.
         self._remote_eval_cache: "OrderedDict[str, tuple[Dict[str, Any], float]]" = OrderedDict()
         self._remote_eval_cache_max = remote_eval_cache_size
-        # Inflight coalescing AND SWR-dedup: a key in this dict means a POST
-        # for that cache key is already in flight, so concurrent foreground
-        # callers and background-SWR refresh tasks both observe and skip.
+        # Current-generation POSTs for foreground coalescing and SWR dedup.
+        # A flush clears this map without cancelling older POSTs or waiters,
+        # allowing a new request for the same cache key in the next generation.
         self._remote_eval_inflight: Dict[str, "asyncio.Future[Optional[Dict[str, Any]]]"] = {}
         # Fire-and-forget SWR refresh tasks. Tracked so `stop_refresh()` can
         # cancel them on shutdown — otherwise they may try to write to a
@@ -222,7 +222,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         until cache_ttl and then refetched synchronously.
 
         Concurrent foreground callers AND background SWR refreshes coalesce
-        on a single inflight POST per cache key.
+        on a single inflight POST per cache key in the current generation.
         """
         cache_key = self._compute_cache_key(api_host, client_key, True, payload, cache_key_attributes)
         effective_stale_ttl = stale_ttl if stale_ttl is not None else cache_ttl
@@ -261,6 +261,15 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             api_host, client_key, payload, cache_key, effective_stale_ttl
         )
 
+    def _release_inflight(
+        self, cache_key: str, inflight: "asyncio.Future[Optional[Dict[str, Any]]]"
+    ) -> bool:
+        """Remove the entry only if this future still owns it and return ownership."""
+        if self._remote_eval_inflight.get(cache_key) is inflight:
+            del self._remote_eval_inflight[cache_key]
+            return True
+        return False
+
     async def _post_and_cache(
         self,
         api_host: str,
@@ -270,8 +279,8 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         effective_stale_ttl: int,
     ) -> Optional[Dict[str, Any]]:
         """POST + cache-write helper shared by foreground misses and background
-        SWR refreshes. Registers `cache_key` in the inflight map for the POST's
-        duration so duplicate POSTs are coalesced. Bumps `stale_at` on every
+        SWR refreshes. Registers `cache_key` in the inflight map until the POST
+        completes or a cache flush starts a new generation. Bumps `stale_at` on every
         successful write — even an unchanged payload refreshes freshness
         (matches JS SDK)."""
         # Re-check inflight: a concurrent caller might have raced us.
@@ -288,8 +297,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             # derives it from BaseException). Without cleanup on cancellation
             # the inflight map leaks the cache_key forever and any waiters
             # blocked on `await existing` hang indefinitely.
-            if self._remote_eval_inflight.get(cache_key) is inflight:
-                self._remote_eval_inflight.pop(cache_key, None)
+            self._release_inflight(cache_key, inflight)
             if not inflight.done():
                 if isinstance(e, asyncio.CancelledError):
                     # Cancel the inflight Future instead of `set_exception(e)`.
@@ -306,10 +314,8 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         # A flush may have replaced this entry with a newer request for the
         # same key. Only the request that still owns the entry may remove it
         # and populate the cache. Pre-flush waiters still receive their answer.
-        was_flushed = self._remote_eval_inflight.get(cache_key) is not inflight
-        if not was_flushed:
-            self._remote_eval_inflight.pop(cache_key, None)
-        if response is not None and not was_flushed:
+        owns_entry = self._release_inflight(cache_key, inflight)
+        if response is not None and owns_entry:
             stale_at = time.monotonic() + effective_stale_ttl
             self._remote_eval_cache[cache_key] = (response, stale_at)
             self._remote_eval_cache.move_to_end(cache_key)
@@ -327,10 +333,10 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         """Drop all cached remote-eval responses. Called when the proxy
         emits a features-updated SSE event.
 
-        Also clears the inflight map so any POSTs in flight at this moment
-        know (via the `was_flushed` check in `_post_and_cache`) that their
-        result predates the proxy's invalidation signal and must NOT be
-        written back to the cache."""
+        Also clears the inflight map so new calls can start a new generation.
+        Older POSTs still resolve their existing waiters, but no longer own an
+        entry. `_post_and_cache` checks ownership before removing an entry or
+        caching a response."""
         self._remote_eval_cache.clear()
         self._remote_eval_inflight.clear()
 
