@@ -684,7 +684,8 @@ def _paddedVersionString(input: str) -> str:
         parts.append("~")
     # Left pad each numeric part with spaces so string comparisons will work ("9">"10", but " 9"<"10")
     # Then, join back together into a single string
-    return "-".join([v.rjust(5, " ") if v.isdigit() else v for v in parts])
+    # isdigit() alone also accepts non-ASCII digits such as "١"; JS pads only 0-9
+    return "-".join([v.rjust(5, " ") if v.isascii() and v.isdigit() else v for v in parts])
 
 
 def isIn(conditionValue: List[Any], attributeValue: Any, insensitive: bool = False) -> bool:

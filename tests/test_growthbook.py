@@ -466,6 +466,13 @@ def test_padded_version_string_strips_build_metadata():
     assert paddedVersionString("+build") == ""
 
 
+def test_padded_version_string_pads_only_ascii_digits():
+    assert paddedVersionString("1.0.0-١") == "    1-    0-    0-١"
+    assert paddedVersionString("１.２.３") == "１-２-３-~"
+    # A non-numeric tag sorts after a numeric one, as in JS
+    assert evalCondition({"v": "1.0.0-١"}, {"v": {"$vgt": "1.0.0-10"}}) is True
+
+
 def test_padded_version_string_is_linear_on_many_pluses():
     # The old `(^v|\+.*$)` regex took several seconds on this input
     input = "+" * 100_000 + "\nx"
