@@ -34,7 +34,7 @@ from growthbook.core import (
     _js_number_to_string,
 )
 
-from time import time
+from time import perf_counter, time
 import pytest
 
 logger.setLevel("DEBUG")
@@ -453,6 +453,25 @@ def test_nan_attribute_obeys_ieee_754():
     # NaN condition vs concrete attribute: same.
     assert evalCondition({"x": 5}, {"x": {"$eq": nan}}) is False
     assert evalCondition({"x": 5}, {"x": {"$ne": nan}}) is True
+
+
+def test_padded_version_string_strips_build_metadata():
+    plain = paddedVersionString("1.2.3")
+    assert paddedVersionString("v1.2.3+build+more.1-2") == plain
+    assert paddedVersionString("1.2.3+") == plain
+    # Build metadata is everything after the first `+`, even across a newline
+    assert paddedVersionString("1.2.3+build\nx") == plain
+    assert paddedVersionString("1.2.3+build\n") == plain
+    assert paddedVersionString("vv1.2.3") == "v1-    2-    3-~"
+    assert paddedVersionString("+build") == ""
+
+
+def test_padded_version_string_is_linear_on_many_pluses():
+    # The old `(^v|\+.*$)` regex took several seconds on this input
+    input = "+" * 100_000 + "\nx"
+    start = perf_counter()
+    assert paddedVersionString(input) == ""
+    assert perf_counter() - start < 1
 
 
 def test_version_comparison_normalizes_unhashable_values():
