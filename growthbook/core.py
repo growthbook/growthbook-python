@@ -664,14 +664,16 @@ def paddedVersionString(input: Any) -> str:
     return _paddedVersionString(input)
 
 
-_re_ver_strip = re.compile(r"(^v|\+.*$)")
 _re_ver_split = re.compile(r"[-.]")
 
 
 @lru_cache(maxsize=512)
 def _paddedVersionString(input: str) -> str:
-    # Remove build info and leading `v` if any
-    input = _re_ver_strip.sub("", input)
+    # Remove build info and leading `v` if any. Build metadata starts at the
+    # first `+`. No regex here: `\+.*$` is quadratic on many `+`s then a newline.
+    if input.startswith("v"):
+        input = input[1:]
+    input = input.partition("+")[0]
     # Split version into parts (both core version numbers and pre-release tags)
     # "v1.2.3-rc.1+build123" -> ["1","2","3","rc","1"]
     parts = _re_ver_split.split(input)
@@ -682,7 +684,8 @@ def _paddedVersionString(input: str) -> str:
         parts.append("~")
     # Left pad each numeric part with spaces so string comparisons will work ("9">"10", but " 9"<"10")
     # Then, join back together into a single string
-    return "-".join([v.rjust(5, " ") if v.isdigit() else v for v in parts])
+    # isdigit() alone also accepts non-ASCII digits such as "١"; JS pads only 0-9
+    return "-".join([v.rjust(5, " ") if v.isascii() and v.isdigit() else v for v in parts])
 
 
 def isIn(conditionValue: List[Any], attributeValue: Any, insensitive: bool = False) -> bool:
