@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.0.1](https://github.com/growthbook/growthbook-python/compare/v4.0.0...v4.0.1) (2026-11-12)
+
+
+### Bug Fixes
+
+* avoid quadratic regex in version parsing and pad only ASCII digits ([#159](https://github.com/growthbook/growthbook-python/issues/159)) ([96ac162](https://github.com/growthbook/growthbook-python/commit/96ac162fcad11a6d579802d071c23b12b549b1d9))
+
 ## [4.0.0](https://github.com/growthbook/growthbook-python/compare/v3.2.2...v4.0.0) (2026-10-30)
 
 
