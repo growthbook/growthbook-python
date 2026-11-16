@@ -2104,18 +2104,37 @@ async def test_repo_cache_key_combines_host_and_key():
     assert repo.cache.get("https://host-a.io::key-1")==FEATURES_RESPONSE
     assert repo.cache.get("https://host-b.io::key-2")==FEATURES_RESPONSE
 
-def make_gb(**kwargs) -> GrowthBook:
+@pytest.fixture
+def gb_factory():
+    """Creates GrowthBook instances and destroys them after the test.
+
+    With a client_key, GrowthBook registers a callback on the shared
+    feature_repo; destroy() removes it, so it can't keep the instance alive
+    or receive updates from later tests."""
+    created=[]
+
+    def factory(**kwargs) -> GrowthBook:
+        gb=GrowthBook(**kwargs)
+        created.append(gb)
+        return gb
+
+    yield factory
+    for gb in created:
+        gb.destroy()
+
+@pytest.fixture
+def make_gb(gb_factory):
     defaults=dict(api_host="https://cdn.example.com",client_key="sdk-abc")
-    return GrowthBook(**{**defaults,**kwargs})
+    return lambda **kwargs: gb_factory(**{**defaults,**kwargs})
 
 @pytest.mark.asyncio
-async def test_gb_raises_without_client_key():
-    gb=GrowthBook()  # no client_key
+async def test_gb_raises_without_client_key(gb_factory):
+    gb=gb_factory()  # no client_key
     with pytest.raises(ValueError,match="client_key"):
         await gb.load_features_async()
 
 @pytest.mark.asyncio
-async def test_gb_sets_features_from_response():
+async def test_gb_sets_features_from_response(make_gb):
     gb=make_gb()
     with patch("growthbook.growthbook.feature_repo.load_features_async",
                new=AsyncMock(return_value=FEATURES_RESPONSE)):
@@ -2124,7 +2143,7 @@ async def test_gb_sets_features_from_response():
     assert "dark-mode" in gb.get_features()
 
 @pytest.mark.asyncio
-async def test_gb_sets_saved_groups_from_response():
+async def test_gb_sets_saved_groups_from_response(make_gb):
     gb=make_gb()
     with patch("growthbook.growthbook.feature_repo.load_features_async",
                new=AsyncMock(return_value=FEATURES_RESPONSE)):
@@ -2133,7 +2152,7 @@ async def test_gb_sets_saved_groups_from_response():
     assert gb._saved_groups==FEATURES_RESPONSE["savedGroups"]
 
 @pytest.mark.asyncio
-async def test_gb_handles_none_response_gracefully():
+async def test_gb_handles_none_response_gracefully(make_gb):
     """If repo returns None, GrowthBook should not crash or modify features."""
     gb=make_gb()
     gb.set_features({"existing":{"defaultValue":True}})
@@ -2145,7 +2164,7 @@ async def test_gb_handles_none_response_gracefully():
     assert "existing" in gb.get_features()  # unchanged
 
 @pytest.mark.asyncio
-async def test_gb_response_without_saved_groups():
+async def test_gb_response_without_saved_groups(make_gb):
     """Response may omit savedGroups — should not crash."""
     gb=make_gb()
     response={"features":{"flag":{"defaultValue":1}}}
@@ -2156,9 +2175,9 @@ async def test_gb_response_without_saved_groups():
     assert "flag" in gb.get_features()
 
 @pytest.mark.asyncio
-async def test_gb_passes_correct_args_to_repo():
+async def test_gb_passes_correct_args_to_repo(gb_factory):
     """GrowthBook forwards api_host, client_key, decryption_key, cache_ttl to repo."""
-    gb=GrowthBook(
+    gb=gb_factory(
         api_host="https://my-host.io",
         client_key="sdk-xyz",
         decryption_key="secret",
@@ -2352,11 +2371,12 @@ def test_start_auto_refresh_raises_without_client_key():
     with pytest.raises(ValueError,match="client_key"):
         repo.startAutoRefresh("https://cdn.example.com","",MagicMock())
 
-def make_gb_simple(**kwargs):
+@pytest.fixture
+def make_gb_simple(gb_factory):
     defaults=dict(api_host="https://cdn.example.com", client_key="sdk-key")
-    return GrowthBook(**{**defaults, **kwargs})
+    return lambda **kwargs: gb_factory(**{**defaults, **kwargs})
 
-def test_dispatch_sse_event_features_calls_handler():
+def test_dispatch_sse_event_features_calls_handler(make_gb_simple):
     """Event 'features' pass data into _features_event_handler."""
     gb=make_gb_simple()
     event_data={"type":"features","data":'{"features":{"flag":{"defaultValue":True}}}'}
@@ -2366,7 +2386,7 @@ def test_dispatch_sse_event_features_calls_handler():
 
     mock_handler.assert_called_once_with('{"features":{"flag":{"defaultValue":True}}}')
 
-def test_dispatch_sse_event_features_updated_calls_load():
+def test_dispatch_sse_event_features_updated_calls_load(make_gb_simple):
     """Event 'features-updated' calls load_features."""
     gb=make_gb_simple()
     event_data={"type":"features-updated","data":"{}"}
@@ -2376,7 +2396,7 @@ def test_dispatch_sse_event_features_updated_calls_load():
 
     mock_load.assert_called_once()
 
-def test_dispatch_sse_event_unknown_type_does_nothing():
+def test_dispatch_sse_event_unknown_type_does_nothing(make_gb_simple):
     """An unknown event type does not call either load_features or _features_event_handler."""
     gb=make_gb_simple()
     event_data={"type":"ping","data":"{}"}
@@ -2388,7 +2408,7 @@ def test_dispatch_sse_event_unknown_type_does_nothing():
     mock_load.assert_not_called()
     mock_handler.assert_not_called()
 
-def test_dispatch_sse_event_features_updates_gb_state():
+def test_dispatch_sse_event_features_updates_gb_state(make_gb_simple):
     """After 'features' event, it updates features in GrowthBook."""
     gb=make_gb_simple()
     payload={"features":{"dark-mode":{"defaultValue":True}}}
@@ -2400,16 +2420,16 @@ def test_dispatch_sse_event_features_updates_gb_state():
 
     assert "dark-mode" in gb.get_features()
 
-def test_gb_start_auto_refresh_raises_without_client_key():
+def test_gb_start_auto_refresh_raises_without_client_key(gb_factory):
     """startAutoRefresh throws ValueError if there is no client_key."""
-    gb=GrowthBook()
+    gb=gb_factory()
 
     with pytest.raises(ValueError,match="client_key"):
         gb.start_auto_refresh()
 
-def test_gb_start_auto_refresh_delegates_to_feature_repo():
+def test_gb_start_auto_refresh_delegates_to_feature_repo(gb_factory):
     """startAutoRefresh passes args into feature_repo.startAutoRefresh."""
-    gb=GrowthBook(
+    gb=gb_factory(
         api_host="https://cdn.example.com",
         client_key="sdk-key",
         streaming_connection_timeout=60,
@@ -2425,7 +2445,7 @@ def test_gb_start_auto_refresh_delegates_to_feature_repo():
         streaming_timeout=60,
     )
 
-def test_gb_start_auto_refresh_passes_dispatch_as_callback():
+def test_gb_start_auto_refresh_passes_dispatch_as_callback(make_gb_simple):
     """Passed callback into feature_repo — it is _dispatch_sse_event."""
     gb=make_gb_simple()
     captured={}
@@ -2440,7 +2460,7 @@ def test_gb_start_auto_refresh_passes_dispatch_as_callback():
     assert captured["cb"].__self__ is gb
 
 @pytest.mark.asyncio
-async def test_gb_load_features_async_sets_features():
+async def test_gb_load_features_async_sets_features(make_gb_simple):
     """load_features_async updates features in GrowthBook via feature_repo."""
     gb=make_gb_simple()
     payload={"features":{"new-flag":{"defaultValue":42}},"savedGroups":[]}
@@ -2453,7 +2473,7 @@ async def test_gb_load_features_async_sets_features():
     assert gb.get_features()["new-flag"].defaultValue==42
 
 @pytest.mark.asyncio
-async def test_gb_load_features_async_sets_saved_groups():
+async def test_gb_load_features_async_sets_saved_groups(make_gb_simple):
     """load_features_async updates savedGroups."""
     gb=make_gb_simple()
     groups=[{"id":"g1","values":["a","b"]}]
@@ -2466,7 +2486,7 @@ async def test_gb_load_features_async_sets_saved_groups():
     assert gb._saved_groups==groups
 
 @pytest.mark.asyncio
-async def test_gb_load_features_async_none_does_not_reset_features():
+async def test_gb_load_features_async_none_does_not_reset_features(make_gb_simple):
     """If the repo returns None, the existing features are not reset."""
     gb=make_gb_simple()
     gb.set_features({"existing":{"defaultValue":True}})
@@ -2478,9 +2498,9 @@ async def test_gb_load_features_async_none_does_not_reset_features():
     assert "existing" in gb.get_features()
 
 @pytest.mark.asyncio
-async def test_gb_load_features_async_raises_without_client_key():
+async def test_gb_load_features_async_raises_without_client_key(gb_factory):
     """load_features_async throws ValueError if there is no client_key."""
-    gb=GrowthBook()
+    gb=gb_factory()
 
     with pytest.raises(ValueError,match="client_key"):
         await gb.load_features_async()
@@ -2771,6 +2791,14 @@ def test_disconnect_warns_if_thread_still_alive():
     warning_calls=[str(c) for c in mock_logger.warning.call_args_list]
     assert any("did not terminate" in w for w in warning_calls)
 
+def close_coroutine(future):
+    """Stand-in for asyncio.run_coroutine_threadsafe: closes the coroutine it
+    gets, so it isn't left unawaited, and returns `future`."""
+    def run_coroutine_threadsafe(coro, loop):
+        coro.close()
+        return future
+    return run_coroutine_threadsafe
+
 def test_disconnect_calls_stop_session_when_loop_running():
     """If the loop is running, disconnect sends _stop_session via run_coroutine_threadsafe."""
     client=make_sse_client(on_event=MagicMock())
@@ -2783,7 +2811,7 @@ def test_disconnect_calls_stop_session_when_loop_running():
     mock_future=MagicMock()
     mock_future.result=MagicMock(return_value=None)
 
-    with patch("asyncio.run_coroutine_threadsafe",return_value=mock_future) as mock_rcts:
+    with patch("asyncio.run_coroutine_threadsafe",side_effect=close_coroutine(mock_future)) as mock_rcts:
         client.disconnect(timeout=7)
 
     mock_rcts.assert_called_once()
@@ -2801,7 +2829,7 @@ def test_disconnect_force_stops_loop_on_future_exception():
     mock_future=MagicMock()
     mock_future.result=MagicMock(side_effect=TimeoutError("timeout"))
 
-    with patch("asyncio.run_coroutine_threadsafe",return_value=mock_future):
+    with patch("asyncio.run_coroutine_threadsafe",side_effect=close_coroutine(mock_future)):
         client.disconnect()
 
     mock_loop.call_soon_threadsafe.assert_called_once_with(mock_loop.stop)
