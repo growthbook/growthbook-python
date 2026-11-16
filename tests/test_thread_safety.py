@@ -40,19 +40,23 @@ def test_cache_miss_stampede_is_coalesced_sync():
         threading.Event().wait(0.05)
         return SlowHttpResp()
 
+    results = []
+
+    def worker():
+        results.append(repo.load_features("https://cdn.growthbook.io", "sdk-abc123"))
+
     with patch.object(repo, "_get", side_effect=slow_get):
-        threads = [
-            threading.Thread(
-                target=repo.load_features,
-                args=("https://cdn.growthbook.io", "sdk-abc123"),
-            )
-            for _ in range(10)
-        ]
+        # daemon: a regression that leaves a worker blocked must fail the
+        # test, not keep the test process from exiting
+        threads = [threading.Thread(target=worker, daemon=True) for _ in range(10)]
         for t in threads:
             t.start()
         for t in threads:
             t.join(timeout=10)
 
+    # One fetch alone doesn't prove the waiters returned: check every worker.
+    assert not any(t.is_alive() for t in threads), "a worker is still blocked"
+    assert results == [FEATURES] * 10
     # Without per-key coalescing every thread misses the cold cache and fetches.
     assert len(calls) == 1
     repo.clear_cache()
@@ -69,11 +73,12 @@ async def test_cache_miss_stampede_is_coalesced_async():
         return dict(FEATURES)
 
     with patch.object(repo, "_fetch_and_decode_async", side_effect=slow_fetch):
-        await asyncio.gather(*[
+        results = await asyncio.wait_for(asyncio.gather(*[
             repo.load_features_async("https://cdn.growthbook.io", "sdk-abc123")
             for _ in range(10)
-        ])
+        ]), timeout=10)
 
+    assert results == [FEATURES] * 10
     assert len(calls) == 1
     repo.clear_cache()
 
@@ -189,4 +194,53 @@ def test_feature_update_callback_may_force_refresh_the_same_key(mocker):
     assert seen == ["outer", "inner"]
 
     repo.remove_feature_update_callback(callback)
+    repo.clear_cache()
+
+
+def test_sync_lock_map_is_emptied_when_nobody_needs_a_key():
+    """Entries used to stay forever, after failed fetches and clear_cache()
+    too, so an app loading changing SDK keys grew the map without bound."""
+    repo = FeatureRepository()
+
+    with patch.object(repo, "_fetch_features", return_value=dict(FEATURES)):
+        for i in range(50):
+            repo.load_features("https://cdn.growthbook.io", f"sdk-key-{i}")
+    with patch.object(repo, "_fetch_features", return_value=None):
+        for i in range(50, 60):
+            repo.load_features("https://cdn.growthbook.io", f"sdk-key-{i}")
+    repo.clear_cache()
+
+    assert repo._key_locks == {}, f"leaked {len(repo._key_locks)} lock entries"
+
+
+def test_sync_lock_entry_survives_while_waiters_remain():
+    """The entry must outlive the first holder while other threads still wait
+    on it, or they'd take a fresh lock and fetch again."""
+    repo = FeatureRepository()
+    calls = []
+    release = threading.Event()
+    results = []
+
+    def slow_fetch(api_host, client_key, decryption_key=""):
+        calls.append(1)
+        release.wait(10)
+        return dict(FEATURES)
+
+    def worker():
+        results.append(repo.load_features("https://cdn.growthbook.io", "sdk-abc123"))
+
+    with patch.object(repo, "_fetch_features", side_effect=slow_fetch):
+        threads = [threading.Thread(target=worker, daemon=True) for _ in range(4)]
+        for t in threads:
+            t.start()
+        threading.Event().wait(0.05)  # let them all queue on the same key
+        assert len(repo._key_locks) == 1
+        release.set()
+        for t in threads:
+            t.join(timeout=10)
+
+    assert not any(t.is_alive() for t in threads), "a worker is still blocked"
+    assert results == [FEATURES] * 4
+    assert len(calls) == 1          # still coalesced
+    assert repo._key_locks == {}    # and cleaned up afterwards
     repo.clear_cache()

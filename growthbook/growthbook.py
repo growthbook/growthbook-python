@@ -11,9 +11,9 @@ import logging
 import warnings
 
 from abc import ABC, abstractmethod
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from dataclasses import replace
-from typing import TYPE_CHECKING, AsyncIterator, Optional, Any, Set, Tuple, List, Dict, Callable, cast
+from typing import TYPE_CHECKING, AsyncIterator, Iterator, Optional, Any, Set, Tuple, List, Dict, Callable, cast
 
 from typing_extensions import deprecated
 
@@ -103,6 +103,17 @@ class CacheEntry(object):
     def update(self, value: Dict[str, Any]) -> None:
         self.value = value
         self.expires = time() + self.ttl
+
+
+class _SyncKeyLock:
+    """A per-key threading lock plus the number of threads that still need
+    it, so the entry can be dropped when the last one leaves."""
+
+    __slots__ = ("lock", "waiters")
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.waiters = 0
 
 
 class _AsyncKeyLock:
@@ -410,7 +421,7 @@ class FeatureRepository(object):
         # Per-key locks coalesce concurrent cache-miss fetches: on a miss only
         # one thread/coroutine hits the API for a given cache key, the rest wait
         # and then read the freshly-cached value (prevents cache-miss stampede).
-        self._key_locks: Dict[str, threading.Lock] = {}
+        self._key_locks: Dict[str, "_SyncKeyLock"] = {}
         self._key_locks_guard = threading.Lock()
         # Async locks are keyed by (event-loop id, cache key) so a lock bound to
         # a finished loop is never reused on another loop (avoids cross-loop hang).
@@ -448,14 +459,30 @@ class FeatureRepository(object):
             except Exception as e:
                 logger.warning(f"Error in feature update callback: {e}")
 
-    def _lock_for(self, key: str) -> threading.Lock:
-        """Return (creating if needed) the per-key lock used to coalesce fetches."""
+    @contextmanager
+    def _sync_key_lock(self, key: str) -> Iterator[None]:
+        """Per-key coalescing lock, removed once nobody holds or waits for it.
+
+        Keeping entries forever grew the map by one lock per cache key ever
+        loaded, also after failed fetches and clear_cache(), so an app loading
+        changing SDK keys grew without bound. Same counting as
+        _async_key_lock: waiters are counted before blocking, so the entry
+        survives while anyone still needs it and the last one out drops it."""
         with self._key_locks_guard:
-            lock = self._key_locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                self._key_locks[key] = lock
-            return lock
+            entry = self._key_locks.get(key)
+            if entry is None:
+                entry = _SyncKeyLock()
+                self._key_locks[key] = entry
+            entry.waiters += 1
+            lock = entry.lock
+        try:
+            with lock:
+                yield
+        finally:
+            with self._key_locks_guard:
+                entry.waiters -= 1
+                if entry.waiters == 0:
+                    self._key_locks.pop(key, None)
 
     @asynccontextmanager
     async def _async_key_lock(self, key: str) -> "AsyncIterator[None]":
@@ -528,7 +555,7 @@ class FeatureRepository(object):
 
         # Per-key coalescing for the CDN path: on a miss only the first thread fetches:
         # others wait on the lock and re-read the freshly cached value.
-        with self._lock_for(key):
+        with self._sync_key_lock(key):
             cached = None if force_refresh else self.cache.get(key)
             if cached:
                 return cached
