@@ -191,6 +191,30 @@ async def test_add_remote_saved_groups_looks_up_again_when_the_payload_changes_m
         await client.close()
 
 
+@pytest.mark.asyncio
+async def test_add_remote_saved_groups_keeps_the_ids_with_the_attributes_they_were_looked_up_for():
+    client = GrowthBookClient(Options())
+    user = UserContext(attributes={"account_id": "a1", "plan": {"tier": "pro"}})
+    seen = []
+
+    async def resolver(attributes, groups):
+        seen.append(dict(attributes))
+        # Another task switches the user while the lookup waits
+        user.attributes["account_id"] = "a2"
+        user.attributes["plan"]["tier"] = "free"
+        return ["grp_vip"]
+
+    try:
+        await client.set_payload({"features": deepcopy(FEATURES), "savedGroups": SAVED_GROUPS})
+        resolved = await client.add_remote_saved_groups(user, resolver)
+        assert seen == [{"account_id": "a1"}]
+        assert resolved.remote_group_ids == ["grp_vip"]
+        assert resolved.attributes == {"account_id": "a1", "plan": {"tier": "pro"}}
+        assert user.attributes == {"account_id": "a2", "plan": {"tier": "free"}}
+    finally:
+        await client.close()
+
+
 class FakeRedis:
     def __init__(self, sets):
         self.sets = sets

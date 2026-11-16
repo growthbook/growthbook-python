@@ -1285,13 +1285,17 @@ class GrowthBookClient:
     async def add_remote_saved_groups(
         self, user_context: UserContext, resolver: SavedGroupResolver,
     ) -> UserContext:
-        """A copy of `user_context` with the user's remote saved groups from
+        """A copy of `user_context`, taken when called, with the user's remote saved groups from
         `resolver`, or `user_context` unchanged if the resolver fails.
 
         Requires a saved group references v2 payload for group metadata. With
         inline/v1 payloads, resolve membership in the app and set
         `remote_group_ids` on the UserContext directly instead."""
         try:
+            # The caller can change its attributes while the resolver awaits.
+            # Look up and return one snapshot, so the ids always belong to the
+            # attributes they come with.
+            snapshot = snapshot_user_context(user_context)
             # A refresh during a lookup can add groups the result doesn't cover,
             # and a missing group would pass "not in group" rules. So the result
             # only counts if the payload is still the one it was looked up for.
@@ -1303,10 +1307,10 @@ class GrowthBookClient:
                 # every "not in group" rule match.
                 if not get_remote_saved_groups(saved_groups):
                     return user_context
-                remote_group_ids = await resolve_remote_group_ids(user_context.attributes, saved_groups, resolver)
+                remote_group_ids = await resolve_remote_group_ids(snapshot.attributes, saved_groups, resolver)
                 current = self._global_context.saved_groups if self._global_context else None
                 if current is saved_groups:
-                    return replace(user_context, remote_group_ids=remote_group_ids)
+                    return replace(snapshot, remote_group_ids=remote_group_ids)
             # Still changing: leave the groups unresolved, so their rules fail
             # closed, rather than return ids that miss the newest groups
             logger.warning("Saved groups kept changing during the remote group lookup; leaving them unresolved")
