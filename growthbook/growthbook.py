@@ -1516,7 +1516,8 @@ class GrowthBook(object):
                     "experiment": experiment,
                     "result": result,
                 }
-                for cb in self._subscriptions:
+                # Subscription changes take effect on the next notification.
+                for cb in self._subscriptions.copy():
                     try:
                         cb(experiment, result)
                     except Exception:
