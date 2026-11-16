@@ -1981,3 +1981,46 @@ async def test_refresh_from_a_listener_does_not_deadlock_or_reorder(mock_options
             assert second[-1] == ("later", "later")
         finally:
             await client.close()
+
+
+@pytest.mark.asyncio
+async def test_fire_and_forget_refresh_from_a_listener_is_still_delivered(mock_options):
+    """A task a listener starts without awaiting inherits the dispatch context.
+    If that dispatch ends while the task is still applying its payload, the
+    task must deliver the payload itself instead of leaving it unannounced."""
+    with patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+        client = GrowthBookClient(mock_options)
+        old = {"features": {"flag": {"defaultValue": "old"}}, "savedGroups": {}}
+        new = {"features": {"flag": {"defaultValue": "new"}}, "savedGroups": {}}
+        seen = []
+        tasks = []
+        delivered_new = asyncio.Event()
+
+        real_apply = client._apply_payload
+
+        async def slow_apply(data):
+            if data is new:
+                # Let the dispatch that started this task finish first.
+                await asyncio.sleep(0.05)
+            await real_apply(data)
+
+        async def listener(data):
+            seen.append((data["features"]["flag"]["defaultValue"],
+                         client._global_context.features["flag"].defaultValue))
+            if data is old:
+                tasks.append(asyncio.create_task(client.set_payload(new)))
+                await asyncio.sleep(0)  # the task starts inside this dispatch
+            else:
+                delivered_new.set()
+
+        client.add_feature_refresh_listener(listener)
+        try:
+            with patch.object(client, "_apply_payload", side_effect=slow_apply):
+                await asyncio.wait_for(client.set_payload(old), timeout=5)
+                await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+                await asyncio.wait_for(delivered_new.wait(), timeout=5)
+
+            assert seen == [("old", "old"), ("new", "new")]
+        finally:
+            await client.close()

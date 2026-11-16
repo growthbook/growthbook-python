@@ -674,6 +674,7 @@ class GrowthBookClient:
         # The latest applied payload, and the token of the dispatch currently
         # delivering it; see _feature_update_callback.
         self._latest_refresh_payload: Optional[Dict[str, Any]] = None
+        self._delivered_refresh_payload: Optional[Dict[str, Any]] = None
         self._refresh_dispatch_token: Optional[object] = None
 
         # Per-attributes-key inflight sticky bucket fetches. Concurrent evals
@@ -1272,6 +1273,17 @@ class GrowthBookClient:
             # so it can't be finished before the older one it interrupted.
             await self._apply_payload(features_data)
             self._latest_refresh_payload = features_data
+            if self._refresh_dispatch_token is not None:
+                # A dispatch is still running; its loop rechecks the latest
+                # payload after every listener, so it will deliver this one.
+                return
+            # The dispatch ended while we were applying (a task the listener
+            # didn't await). Deliver it ourselves, unless a newer payload has
+            # replaced it or another dispatch already delivered it.
+            async with self._refresh_order_lock:
+                if (self._latest_refresh_payload is features_data
+                        and self._delivered_refresh_payload is not features_data):
+                    await self._dispatch_feature_refresh()
             return
 
         async with self._refresh_order_lock:
@@ -1298,6 +1310,7 @@ class GrowthBookClient:
                     return
                 await self._notify_feature_refresh(current)
                 if self._latest_refresh_payload is current:
+                    self._delivered_refresh_payload = current
                     return
         finally:
             _active_refresh_dispatches.reset(reset)
@@ -1568,6 +1581,7 @@ class GrowthBookClient:
         with self._feature_refresh_lock:
             self._feature_refresh_listeners.clear()
         self._latest_refresh_payload = None
+        self._delivered_refresh_payload = None
         # Clear context
         async with self._context_lock:
             self._global_context = None
