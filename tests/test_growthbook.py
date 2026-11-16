@@ -2109,3 +2109,39 @@ def test_failed_refresh_does_not_replay_the_previous_payload(mocker):
 
     gb.destroy()
     feature_repo.clear_cache()
+
+
+def test_refresh_from_a_listener_never_delivers_an_older_payload_last(mocker):
+    # A listener that triggers a refresh applies a newer payload while the
+    # outer dispatch is still running. The listeners after it must not then
+    # receive the older payload, which no longer matches the applied state.
+    old = {"features": {"flag": {"defaultValue": "old"}}}
+    new = {"features": {"flag": {"defaultValue": "new"}}}
+    cache = {"payload": old}  # like the real cache: hands back the latest object
+    mocker.patch.object(feature_repo, "load_features", side_effect=lambda *a, **k: cache["payload"])
+
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="nested-key")
+    first, second = [], []
+
+    def refreshing_listener(payload):
+        first.append((payload["features"]["flag"]["defaultValue"], gb.get_feature_value("flag", None)))
+        if payload is old:
+            cache["payload"] = new
+            gb.load_features()
+
+    def observing_listener(payload):
+        second.append((payload["features"]["flag"]["defaultValue"], gb.get_feature_value("flag", None)))
+
+    gb.add_feature_refresh_listener(refreshing_listener)
+    gb.add_feature_refresh_listener(observing_listener)
+    try:
+        gb.load_features()
+
+        # Each delivery matches the state applied at that moment...
+        assert all(value == state for value, state in first + second), (first, second)
+        # ...the superseded payload isn't handed to the remaining listener...
+        assert second == [("new", "new")]
+        # ...and every listener ends on the payload that is actually applied.
+        assert first == [("old", "old"), ("new", "new")]
+    finally:
+        gb.destroy()

@@ -11,6 +11,7 @@ from typing import Set
 if TYPE_CHECKING:
     from .plugins.base import PluginLike
 import asyncio
+import contextvars
 import threading
 import time
 import traceback
@@ -47,6 +48,13 @@ from .common_types import (
 )
 
 logger = logging.getLogger("growthbook.growthbook_client")
+
+# Tokens of the refresh-listener dispatches the current code runs inside. A
+# listener (and any task it creates) inherits this context, which is how a
+# refresh started from a listener is told apart from a concurrent one.
+_active_refresh_dispatches: "contextvars.ContextVar[Tuple[object, ...]]" = contextvars.ContextVar(
+    "growthbook_active_refresh_dispatches", default=()
+)
 
 class SingletonMeta(type):
     """One instance per (class, api_host, client_key). Two GrowthBookClients
@@ -663,6 +671,10 @@ class GrowthBookClient:
         # Serializes apply-then-notify so concurrent refreshes can't reorder
         # listener events; see _feature_update_callback.
         self._refresh_order_lock = asyncio.Lock()
+        # The latest applied payload, and the token of the dispatch currently
+        # delivering it; see _feature_update_callback.
+        self._latest_refresh_payload: Optional[Dict[str, Any]] = None
+        self._refresh_dispatch_token: Optional[object] = None
 
         # Per-attributes-key inflight sticky bucket fetches. Concurrent evals
         # with identical attributes coalesce onto one service fetch; distinct
@@ -828,6 +840,9 @@ class GrowthBookClient:
         awaited. It runs *after* the payload has been applied to the global
         context, so evaluating a feature from inside the listener already sees
         the new definitions. A listener that raises is logged and skipped.
+        A listener may update the payload itself (``set_payload`` and so on):
+        the remaining listeners then get only the newer payload, never the one
+        it superseded.
 
         Fires on the initial load and on every refresh, whether driven by
         streaming (SSE) or HTTP polling. Remote-eval mode emits no events:
@@ -853,11 +868,14 @@ class GrowthBookClient:
 
     async def _notify_feature_refresh(self, payload: Dict[str, Any]) -> None:
         """Dispatch a payload to the refresh listeners. Call only after the
-        payload has been applied to the global context."""
+        payload has been applied to the global context. Stops once a newer
+        payload has been applied."""
         with self._feature_refresh_lock:
             listeners = list(self._feature_refresh_listeners)
 
         for listener in listeners:
+            if self._latest_refresh_payload is not payload:
+                return
             try:
                 result = listener(payload)
                 if asyncio.iscoroutine(result):
@@ -1246,10 +1264,44 @@ class GrowthBookClient:
         # never takes this one, so holding it across the pair is safe — and it
         # is what keeps two overlapping refreshes from notifying out of
         # application order (apply A, apply+notify B, notify A).
+        token = self._refresh_dispatch_token
+        if token is not None and token in _active_refresh_dispatches.get():
+            # Started from a listener of the running dispatch, which holds the
+            # ordering lock: waiting for it would deadlock. Apply only; the
+            # running loop delivers this payload once the listener returns,
+            # so it can't be finished before the older one it interrupted.
+            await self._apply_payload(features_data)
+            self._latest_refresh_payload = features_data
+            return
+
         async with self._refresh_order_lock:
             await self._apply_payload(features_data)
+            self._latest_refresh_payload = features_data
             # Outside the context lock, which _apply_payload has released.
-            await self._notify_feature_refresh(features_data)
+            await self._dispatch_feature_refresh()
+
+    async def _dispatch_feature_refresh(self) -> None:
+        """Deliver the latest applied payload to the refresh listeners. Call
+        with the ordering lock held.
+
+        If a listener applies a newer payload, the remaining listeners get
+        only the newer one, then delivery starts over with it, so no listener
+        receives a payload older than one it has already seen or than the
+        applied state."""
+        token = object()
+        self._refresh_dispatch_token = token
+        reset = _active_refresh_dispatches.set(_active_refresh_dispatches.get() + (token,))
+        try:
+            while True:
+                current = self._latest_refresh_payload
+                if current is None:
+                    return
+                await self._notify_feature_refresh(current)
+                if self._latest_refresh_payload is current:
+                    return
+        finally:
+            _active_refresh_dispatches.reset(reset)
+            self._refresh_dispatch_token = None
 
     async def _apply_payload(self, features_data: Dict[str, Any]) -> None:
         async with self._context_lock:  # serializes concurrent updaters only
@@ -1515,6 +1567,7 @@ class GrowthBookClient:
         # callbacks registered in its previous lifecycle.
         with self._feature_refresh_lock:
             self._feature_refresh_listeners.clear()
+        self._latest_refresh_payload = None
         # Clear context
         async with self._context_lock:
             self._global_context = None

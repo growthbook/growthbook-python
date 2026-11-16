@@ -1937,3 +1937,47 @@ async def test_concurrent_refreshes_notify_in_application_order(mock_options):
             assert delivered[-1] == client._global_context.features["flag"].defaultValue
         finally:
             await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via_task", [False, True], ids=["awaited", "awaited_task"])
+async def test_refresh_from_a_listener_does_not_deadlock_or_reorder(mock_options, via_task):
+    """A listener that updates the payload re-enters _feature_update_callback
+    while the outer dispatch holds the ordering lock. That must neither hang
+    nor hand the remaining listeners the superseded payload."""
+    with patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+        client = GrowthBookClient(mock_options)
+        old = {"features": {"flag": {"defaultValue": "old"}}, "savedGroups": {}}
+        new = {"features": {"flag": {"defaultValue": "new"}}, "savedGroups": {}}
+        first, second = [], []
+
+        def state():
+            return client._global_context.features["flag"].defaultValue
+
+        async def refreshing_listener(data):
+            first.append((data["features"]["flag"]["defaultValue"], state()))
+            if data is old:
+                if via_task:
+                    await asyncio.create_task(client.set_payload(new))
+                else:
+                    await client.set_payload(new)
+
+        async def observing_listener(data):
+            second.append((data["features"]["flag"]["defaultValue"], state()))
+
+        client.add_feature_refresh_listener(refreshing_listener)
+        client.add_feature_refresh_listener(observing_listener)
+        try:
+            await asyncio.wait_for(client.set_payload(old), timeout=5)
+
+            assert all(value == ctx for value, ctx in first + second), (first, second)
+            assert second == [("new", "new")]
+            assert first == [("old", "old"), ("new", "new")]
+
+            # The ordering lock is free again: a later refresh still dispatches.
+            later = {"features": {"flag": {"defaultValue": "later"}}, "savedGroups": {}}
+            await asyncio.wait_for(client.set_payload(later), timeout=5)
+            assert second[-1] == ("later", "later")
+        finally:
+            await client.close()

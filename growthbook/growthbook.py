@@ -1011,6 +1011,9 @@ class GrowthBook(object):
         # constantly, so an identity check is what keeps listeners firing once
         # per actual refresh instead of once per evaluation.
         self._last_refresh_payload: Optional[Dict[str, Any]] = None
+        # True while listeners run; a refresh started from inside a listener
+        # only applies its payload and leaves the delivery to the running loop.
+        self._dispatching_refresh = False
         self._is_updating_features = False
         # Serializes payload writers (set_features/set_payload/refreshes).
         # Re-entrant because _ingest_payload calls set_features while holding
@@ -1281,6 +1284,8 @@ class GrowthBook(object):
         Fires once per refresh — not once per evaluation — for HTTP loads, the
         stale-while-revalidate background worker and streaming (SSE) updates.
         A listener that raises is logged and skipped; it can't break a refresh.
+        A listener may trigger a refresh itself: the remaining listeners then
+        get only the newer payload, never the one it superseded.
 
         Returns a callable that unregisters the listener."""
         if listener not in self._feature_refresh_listeners:
@@ -1325,14 +1330,30 @@ class GrowthBook(object):
         if payload is self._last_refresh_payload:
             return
         self._last_refresh_payload = payload
-        if not self._feature_refresh_listeners:
+        if self._dispatching_refresh:
+            # A listener started this refresh, on this thread (we hold the
+            # payload lock). Delivering here would finish the newer payload
+            # before the outer loop resumes with the older one, so the running
+            # loop picks it up instead.
             return
 
-        for listener in list(self._feature_refresh_listeners):
-            try:
-                listener(payload)
-            except Exception:
-                logger.exception("Error in feature refresh listener")
+        self._dispatching_refresh = True
+        try:
+            while True:
+                current = self._last_refresh_payload
+                for listener in list(self._feature_refresh_listeners):
+                    if self._last_refresh_payload is not current:
+                        # Superseded by a refresh from a listener: the rest
+                        # get only the newer payload, never the older one.
+                        break
+                    try:
+                        listener(current)
+                    except Exception:
+                        logger.exception("Error in feature refresh listener")
+                if self._last_refresh_payload is current:
+                    return
+        finally:
+            self._dispatching_refresh = False
 
     @deprecated("getFeatures is deprecated, use get_features instead")
     def getFeatures(self) -> Dict[str, Feature]:

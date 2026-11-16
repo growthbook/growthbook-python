@@ -310,6 +310,14 @@ per evaluation — covering HTTP loads, the stale-while-revalidate background
 worker and streaming (SSE) updates. A listener that raises is logged and
 skipped; it cannot break a refresh.
 
+Listeners run one after another, in registration order, and payloads are
+delivered in the order they were applied. A listener may update features
+itself (`set_payload`, `load_features`, …). The newer payload is then applied
+immediately, the remaining listeners receive only the newer one, and delivery
+starts over with it, so no listener is handed a payload older than the applied
+state. Keep listeners quick: a slow one delays the next refresh, so move heavy
+work to a task.
+
 On the async client the listener may be a plain function or a coroutine
 function:
 
