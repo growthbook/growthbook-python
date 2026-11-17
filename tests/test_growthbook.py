@@ -1329,6 +1329,87 @@ def test_fires_subscriptions_correctly():
     gb.destroy()
 
 
+def test_subscription_can_unsubscribe_itself():
+    gb = GrowthBook(attributes={"id": "user-1"})
+    calls = []
+    observed = []
+
+    def once(experiment, result):
+        calls.append((experiment.key, result))
+        unsubscribe()
+
+    unsubscribe = gb.subscribe(once)
+    gb.subscribe(lambda experiment, result: observed.append((experiment.key, result)))
+    try:
+        first = gb.run(Experiment(key="first", variations=[0, 1]))
+        second = gb.run(Experiment(key="second", variations=[0, 1]))
+
+        assert first.inExperiment is True
+        assert second.inExperiment is True
+        assert calls == [("first", first)]
+        assert observed == [("first", first), ("second", second)]
+    finally:
+        gb.destroy()
+
+
+def test_subscription_can_destroy_growthbook():
+    gb = GrowthBook(attributes={"id": "user-1"})
+    calls = []
+
+    def destroy(experiment, result):
+        calls.append((experiment.key, result))
+        gb.destroy()
+
+    gb.subscribe(destroy)
+    try:
+        result = gb.run(Experiment(key="first", variations=[0, 1]))
+        gb.run(Experiment(key="second", variations=[0, 1]))
+
+        assert result.inExperiment is True
+        assert calls == [("first", result)]
+    finally:
+        gb.destroy()
+
+
+def test_subscription_added_during_notification_waits_for_next_change():
+    gb = GrowthBook(attributes={"id": "user-1"})
+    calls = []
+
+    def added(experiment, result):
+        calls.append(experiment.key)
+
+    gb.subscribe(lambda experiment, result: gb.subscribe(added))
+    try:
+        first = Experiment(key="first", variations=[0, 1])
+        assert gb.run(first).inExperiment is True
+        assert calls == []
+
+        gb.run(first)
+        assert calls == []
+
+        assert gb.run(Experiment(key="second", variations=[0, 1])).inExperiment is True
+        assert calls == ["second"]
+    finally:
+        gb.destroy()
+
+
+def test_subscription_error_does_not_prevent_other_notifications():
+    gb = GrowthBook(attributes={"id": "user-1"})
+    calls = []
+
+    def raises(experiment, result):
+        raise ValueError("subscriber failed")
+
+    gb.subscribe(raises)
+    gb.subscribe(lambda experiment, result: calls.append(result))
+    try:
+        result = gb.run(Experiment(key="first", variations=[0, 1]))
+        assert result.inExperiment is True
+        assert calls == [result]
+    finally:
+        gb.destroy()
+
+
 def test_stores_assigned_variations_in_the_user():
     gb = GrowthBook(
         attributes={
