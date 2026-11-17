@@ -759,11 +759,16 @@ def test_unhashable_ids_use_the_fallback_attribute(user_id):
     assert (res.inExperiment, res.hashAttribute, res.hashValue) == (True, "deviceId", "d1")
     gb.destroy()
 
-    # Rollouts always use the rule's fallback attribute
+    # Rollouts use the rule's fallback attribute only with sticky bucketing on, like JS
     features = {"f": {"defaultValue": "off", "rules": [
         {"force": "on", "coverage": 1, "hashAttribute": "id", "fallbackAttribute": "deviceId"},
     ]}}
     gb = GrowthBook(attributes=dict(attributes), features=features)
+    assert gb.eval_feature("f").source == "defaultValue"
+    gb.destroy()
+    gb = GrowthBook(
+        attributes=dict(attributes), features=features, sticky_bucket_service=InMemoryStickyBucketService()
+    )
     assert gb.eval_feature("f").source == "force"
     gb.destroy()
     gb = GrowthBook(attributes={"id": user_id}, features=features)
