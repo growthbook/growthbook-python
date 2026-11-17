@@ -2091,3 +2091,164 @@ def test_stale_while_revalidate_cleanup(mocker):
         if feature_repo._refresh_thread:
             feature_repo.stop_background_refresh()
         feature_repo.clear_cache()
+
+
+# --- Feature refresh listeners ----------------------------------------------
+
+def test_feature_refresh_listener_fires_once_per_refresh(mocker):
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": 1}}}))
+
+    seen = []
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
+    gb.add_feature_refresh_listener(lambda payload: seen.append(payload["features"]))
+
+    gb.load_features()
+    assert len(seen) == 1
+
+    # Evaluation refreshes from cache on every call; that must not re-fire.
+    gb.get_feature_value("flag", 0)
+    gb.get_feature_value("flag", 0)
+    assert len(seen) == 1
+
+    m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": 2}}}))
+    gb.load_features(force_refresh=True)
+    assert len(seen) == 2
+    assert seen[1]["flag"]["defaultValue"] == 2
+
+    gb.destroy()
+    feature_repo.clear_cache()
+
+
+def test_feature_refresh_listener_fires_on_sse_payload(mocker):
+    # The streaming path applies features without going through the
+    # repository's callbacks — the case listeners exist for.
+    mocker.patch.object(
+        feature_repo, "_get",
+        return_value=MockHttpResp(200, json.dumps({"features": {}})),
+    )
+    mocker.patch.object(feature_repo, "startAutoRefresh")
+
+    seen = []
+    gb = GrowthBook(
+        api_host="https://cdn.growthbook.io", client_key="sdk-abc123", streaming=True
+    )
+    gb.add_feature_refresh_listener(seen.append)
+
+    gb._dispatch_sse_event({
+        "type": "features",
+        "data": json.dumps({"features": {"flag": {"defaultValue": "live"}}}),
+    })
+
+    assert len(seen) == 1
+    assert gb.get_feature_value("flag", "none") == "live"
+
+    gb.destroy()
+    feature_repo.clear_cache()
+
+
+def test_feature_refresh_listener_sees_applied_payload(mocker):
+    # Evaluating from inside the listener must already see the new definitions.
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": "new"}}}))
+
+    observed = []
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
+    gb.add_feature_refresh_listener(
+        lambda payload: observed.append(gb.get_feature_value("flag", "old"))
+    )
+
+    gb.load_features()
+    assert observed == ["new"]
+
+    gb.destroy()
+    feature_repo.clear_cache()
+
+
+def test_feature_refresh_listener_unsubscribe_and_error_isolation(mocker):
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": 1}}}))
+
+    calls = []
+
+    def boom(payload):
+        raise RuntimeError("listener exploded")
+
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="sdk-abc123")
+    gb.add_feature_refresh_listener(boom)
+    unsubscribe = gb.add_feature_refresh_listener(lambda payload: calls.append(payload))
+
+    # A raising listener is logged, not propagated, and doesn't stop the others.
+    gb.load_features()
+    assert len(calls) == 1
+
+    unsubscribe()
+    m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": 2}}}))
+    gb.load_features(force_refresh=True)
+    assert len(calls) == 1
+
+    gb.destroy()
+    feature_repo.clear_cache()
+
+
+def test_failed_refresh_does_not_replay_the_previous_payload(mocker):
+    # A failed refresh applies nothing, so it must not clear the marker of the
+    # payload listeners last saw: the next cache hit returns that same object,
+    # which would then look fresh and fire listeners a second time.
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": 1}}}))
+
+    seen = []
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="replay-key")
+    gb.add_feature_refresh_listener(seen.append)
+
+    gb.load_features()
+    assert len(seen) == 1
+
+    # Forced refresh fails; the repository keeps the previously cached payload.
+    m.return_value = MockHttpResp(500, "")
+    gb.load_features(force_refresh=True)
+    assert len(seen) == 1
+
+    # The next evaluation reads that same cached object — not a new payload.
+    gb.get_feature_value("flag", 0)
+    assert len(seen) == 1
+
+    gb.destroy()
+    feature_repo.clear_cache()
+
+
+def test_refresh_from_a_listener_never_delivers_an_older_payload_last(mocker):
+    # A listener that triggers a refresh applies a newer payload while the
+    # outer dispatch is still running. The listeners after it must not then
+    # receive the older payload, which no longer matches the applied state.
+    old = {"features": {"flag": {"defaultValue": "old"}}}
+    new = {"features": {"flag": {"defaultValue": "new"}}}
+    cache = {"payload": old}  # like the real cache: hands back the latest object
+    mocker.patch.object(feature_repo, "load_features", side_effect=lambda *a, **k: cache["payload"])
+
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="nested-key")
+    first, second = [], []
+
+    def refreshing_listener(payload):
+        first.append((payload["features"]["flag"]["defaultValue"], gb.get_feature_value("flag", None)))
+        if payload is old:
+            cache["payload"] = new
+            gb.load_features()
+
+    def observing_listener(payload):
+        second.append((payload["features"]["flag"]["defaultValue"], gb.get_feature_value("flag", None)))
+
+    gb.add_feature_refresh_listener(refreshing_listener)
+    gb.add_feature_refresh_listener(observing_listener)
+    try:
+        gb.load_features()
+
+        # Each delivery matches the state applied at that moment...
+        assert all(value == state for value, state in first + second), (first, second)
+        # ...the superseded payload isn't handed to the remaining listener...
+        assert second == [("new", "new")]
+        # ...and every listener ends on the payload that is actually applied.
+        assert first == [("old", "old"), ("new", "new")]
+    finally:
+        gb.destroy()
