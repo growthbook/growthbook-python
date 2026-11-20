@@ -1286,7 +1286,8 @@ class GrowthBookClient:
         self, user_context: UserContext, resolver: SavedGroupResolver,
     ) -> UserContext:
         """A copy of `user_context`, taken when called, with the user's remote saved groups from
-        `resolver`, or `user_context` unchanged if the resolver fails.
+        `resolver`. Returns `user_context` itself when the payload has no remote
+        groups or the lookup fails.
 
         Requires a saved group references v2 payload for group metadata. With
         inline/v1 payloads, resolve membership in the app and set

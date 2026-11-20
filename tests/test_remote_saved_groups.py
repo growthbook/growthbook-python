@@ -216,13 +216,38 @@ async def test_add_remote_saved_groups_keeps_the_ids_with_the_attributes_they_we
 
 
 class FakeRedis:
+    """The part of redis.asyncio.Redis that redis_resolver uses: a pipeline of
+    SMEMBERS calls."""
+
     def __init__(self, sets):
         self.sets = sets
         self.keys = []
+        self.round_trips = 0
 
-    async def smembers(self, key):
-        self.keys.append(key)
-        return self.sets.get(key, set())
+    def pipeline(self, transaction=True):
+        assert transaction is False
+        return FakePipeline(self)
+
+
+class FakePipeline:
+    def __init__(self, redis):
+        self.redis = redis
+        self.queued = []
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    def smembers(self, key):
+        self.queued.append(key)
+        return self
+
+    async def execute(self):
+        self.redis.round_trips += 1
+        self.redis.keys.extend(self.queued)
+        return [self.redis.sets.get(key, set()) for key in self.queued]
 
 
 @pytest.mark.asyncio
@@ -242,9 +267,19 @@ async def test_redis_resolver():
     resolve = redis_resolver(redis)
 
     assert await resolve({"account_id": "a1", "parent_id": "p9", "a:b": "c"}, groups) == ["grp_vip", "grp_vip:parent_id"]
-    # Arrays are looked up item by item; numbers as JS String(value)
-    assert await resolve({"account_id": ["x", 2.0]}, groups) == ["grp_vip"]
+    # Every key goes in one pipeline
+    assert redis.round_trips == 1
+    assert len(redis.keys) == 3
+    # Arrays are looked up item by item; numbers as JS String(value); booleans
+    # aren't numbers, so they aren't looked up
+    assert await resolve({"account_id": ["x", 2.0, True]}, groups) == ["grp_vip"]
     assert "gb:member:account_id:2" in redis.keys
+    assert "gb:member:account_id:1" not in redis.keys
+    assert "gb:member:account_id:True" not in redis.keys
+    assert "gb:member:account_id:true" not in redis.keys
+    # Nothing to look up: no round trip
+    assert await resolve({}, groups) == []
+    assert redis.round_trips == 2
 
 
 @pytest.mark.asyncio
@@ -346,3 +381,17 @@ def test_remote_saved_groups_cache_is_per_client(monkeypatch):
     # A new payload is scanned again
     assert first.has_remote_groups(dict(local_only)) is False
     assert len(scans) == 3
+
+
+def test_remote_eval_cache_key_keeps_remote_group_ids_with_cache_key_attributes():
+    from growthbook.growthbook import FeatureRepository
+
+    def key(ids):
+        payload = {"attributes": {"id": "u1", "plan": "pro", REMOTE_GROUP_IDS_ATTRIBUTE: ids}}
+        return FeatureRepository._compute_cache_key("https://h", "k", True, payload, ["id"])
+
+    # A user's resolved groups change the response, so they change the key
+    assert key([]) != key(["grp_vip"])
+    without_ids = FeatureRepository._compute_cache_key(
+        "https://h", "k", True, {"attributes": {"id": "u1"}}, ["id"])
+    assert without_ids != key([])

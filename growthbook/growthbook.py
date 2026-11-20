@@ -60,7 +60,12 @@ if TYPE_CHECKING:
     from urllib3.response import BaseHTTPResponse
 
 from .core import _eval_feature_and_report, _getHashValue, run_experiment
-from .remote_saved_groups import RemoteSavedGroupsCache, is_missing_remote_group_ids, with_remote_group_ids
+from .remote_saved_groups import (
+    REMOTE_GROUP_IDS_ATTRIBUTE,
+    RemoteSavedGroupsCache,
+    is_missing_remote_group_ids,
+    with_remote_group_ids,
+)
 
 logger = logging.getLogger("growthbook")
 
@@ -877,7 +882,12 @@ class FeatureRepository(object):
             return base
         attrs = payload.get("attributes") or {}
         if cache_key_attributes is not None:
-            attrs = {k: attrs[k] for k in cache_key_attributes if k in attrs}
+            filtered = {k: attrs[k] for k in cache_key_attributes if k in attrs}
+            # The response depends on the user's remote groups even when the
+            # app's list leaves them out, as in the JS SDK
+            if REMOTE_GROUP_IDS_ATTRIBUTE in attrs:
+                filtered[REMOTE_GROUP_IDS_ATTRIBUTE] = attrs[REMOTE_GROUP_IDS_ATTRIBUTE]
+            attrs = filtered
         # forcedFeatures is intentionally excluded from the cache key.
         # Matches the JS SDK: the proxy does not filter on forced features, so
         # responses are identical across forced-feature values. See

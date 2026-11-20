@@ -104,9 +104,11 @@ async def resolve_remote_group_ids(
 
 
 def redis_resolver(redis: Any) -> SavedGroupResolver:
-    """A resolver for remote groups loaded into Redis by GrowthBook's loader: one
-    ``SMEMBERS gb:member:<attribute>:<value>`` per attribute value. Takes an
-    async client with ``smembers``, such as ``redis.asyncio.Redis``.
+    """A resolver for remote groups loaded into Redis by GrowthBook's loader:
+    ``SMEMBERS gb:member:<attribute>:<value>`` for each attribute value, sent in
+    one pipeline. Takes an async redis-py client, such as ``redis.asyncio.Redis``
+    or ``redis.asyncio.RedisCluster``. A failed lookup raises, so remote rules
+    fail closed.
 
     A derived group checks its own attribute's value in its source group's
     sets: `grp_vip:parent_id` looks up `gb:member:<grp_vip's attribute>:<parent_id>`
@@ -124,7 +126,14 @@ def redis_resolver(redis: Any) -> SavedGroupResolver:
             for value in _to_lookup_values(attributes.get(group["attributeKey"])):
                 checks.append((group["id"], f"gb:member:{source['attributeKey']}:{value}", source["id"]))
         keys = _unique([key for _, key, _ in checks])
-        members = {key: {_decode(m) for m in await redis.smembers(key)} for key in keys}
+        if not keys:
+            return []
+        # One round trip for all keys, not one per key
+        async with redis.pipeline(transaction=False) as pipe:
+            for key in keys:
+                pipe.smembers(key)
+            results = await pipe.execute()
+        members = {key: {_decode(m) for m in result} for key, result in zip(keys, results)}
         # Checking for the expected id, not any id in the set, also keeps keys
         # that collide when attributes or values contain ":" (`a:b` + `c` and
         # `a` + `b:c`) from mixing up groups.
