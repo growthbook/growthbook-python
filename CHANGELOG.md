@@ -1,5 +1,18 @@
 # Changelog
 
+## [4.1.0](https://github.com/growthbook/growthbook-python/compare/v4.0.1...v4.1.0) (2026-11-20)
+
+
+### Features
+
+* add remote saved groups (savedGroupReferencesRemote) ([#157](https://github.com/growthbook/growthbook-python/issues/157)) ([f07ce0a](https://github.com/growthbook/growthbook-python/commit/f07ce0aab71f2447d222dc89ce6676098aeff8b1))
+
+
+### Bug Fixes
+
+* allow subscription changes during experiment notifications ([#164](https://github.com/growthbook/growthbook-python/issues/164)) ([22c75d5](https://github.com/growthbook/growthbook-python/commit/22c75d5cf2f36e15d3f0440b82bd3f4635c1ebf9))
+* preserve remote-eval requests across cache invalidation ([#158](https://github.com/growthbook/growthbook-python/issues/158)) ([1ecf363](https://github.com/growthbook/growthbook-python/commit/1ecf3630bf55182567d7e5eeed009509287ead24))
+
 ## [4.0.1](https://github.com/growthbook/growthbook-python/compare/v4.0.0...v4.0.1) (2026-11-12)
 
 
