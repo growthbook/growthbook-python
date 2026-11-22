@@ -14,6 +14,7 @@ from .common_types import (
     ContextualBanditContext,
     EvaluationContext,
     FeatureResult,
+    FeatureRule,
     Experiment,
     Filter,
     PayloadFilters,
@@ -844,8 +845,11 @@ def _getHashValue(eval_context: EvaluationContext, attr: Optional[str] = None, f
     (attr, val) = _getOrigHashValue(attr=attr, fallbackAttr=fallbackAttr, eval_context=eval_context)
     return (attr, _hash_string(val))
 
-def _experiment_fallback_attribute(experiment: Experiment[Any], eval_context: EvaluationContext) -> Optional[str]:
-    """Experiments only use their fallback attribute when sticky bucketing is on, like JS."""
+def _experiment_fallback_attribute(
+    experiment: Union[Experiment[Any], FeatureRule], eval_context: EvaluationContext
+) -> Optional[str]:
+    """Experiments and force-rule rollouts only use their fallback attribute when
+    sticky bucketing is on, like JS."""
     if eval_context.global_ctx.options.sticky_bucket_service and not experiment.disableStickyBucketing:
         return experiment.fallbackAttribute
     return None
@@ -1363,7 +1367,7 @@ def _eval_feature(
             if not _isIncludedInRollout(
                 seed=rule.seed or key,
                 hashAttribute=rule.hashAttribute,
-                fallbackAttribute=rule.fallbackAttribute,
+                fallbackAttribute=_experiment_fallback_attribute(rule, evalContext),
                 range=rule.range,
                 coverage=rule.coverage,
                 hashVersion=rule.hashVersion,
