@@ -555,6 +555,11 @@ class UserContext:
     overrides: Dict[str, Any] = field(default_factory=dict)
     sticky_bucket_assignment_docs: Dict[str, Any] = field(default_factory=dict)
     skip_all_experiments: bool = False
+    # The remote saved groups the user is in, resolved by the app. None means
+    # unresolved, which is not the same as no groups: rules using remote groups
+    # then fail, "not in group" included. Evaluation reads them as the
+    # __gb_remoteGroupIds attribute, over any value the attributes set for it.
+    remote_group_ids: Optional[List[str]] = None
     # Per-user experiment tracking callback, set via
     # UserScopedGrowthBook.set_tracking_callback. When set it replaces the
     # client-level Options.on_experiment_viewed for this user only; when None
@@ -568,11 +573,6 @@ class UserContext:
     # contract as tracking_callback above, against
     # Options.on_feature_usage.
     feature_usage_callback: Optional["AsyncFeatureUsageCallback"] = None
-    # The remote saved groups the user is in, resolved by the app. None means
-    # unresolved, which is not the same as no groups: rules using remote groups
-    # then fail, "not in group" included. Evaluation reads them as the
-    # __gb_remoteGroupIds attribute, over any value the attributes set for it.
-    remote_group_ids: Optional[List[str]] = None
 
 
 class TrackingCallback(Protocol):

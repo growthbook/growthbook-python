@@ -1969,6 +1969,61 @@ async def test_per_user_tracking_callback_without_client_level_callback(scoped_c
 
 
 @pytest.mark.asyncio
+async def test_tracking_with_context_predating_per_user_callbacks(mock_options):
+    """A custom context without tracking_callback / feature_usage_callback
+    (one modeled on an older UserContext) must still evaluate and fall back
+    to the client-level callbacks instead of raising AttributeError."""
+    import dataclasses
+
+    old_fields = [
+        (f.name, f.type, f)
+        for f in dataclasses.fields(UserContext)
+        if f.name not in ("tracking_callback", "feature_usage_callback")
+    ]
+    LegacyContext = dataclasses.make_dataclass("LegacyContext", old_fields)
+
+    tracked = []
+    used = []
+
+    def client_tracker(*, experiment, result, user_context):
+        tracked.append(experiment.key)
+
+    def client_usage(key, result, user_context):
+        used.append(key)
+
+    mock_options.on_experiment_viewed = client_tracker
+    mock_options.on_feature_usage = client_usage
+
+    payload = {"features": SCOPED_FEATURES, "savedGroups": {}}
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=payload), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+        client = GrowthBookClient(mock_options)
+        await client.initialize()
+        try:
+            ctx = LegacyContext(attributes={"id": "1"})
+            assert not hasattr(ctx, "tracking_callback")
+            result = await client.eval_feature("exp-feature", ctx)
+            assert result.value in ("control", "treatment")
+            assert tracked == ["scoped-exp"]
+            assert used == ["exp-feature"]
+        finally:
+            await client.close()
+
+
+def test_user_context_positional_remote_group_ids_unchanged():
+    """remote_group_ids shipped in 4.1.0 as the ninth field; the per-user
+    callback fields are appended after it so positional callers keep working."""
+    ctx = UserContext("", {}, {}, {}, {}, {}, {}, False, ["group-a"])
+    assert ctx.remote_group_ids == ["group-a"]
+    assert ctx.tracking_callback is None
+    assert ctx.feature_usage_callback is None
+
+
+@pytest.mark.asyncio
 async def test_per_user_async_tracking_callback(scoped_client):
     """A per-user callback may be async, like the client-level one."""
     seen = []

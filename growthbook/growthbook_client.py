@@ -932,7 +932,8 @@ class GrowthBookClient:
         A per-user callback on the UserContext (set via
         UserScopedGrowthBook.set_tracking_callback) takes precedence over the
         client-level Options.on_experiment_viewed."""
-        callback = user_context.tracking_callback or self.options.on_experiment_viewed
+        # getattr: duck-typed user contexts predate the field
+        callback = getattr(user_context, "tracking_callback", None) or self.options.on_experiment_viewed
         if not callback:
             return
 
