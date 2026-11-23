@@ -2309,6 +2309,55 @@ def test_sse_payload_is_cached_before_listeners_run(mocker):
         feature_repo.clear_cache()
 
 
+@pytest.mark.parametrize("before, after", [
+    (True, 1),
+    (False, 0),
+    (1, 1.0),
+    ([True], [1]),
+])
+def test_refresh_listener_tells_booleans_from_numbers(before, after):
+    # Python's == treats True == 1, False == 0 and 1 == 1.0, but those are
+    # different JSON values: a listener must see the change.
+    gb = GrowthBook()
+    seen = []
+    gb.add_feature_refresh_listener(lambda payload: seen.append(payload["features"]["flag"]["defaultValue"]))
+    try:
+        gb.set_payload({"features": {"flag": {"defaultValue": before}}})
+        gb.set_payload({"features": {"flag": {"defaultValue": after}}})
+        assert len(seen) == 2
+        assert type(seen[1]) is type(after)
+    finally:
+        gb.destroy()
+
+
+def test_sse_payload_is_applied_when_the_cache_write_fails(mocker):
+    # The cache is written before listeners run, but a failing cache (e.g. a
+    # Redis outage) must not cost the client the streamed update.
+    mocker.patch.object(
+        feature_repo, "_get",
+        return_value=MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": "old"}}})),
+    )
+    mocker.patch.object(feature_repo, "startAutoRefresh")
+
+    gb = GrowthBook(
+        api_host="https://cdn.growthbook.io", client_key="sse-cache-fail-key", streaming=True
+    )
+    seen = []
+    gb.add_feature_refresh_listener(lambda payload: seen.append(payload["features"]["flag"]["defaultValue"]))
+    mocker.patch.object(feature_repo, "save_in_cache", side_effect=ConnectionError("cache down"))
+    try:
+        gb._dispatch_sse_event({
+            "type": "features",
+            "data": json.dumps({"features": {"flag": {"defaultValue": "live"}}}),
+        })
+
+        assert gb.get_feature_value("flag", None) == "live"
+        assert seen[-1] == "live"
+    finally:
+        gb.destroy()
+        feature_repo.clear_cache()
+
+
 def test_refresh_from_a_listener_never_delivers_an_older_payload_last(mocker):
     # A listener that triggers a refresh applies a newer payload while the
     # outer dispatch is still running. The listeners after it must not then

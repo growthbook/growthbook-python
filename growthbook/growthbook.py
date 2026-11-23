@@ -86,6 +86,23 @@ def decrypt(encrypted_str: str, key_str: str) -> str:
 
     return bytestring.decode("utf-8")
 
+
+def _same_payload(a: Any, b: Any) -> bool:
+    """Structural equality that, unlike ==, keeps JSON values of different
+    types apart: True == 1, False == 0 and 1 == 1.0 in Python, but they are
+    different settings. Values of different types are never the same, so an
+    unexpected type at worst fires listeners for an unchanged payload."""
+    if a is b:
+        return True
+    if type(a) is not type(b):
+        return False
+    if isinstance(a, dict):
+        return a.keys() == b.keys() and all(_same_payload(v, b[k]) for k, v in a.items())
+    if isinstance(a, (list, tuple)):
+        return len(a) == len(b) and all(_same_payload(x, y) for x, y in zip(a, b))
+    return bool(a == b)
+
+
 class AbstractFeatureCache(ABC):
     @abstractmethod
     def get(self, key: str) -> Optional[Dict[str, Any]]:
@@ -1028,8 +1045,8 @@ class GrowthBook(object):
         # The last payload dispatched to listeners. load_features() returns the
         # cached payload on every hit, so a hit must not count as a refresh:
         # _notify_feature_refresh compares against this by identity (the
-        # in-memory cache returns the same object) and then by content (custom
-        # caches, e.g. Redis, decode a new dict on every hit).
+        # in-memory cache returns the same object) and then by type-strict
+        # content (custom caches, e.g. Redis, decode a new dict on every hit).
         self._last_refresh_payload: Optional[Dict[str, Any]] = None
         # True while listeners run; a refresh started from inside a listener
         # only applies its payload and leaves the delivery to the running loop.
@@ -1215,8 +1232,13 @@ class GrowthBook(object):
         if data is not None:
             # Cache first: a listener may call load_features(), which must get
             # this payload from the cache, not the previous one it would then
-            # reapply over the update.
-            feature_repo.save_in_cache(key, data, self._cache_ttl)
+            # reapply over the update. A failed write (e.g. a custom cache that
+            # is down) must not cost us the update: the stream doesn't retry
+            # the event, so apply it anyway.
+            try:
+                feature_repo.save_in_cache(key, data, self._cache_ttl)
+            except Exception:
+                logger.exception("Could not cache the streamed payload; applying it anyway")
             # The streaming path applies the payload itself and never goes
             # through the repository's callbacks, so without this listeners
             # would miss exactly the updates they exist to observe.
@@ -1350,7 +1372,7 @@ class GrowthBook(object):
             # cache hit — which returns that same previously-notified object —
             # look like a fresh payload and fire listeners a second time.
             return
-        if payload is self._last_refresh_payload or payload == self._last_refresh_payload:
+        if _same_payload(payload, self._last_refresh_payload):
             # Same object, or a copy of it from a cache that decodes on every
             # hit. Treating a copy as new would fire listeners on every
             # load_features(), and a listener that loads features itself would
