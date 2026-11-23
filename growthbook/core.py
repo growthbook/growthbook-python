@@ -1353,7 +1353,7 @@ def _eval_feature(
                     "Skip rule because of filters/namespaces, feature %s", key
                 )
                 continue
-        if rule.force is not None:
+        if rule.is_force_rule:
             # Only force rules check their condition here. An experiment rule's
             # condition is checked in _run_experiment after the sticky bucket
             # lookup, so a sticky-bucketed user stays in the experiment after

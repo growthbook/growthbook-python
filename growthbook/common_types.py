@@ -359,6 +359,12 @@ class Feature(object):
             "rules": [rule.to_dict() for rule in self.rules],
         }
 
+
+# Default for FeatureRule's `force`, so that a rule forcing null can be told
+# apart from a rule with no `force` at all.
+_NO_FORCE: Any = object()
+
+
 class FeatureRule(object):
     def __init__(
         self,
@@ -369,7 +375,7 @@ class FeatureRule(object):
         coverage: Optional[float] = None,
         condition: Optional[Dict[str, Any]] = None,
         namespace: Optional[Tuple[str, float, float]] = None,
-        force: Optional[Any] = None,
+        force: Optional[Any] = _NO_FORCE,
         hashAttribute: str = "id",
         fallbackAttribute: Optional[str] = None,
         hashVersion: Optional[int] = None,
@@ -401,7 +407,10 @@ class FeatureRule(object):
         self.coverage = coverage
         self.condition = condition
         self.namespace = namespace
-        self.force = force
+        # A rule given `force` is a force rule even when the value is null, as
+        # in the JS SDK (`"force" in rule`): null is a valid JSON feature value.
+        self._forces_null = force is None
+        self.force = None if force is _NO_FORCE else force
         self.hashAttribute = hashAttribute
         self.fallbackAttribute = fallbackAttribute
         self.hashVersion = hashVersion or 1
@@ -425,6 +434,11 @@ class FeatureRule(object):
         self.contextualBanditRef = contextualBanditRef
         self.contextualVariations = contextualVariations
 
+    @property
+    def is_force_rule(self) -> bool:
+        """Whether the rule serves `force` (which may be null) instead of running an experiment."""
+        return self.force is not None or self._forces_null
+
     def to_dict(self) -> Dict[str, Any]:
         data: Dict[str, Any] = {}
         if self.id:
@@ -442,7 +456,7 @@ class FeatureRule(object):
             data["condition"] = self.condition
         if self.namespace is not None:
             data["namespace"] = self.namespace
-        if self.force is not None:
+        if self.is_force_rule:
             data["force"] = self.force
         if self.hashAttribute != "id":
             data["hashAttribute"] = self.hashAttribute
