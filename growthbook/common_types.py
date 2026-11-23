@@ -568,6 +568,11 @@ class UserContext:
     # contract as tracking_callback above, against
     # Options.on_feature_usage.
     feature_usage_callback: Optional["AsyncFeatureUsageCallback"] = None
+    # The remote saved groups the user is in, resolved by the app. None means
+    # unresolved, which is not the same as no groups: rules using remote groups
+    # then fail, "not in group" included. Evaluation reads them as the
+    # __gb_remoteGroupIds attribute, over any value the attributes set for it.
+    remote_group_ids: Optional[List[str]] = None
 
 
 class TrackingCallback(Protocol):
@@ -643,6 +648,12 @@ def snapshot_attributes(attributes: Dict[str, Any]) -> Dict[str, Any]:
     return {k: copy_value(v) for k, v in attributes.items()}
 
 
+def _copy_remote_group_ids(user: Any) -> Optional[List[str]]:
+    # getattr: duck-typed user contexts predate the field
+    ids = getattr(user, "remote_group_ids", None)
+    return list(ids) if ids is not None else None
+
+
 def snapshot_user_context(user: "UserContext") -> "UserContext":
     """Call-time snapshot of every mutable evaluation input on a UserContext.
 
@@ -659,6 +670,7 @@ def snapshot_user_context(user: "UserContext") -> "UserContext":
         forced_variations=snapshot_attributes(user.forced_variations),
         forced_features=snapshot_attributes(user.forced_features),
         overrides=snapshot_attributes(user.overrides),
+        remote_group_ids=_copy_remote_group_ids(user),
     )
 
 

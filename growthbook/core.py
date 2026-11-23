@@ -21,6 +21,7 @@ from .common_types import (
     UserContext,
     VariationMeta,
 )
+from .remote_saved_groups import REMOTE_GROUP_IDS_ATTRIBUTE
 
 
 logger = logging.getLogger("growthbook.core")
@@ -124,6 +125,20 @@ def _eval_saved_group(
         if prune is not None:
             return prune(attributes, condition, saved_groups, next_visited)
         return _eval_condition(attributes, condition, saved_groups, next_visited)
+    if entry.get("type") == "remote":
+        # The ids live outside the payload: the user's groups arrive resolved,
+        # in REMOTE_GROUP_IDS_ATTRIBUTE. A resolver can't look up an entry
+        # without an attribute, so its absence from the ids means nothing:
+        # undecided, so it fails under $not too.
+        if not isinstance(entry.get("attributeKey"), str):
+            return None
+        # Another attribute needs a derived group, which isn't supported yet
+        if "attributeKey" in reference and reference["attributeKey"] != entry.get("attributeKey"):
+            return False
+        if prune is not None and not _is_known(attributes, REMOTE_GROUP_IDS_ATTRIBUTE):
+            return None
+        group_ids = getPath(attributes, REMOTE_GROUP_IDS_ATTRIBUTE)
+        return isinstance(group_ids, list) and group_id in group_ids
     # A group type added after this SDK was built. The client SDK may support it.
     return None
 
@@ -664,14 +679,16 @@ def paddedVersionString(input: Any) -> str:
     return _paddedVersionString(input)
 
 
-_re_ver_strip = re.compile(r"(^v|\+.*$)")
 _re_ver_split = re.compile(r"[-.]")
 
 
 @lru_cache(maxsize=512)
 def _paddedVersionString(input: str) -> str:
-    # Remove build info and leading `v` if any
-    input = _re_ver_strip.sub("", input)
+    # Remove build info and leading `v` if any. Build metadata starts at the
+    # first `+`. No regex here: `\+.*$` is quadratic on many `+`s then a newline.
+    if input.startswith("v"):
+        input = input[1:]
+    input = input.partition("+")[0]
     # Split version into parts (both core version numbers and pre-release tags)
     # "v1.2.3-rc.1+build123" -> ["1","2","3","rc","1"]
     parts = _re_ver_split.split(input)
@@ -682,7 +699,8 @@ def _paddedVersionString(input: str) -> str:
         parts.append("~")
     # Left pad each numeric part with spaces so string comparisons will work ("9">"10", but " 9"<"10")
     # Then, join back together into a single string
-    return "-".join([v.rjust(5, " ") if v.isdigit() else v for v in parts])
+    # isdigit() alone also accepts non-ASCII digits such as "١"; JS pads only 0-9
+    return "-".join([v.rjust(5, " ") if v.isascii() and v.isdigit() else v for v in parts])
 
 
 def isIn(conditionValue: List[Any], attributeValue: Any, insensitive: bool = False) -> bool:
