@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 import inspect
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 import random
 import logging
 from types import TracebackType
@@ -21,6 +21,14 @@ from growthbook import FeatureRepository, feature_repo
 from contextlib import asynccontextmanager
 
 from .core import _eval_feature_and_report, _hash_string, _is_hashable, reduce_payload, run_experiment
+from .remote_saved_groups import (
+    RemoteSavedGroupsCache,
+    SavedGroupResolver,
+    get_remote_saved_groups,
+    is_missing_remote_group_ids,
+    resolve_remote_group_ids,
+    with_remote_group_ids,
+)
 from .common_types import (
     T,
     AsyncEventLogger,
@@ -55,6 +63,10 @@ logger = logging.getLogger("growthbook.growthbook_client")
 _active_refresh_dispatches: "contextvars.ContextVar[Tuple[object, ...]]" = contextvars.ContextVar(
     "growthbook_active_refresh_dispatches", default=()
 )
+
+# How many times add_remote_saved_groups looks the groups up while payload
+# refreshes keep replacing them, before it leaves them unresolved
+_REMOTE_GROUP_LOOKUP_ATTEMPTS = 3
 
 class SingletonMeta(type):
     """One instance per (class, api_host, client_key). Two GrowthBookClients
@@ -199,9 +211,9 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         # already atomic from asyncio's perspective.
         self._remote_eval_cache: "OrderedDict[str, tuple[Dict[str, Any], float]]" = OrderedDict()
         self._remote_eval_cache_max = remote_eval_cache_size
-        # Inflight coalescing AND SWR-dedup: a key in this dict means a POST
-        # for that cache key is already in flight, so concurrent foreground
-        # callers and background-SWR refresh tasks both observe and skip.
+        # Current-generation POSTs for foreground coalescing and SWR dedup.
+        # A flush clears this map without cancelling older POSTs or waiters,
+        # allowing a new request for the same cache key in the next generation.
         self._remote_eval_inflight: Dict[str, "asyncio.Future[Optional[Dict[str, Any]]]"] = {}
         # Fire-and-forget SWR refresh tasks. Tracked so `stop_refresh()` can
         # cancel them on shutdown — otherwise they may try to write to a
@@ -230,7 +242,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         until cache_ttl and then refetched synchronously.
 
         Concurrent foreground callers AND background SWR refreshes coalesce
-        on a single inflight POST per cache key.
+        on a single inflight POST per cache key in the current generation.
         """
         cache_key = self._compute_cache_key(api_host, client_key, True, payload, cache_key_attributes)
         effective_stale_ttl = stale_ttl if stale_ttl is not None else cache_ttl
@@ -269,6 +281,15 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             api_host, client_key, payload, cache_key, effective_stale_ttl
         )
 
+    def _release_inflight(
+        self, cache_key: str, inflight: "asyncio.Future[Optional[Dict[str, Any]]]"
+    ) -> bool:
+        """Remove the entry only if this future still owns it and return ownership."""
+        if self._remote_eval_inflight.get(cache_key) is inflight:
+            del self._remote_eval_inflight[cache_key]
+            return True
+        return False
+
     async def _post_and_cache(
         self,
         api_host: str,
@@ -278,8 +299,8 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         effective_stale_ttl: int,
     ) -> Optional[Dict[str, Any]]:
         """POST + cache-write helper shared by foreground misses and background
-        SWR refreshes. Registers `cache_key` in the inflight map for the POST's
-        duration so duplicate POSTs are coalesced. Bumps `stale_at` on every
+        SWR refreshes. Registers `cache_key` in the inflight map until the POST
+        completes or a cache flush starts a new generation. Bumps `stale_at` on every
         successful write — even an unchanged payload refreshes freshness
         (matches JS SDK)."""
         # Re-check inflight: a concurrent caller might have raced us.
@@ -296,7 +317,7 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
             # derives it from BaseException). Without cleanup on cancellation
             # the inflight map leaks the cache_key forever and any waiters
             # blocked on `await existing` hang indefinitely.
-            self._remote_eval_inflight.pop(cache_key, None)
+            self._release_inflight(cache_key, inflight)
             if not inflight.done():
                 if isinstance(e, asyncio.CancelledError):
                     # Cancel the inflight Future instead of `set_exception(e)`.
@@ -310,15 +331,11 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
                     inflight.set_exception(e)
             raise
 
-        # If `flush_remote_eval_cache()` ran while we were awaiting the POST,
-        # the cache_key is no longer in `_remote_eval_inflight` — the response
-        # we just got is from BEFORE the invalidation signal, so writing it to
-        # the cache would silently re-populate stale data the proxy just told
-        # us to drop. Still resolve waiters with the response (they observed
-        # the pre-flush request and have a right to its answer), but skip the
-        # cache write so future eval calls trigger a fresh POST.
-        was_flushed = self._remote_eval_inflight.pop(cache_key, None) is None
-        if response is not None and not was_flushed:
+        # A flush may have replaced this entry with a newer request for the
+        # same key. Only the request that still owns the entry may remove it
+        # and populate the cache. Pre-flush waiters still receive their answer.
+        owns_entry = self._release_inflight(cache_key, inflight)
+        if response is not None and owns_entry:
             stale_at = time.monotonic() + effective_stale_ttl
             self._remote_eval_cache[cache_key] = (response, stale_at)
             self._remote_eval_cache.move_to_end(cache_key)
@@ -336,10 +353,10 @@ class EnhancedFeatureRepository(FeatureRepository, metaclass=SingletonMeta):
         """Drop all cached remote-eval responses. Called when the proxy
         emits a features-updated SSE event.
 
-        Also clears the inflight map so any POSTs in flight at this moment
-        know (via the `was_flushed` check in `_post_and_cache`) that their
-        result predates the proxy's invalidation signal and must NOT be
-        written back to the cache."""
+        Also clears the inflight map so new calls can start a new generation.
+        Older POSTs still resolve their existing waiters, but no longer own an
+        entry. `_post_and_cache` checks ownership before removing an entry or
+        caching a response."""
         self._remote_eval_cache.clear()
         self._remote_eval_inflight.clear()
 
@@ -730,6 +747,8 @@ class GrowthBookClient:
         )
         
         self._global_context: Optional[GlobalContext] = None
+        self._warned_missing_remote_group_ids = False
+        self._remote_saved_groups_cache = RemoteSavedGroupsCache()
         # The decrypted payload as received, for reduce_payload. Swapped
         # together with _global_context.
         self._payload: Dict[str, Any] = {}
@@ -1225,7 +1244,7 @@ class GrowthBookClient:
 
     def _remote_eval_payload(self, user_context: UserContext) -> Dict[str, Any]:
         return build_remote_eval_payload(
-            user_context.attributes,
+            with_remote_group_ids(user_context.attributes, getattr(user_context, "remote_group_ids", None)),
             user_context.forced_variations,
             user_context.url,
             forced_features=user_context.forced_features,
@@ -1400,6 +1419,62 @@ class GrowthBookClient:
             "tracking_buffer": tracking_buffer,
         }
 
+    async def add_remote_saved_groups(
+        self, user_context: UserContext, resolver: SavedGroupResolver,
+    ) -> UserContext:
+        """A copy of `user_context`, taken when called, with the user's remote saved groups from
+        `resolver`. Returns `user_context` itself when the payload has no remote
+        groups or the lookup fails.
+
+        Requires a saved group references v2 payload for group metadata. With
+        inline/v1 payloads, resolve membership in the app and set
+        `remote_group_ids` on the UserContext directly instead."""
+        try:
+            # The caller can change its attributes while the resolver awaits.
+            # Look up and return one snapshot, so the ids always belong to the
+            # attributes they come with.
+            snapshot = snapshot_user_context(user_context)
+            # A refresh during a lookup can add groups the result doesn't cover,
+            # and a missing group would pass "not in group" rules. So the result
+            # only counts if the payload is still the one it was looked up for.
+            for _ in range(_REMOTE_GROUP_LOOKUP_ATTEMPTS):
+                saved_groups = self._global_context.saved_groups if self._global_context else None
+                # No remote entries doesn't mean no remote rules: payloads for
+                # SDKs without remote support check __gb_remoteGroupIds directly.
+                # Leaving it unset makes those rules fail closed; [] would let
+                # every "not in group" rule match.
+                if not get_remote_saved_groups(saved_groups):
+                    return user_context
+                remote_group_ids = await resolve_remote_group_ids(snapshot.attributes, saved_groups, resolver)
+                current = self._global_context.saved_groups if self._global_context else None
+                if current is saved_groups:
+                    return replace(snapshot, remote_group_ids=remote_group_ids)
+            # Still changing: leave the groups unresolved, so their rules fail
+            # closed, rather than return ids that miss the newest groups
+            logger.warning("Saved groups kept changing during the remote group lookup; leaving them unresolved")
+            return user_context
+        except Exception:
+            logger.exception("Could not resolve remote saved groups")
+            return user_context
+
+    def _warn_if_remote_group_ids_missing(
+        self, user_context: UserContext, saved_groups: Optional[Dict[str, Any]],
+    ) -> None:
+        """Logs once when the payload has remote saved groups but the user has no
+        remote group ids, since every rule using them will then fail. Logs no
+        attribute values."""
+        if self._warned_missing_remote_group_ids:
+            return
+        remote_group_ids = getattr(user_context, "remote_group_ids", None)
+        if is_missing_remote_group_ids(
+            user_context.attributes, remote_group_ids, saved_groups, self._remote_saved_groups_cache,
+        ):
+            self._warned_missing_remote_group_ids = True
+            logger.warning(
+                "The payload has remote saved groups, but the user has no remote group ids. "
+                "Rules using them won't match. See add_remote_saved_groups."
+            )
+
     async def create_evaluation_context(
         self,
         user_context: UserContext,
@@ -1424,6 +1499,15 @@ class GrowthBookClient:
         caller_context = user_context
         if self.options.remote_eval or self.options.sticky_bucket_service is not None:
             user_context = snapshot_user_context(user_context)
+        self._warn_if_remote_group_ids_missing(user_context, global_context.saved_groups)
+        # getattr: duck-typed user contexts predate the field
+        remote_group_ids = getattr(user_context, "remote_group_ids", None)
+        if remote_group_ids is not None:
+            # Conditions read the ids as the __gb_remoteGroupIds attribute. A copy,
+            # so the caller's attributes are left as they were.
+            user_context = replace(
+                user_context, attributes=with_remote_group_ids(user_context.attributes, remote_group_ids),
+            )
 
         if self.options.remote_eval and self._features_repository:
             # Per-user POST + cache: features come from the proxy filtered for

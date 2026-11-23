@@ -34,7 +34,7 @@ from growthbook.core import (
     _js_number_to_string,
 )
 
-from time import time
+from time import perf_counter, time
 import pytest
 
 logger.setLevel("DEBUG")
@@ -453,6 +453,32 @@ def test_nan_attribute_obeys_ieee_754():
     # NaN condition vs concrete attribute: same.
     assert evalCondition({"x": 5}, {"x": {"$eq": nan}}) is False
     assert evalCondition({"x": 5}, {"x": {"$ne": nan}}) is True
+
+
+def test_padded_version_string_strips_build_metadata():
+    plain = paddedVersionString("1.2.3")
+    assert paddedVersionString("v1.2.3+build+more.1-2") == plain
+    assert paddedVersionString("1.2.3+") == plain
+    # Build metadata is everything after the first `+`, even across a newline
+    assert paddedVersionString("1.2.3+build\nx") == plain
+    assert paddedVersionString("1.2.3+build\n") == plain
+    assert paddedVersionString("vv1.2.3") == "v1-    2-    3-~"
+    assert paddedVersionString("+build") == ""
+
+
+def test_padded_version_string_pads_only_ascii_digits():
+    assert paddedVersionString("1.0.0-١") == "    1-    0-    0-١"
+    assert paddedVersionString("１.２.３") == "１-２-３-~"
+    # A non-numeric tag sorts after a numeric one, as in JS
+    assert evalCondition({"v": "1.0.0-١"}, {"v": {"$vgt": "1.0.0-10"}}) is True
+
+
+def test_padded_version_string_is_linear_on_many_pluses():
+    # The old `(^v|\+.*$)` regex took several seconds on this input
+    input = "+" * 100_000 + "\nx"
+    start = perf_counter()
+    assert paddedVersionString(input) == ""
+    assert perf_counter() - start < 1
 
 
 def test_version_comparison_normalizes_unhashable_values():
@@ -1301,6 +1327,87 @@ def test_fires_subscriptions_correctly():
     assert hasFired() is False
 
     gb.destroy()
+
+
+def test_subscription_can_unsubscribe_itself():
+    gb = GrowthBook(attributes={"id": "user-1"})
+    calls = []
+    observed = []
+
+    def once(experiment, result):
+        calls.append((experiment.key, result))
+        unsubscribe()
+
+    unsubscribe = gb.subscribe(once)
+    gb.subscribe(lambda experiment, result: observed.append((experiment.key, result)))
+    try:
+        first = gb.run(Experiment(key="first", variations=[0, 1]))
+        second = gb.run(Experiment(key="second", variations=[0, 1]))
+
+        assert first.inExperiment is True
+        assert second.inExperiment is True
+        assert calls == [("first", first)]
+        assert observed == [("first", first), ("second", second)]
+    finally:
+        gb.destroy()
+
+
+def test_subscription_can_destroy_growthbook():
+    gb = GrowthBook(attributes={"id": "user-1"})
+    calls = []
+
+    def destroy(experiment, result):
+        calls.append((experiment.key, result))
+        gb.destroy()
+
+    gb.subscribe(destroy)
+    try:
+        result = gb.run(Experiment(key="first", variations=[0, 1]))
+        gb.run(Experiment(key="second", variations=[0, 1]))
+
+        assert result.inExperiment is True
+        assert calls == [("first", result)]
+    finally:
+        gb.destroy()
+
+
+def test_subscription_added_during_notification_waits_for_next_change():
+    gb = GrowthBook(attributes={"id": "user-1"})
+    calls = []
+
+    def added(experiment, result):
+        calls.append(experiment.key)
+
+    gb.subscribe(lambda experiment, result: gb.subscribe(added))
+    try:
+        first = Experiment(key="first", variations=[0, 1])
+        assert gb.run(first).inExperiment is True
+        assert calls == []
+
+        gb.run(first)
+        assert calls == []
+
+        assert gb.run(Experiment(key="second", variations=[0, 1])).inExperiment is True
+        assert calls == ["second"]
+    finally:
+        gb.destroy()
+
+
+def test_subscription_error_does_not_prevent_other_notifications():
+    gb = GrowthBook(attributes={"id": "user-1"})
+    calls = []
+
+    def raises(experiment, result):
+        raise ValueError("subscriber failed")
+
+    gb.subscribe(raises)
+    gb.subscribe(lambda experiment, result: calls.append(result))
+    try:
+        result = gb.run(Experiment(key="first", variations=[0, 1]))
+        assert result.inExperiment is True
+        assert calls == [result]
+    finally:
+        gb.destroy()
 
 
 def test_stores_assigned_variations_in_the_user():
