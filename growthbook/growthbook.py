@@ -1025,10 +1025,11 @@ class GrowthBook(object):
         self._assigned: Dict[str, Any] = {}
         self._subscriptions: Set[Callable[[Experiment[Any], Result[Any]], None]] = set()
         self._feature_refresh_listeners: List[Callable[[Dict[str, Any]], None]] = []
-        # Identity of the last payload dispatched to listeners. The cache hands
-        # back the same object on every hit, and evaluation calls load_features()
-        # constantly, so an identity check is what keeps listeners firing once
-        # per actual refresh instead of once per evaluation.
+        # The last payload dispatched to listeners. load_features() returns the
+        # cached payload on every hit, so a hit must not count as a refresh:
+        # _notify_feature_refresh compares against this by identity (the
+        # in-memory cache returns the same object) and then by content (custom
+        # caches, e.g. Redis, decode a new dict on every hit).
         self._last_refresh_payload: Optional[Dict[str, Any]] = None
         # True while listeners run; a refresh started from inside a listener
         # only applies its payload and leaves the delivery to the running loop.
@@ -1212,11 +1213,14 @@ class GrowthBook(object):
         key = self._api_host + "::" + self._client_key
 
         if data is not None:
+            # Cache first: a listener may call load_features(), which must get
+            # this payload from the cache, not the previous one it would then
+            # reapply over the update.
+            feature_repo.save_in_cache(key, data, self._cache_ttl)
             # The streaming path applies the payload itself and never goes
             # through the repository's callbacks, so without this listeners
             # would miss exactly the updates they exist to observe.
             self._apply_and_notify(data)
-            feature_repo.save_in_cache(key, data, self._cache_ttl)
 
     def _dispatch_sse_event(self, event_data: Dict[str, Any]) -> None:
         event_type = event_data.get('type')
@@ -1346,7 +1350,11 @@ class GrowthBook(object):
             # cache hit — which returns that same previously-notified object —
             # look like a fresh payload and fire listeners a second time.
             return
-        if payload is self._last_refresh_payload:
+        if payload is self._last_refresh_payload or payload == self._last_refresh_payload:
+            # Same object, or a copy of it from a cache that decodes on every
+            # hit. Treating a copy as new would fire listeners on every
+            # load_features(), and a listener that loads features itself would
+            # keep the delivery loop below from ever finishing.
             return
         self._last_refresh_payload = payload
         if self._dispatching_refresh:

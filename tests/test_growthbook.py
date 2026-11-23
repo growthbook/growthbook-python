@@ -2218,6 +2218,97 @@ def test_failed_refresh_does_not_replay_the_previous_payload(mocker):
     feature_repo.clear_cache()
 
 
+class _JsonRoundTripCache:
+    """Like the README's Redis cache: every hit decodes a new dict."""
+
+    def __init__(self):
+        self.store = {}
+
+    def get(self, key):
+        data = self.store.get(key)
+        return None if data is None else json.loads(data)
+
+    def set(self, key, value, ttl):
+        self.store[key] = json.dumps(value)
+
+    def clear(self):
+        self.store.clear()
+
+
+def test_refresh_listener_with_a_cache_that_returns_copies(mocker):
+    # A cache that decodes on every hit never returns the same object twice,
+    # so an identity check would treat every hit as a new payload: listeners
+    # would fire on every load_features(), and a listener that loads features
+    # itself would keep the delivery loop going forever.
+    from growthbook.growthbook import AbstractFeatureCache, InMemoryFeatureCache
+
+    class Cache(_JsonRoundTripCache, AbstractFeatureCache):
+        pass
+
+    m = mocker.patch.object(feature_repo, "_get")
+    m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": 1}}}))
+    feature_repo.set_cache(Cache())
+
+    gb = GrowthBook(api_host="https://cdn.growthbook.io", client_key="copies-key")
+    seen = []
+
+    def reloading_listener(payload):
+        seen.append(payload["features"]["flag"]["defaultValue"])
+        if len(seen) > 5:
+            raise AssertionError("delivery loop did not settle")
+        gb.load_features()
+
+    gb.add_feature_refresh_listener(reloading_listener)
+    try:
+        gb.load_features()
+        assert seen == [1]
+
+        # Later cache hits with the same content are not new payloads.
+        gb.load_features()
+        gb.load_features()
+        assert seen == [1]
+
+        m.return_value = MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": 2}}}))
+        gb.load_features(force_refresh=True)
+        assert seen == [1, 2]
+    finally:
+        gb.destroy()
+        feature_repo.set_cache(InMemoryFeatureCache())
+
+
+def test_sse_payload_is_cached_before_listeners_run(mocker):
+    # A listener that loads features during an SSE update must get the
+    # streamed payload from the cache, not the previous one, or it would
+    # reapply the old definitions over the update.
+    mocker.patch.object(
+        feature_repo, "_get",
+        return_value=MockHttpResp(200, json.dumps({"features": {"flag": {"defaultValue": "old"}}})),
+    )
+    mocker.patch.object(feature_repo, "startAutoRefresh")
+
+    gb = GrowthBook(
+        api_host="https://cdn.growthbook.io", client_key="sse-order-key", streaming=True
+    )
+    seen = []
+
+    def reloading_listener(payload):
+        gb.load_features()
+        seen.append((payload["features"]["flag"]["defaultValue"], gb.get_feature_value("flag", None)))
+
+    gb.add_feature_refresh_listener(reloading_listener)
+    try:
+        gb._dispatch_sse_event({
+            "type": "features",
+            "data": json.dumps({"features": {"flag": {"defaultValue": "live"}}}),
+        })
+
+        assert seen == [("live", "live")]
+        assert gb.get_feature_value("flag", None) == "live"
+    finally:
+        gb.destroy()
+        feature_repo.clear_cache()
+
+
 def test_refresh_from_a_listener_never_delivers_an_older_payload_last(mocker):
     # A listener that triggers a refresh applies a newer payload while the
     # outer dispatch is still running. The listeners after it must not then
