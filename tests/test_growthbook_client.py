@@ -1780,3 +1780,247 @@ async def test_reduce_payload_keeps_zero_coverage():
             assert reduced["features"][key]["rules"] == [{"force": True, "coverage": 0, "hashVersion": 1}]
     finally:
         await client.close()
+
+
+# --- Feature refresh listeners ----------------------------------------------
+
+@pytest.mark.asyncio
+async def test_client_feature_refresh_listener_sync_and_async(mock_options):
+    """Both plain and coroutine listeners fire, on the initial load and on
+    every subsequent refresh."""
+    payload = {"features": {"flag": {"defaultValue": 1}}, "savedGroups": {}}
+    sync_seen, async_seen = [], []
+
+    async def async_listener(data):
+        async_seen.append(data["features"])
+
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=payload), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+
+        client = GrowthBookClient(mock_options)
+        client.add_feature_refresh_listener(lambda data: sync_seen.append(data["features"]))
+        client.add_feature_refresh_listener(async_listener)
+        try:
+            await client.initialize()
+            assert len(sync_seen) == 1 and len(async_seen) == 1
+
+            # A later refresh (e.g. from SSE) goes through the same callback.
+            await client._feature_update_callback(
+                {"features": {"flag": {"defaultValue": 2}}, "savedGroups": {}}
+            )
+            assert len(sync_seen) == 2 and len(async_seen) == 2
+            assert sync_seen[1]["flag"]["defaultValue"] == 2
+        finally:
+            await client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_feature_refresh_listener_can_evaluate(mock_options):
+    """A listener that evaluates a feature must see the new payload and must
+    not deadlock: evaluation takes the same context lock the update holds."""
+    payload = {"features": {"flag": {"defaultValue": "new"}}, "savedGroups": {}}
+    observed = []
+
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=payload), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+
+        client = GrowthBookClient(mock_options)
+
+        async def listener(data):
+            value = await client.get_feature_value("flag", "old", UserContext(attributes={"id": "1"}))
+            observed.append(value)
+
+        client.add_feature_refresh_listener(listener)
+        try:
+            await asyncio.wait_for(client.initialize(), timeout=5)
+            assert observed == ["new"]
+        finally:
+            await client.close()
+
+
+@pytest.mark.asyncio
+async def test_client_feature_refresh_listener_unsubscribe_and_errors(mock_options):
+    payload = {"features": {"flag": {"defaultValue": 1}}, "savedGroups": {}}
+    calls = []
+
+    def boom(data):
+        raise RuntimeError("listener exploded")
+
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=payload), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+
+        client = GrowthBookClient(mock_options)
+        client.add_feature_refresh_listener(boom)
+        unsubscribe = client.add_feature_refresh_listener(lambda data: calls.append(data))
+        try:
+            await client.initialize()
+            assert len(calls) == 1
+
+            unsubscribe()
+            await client._feature_update_callback(payload)
+            assert len(calls) == 1
+        finally:
+            await client.close()
+
+
+@pytest.mark.asyncio
+async def test_close_clears_feature_refresh_listeners(mock_options):
+    """Listener closures capture application objects; a closed client that
+    kept them would hold those alive and, if reinitialized, fire callbacks
+    registered in its previous lifecycle."""
+    payload = {"features": {"flag": {"defaultValue": 1}}, "savedGroups": {}}
+    seen = []
+
+    with patch('growthbook.FeatureRepository.load_features_async',
+               new_callable=AsyncMock, return_value=payload), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.start_feature_refresh',
+               new_callable=AsyncMock), \
+         patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+
+        client = GrowthBookClient(mock_options)
+        client.add_feature_refresh_listener(seen.append)
+        await client.initialize()
+        assert len(seen) == 1
+
+        await client.close()
+        assert client._feature_refresh_listeners == []
+
+        # A later update from the previous lifecycle reaches nobody.
+        await client._feature_update_callback(payload)
+        assert len(seen) == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_refreshes_notify_in_application_order(mock_options):
+    """Two overlapping refreshes must not reorder: apply A, apply+notify B,
+    notify A would hand listeners an older payload last, and a listener that
+    evaluates would see state that doesn't match the payload it was given."""
+    with patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+        client = GrowthBookClient(mock_options)
+        observed = []
+
+        async def listener(data):
+            # Yield inside the callback to widen the interleaving window.
+            await asyncio.sleep(0)
+            value = data["features"]["flag"]["defaultValue"]
+            ctx_value = client._global_context.features["flag"].defaultValue
+            observed.append((value, ctx_value))
+
+        client.add_feature_refresh_listener(listener)
+        try:
+            await asyncio.gather(*[
+                client._feature_update_callback(
+                    {"features": {"flag": {"defaultValue": i}}, "savedGroups": {}}
+                )
+                for i in range(6)
+            ])
+
+            delivered = [v for v, _ in observed]
+            assert len(delivered) == 6
+            # Each listener call sees the context matching its own payload.
+            assert all(v == ctx for v, ctx in observed), observed
+            # And the last one delivered is the last one applied.
+            assert delivered[-1] == client._global_context.features["flag"].defaultValue
+        finally:
+            await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("via_task", [False, True], ids=["awaited", "awaited_task"])
+async def test_refresh_from_a_listener_does_not_deadlock_or_reorder(mock_options, via_task):
+    """A listener that updates the payload re-enters _feature_update_callback
+    while the outer dispatch holds the ordering lock. That must neither hang
+    nor hand the remaining listeners the superseded payload."""
+    with patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+        client = GrowthBookClient(mock_options)
+        old = {"features": {"flag": {"defaultValue": "old"}}, "savedGroups": {}}
+        new = {"features": {"flag": {"defaultValue": "new"}}, "savedGroups": {}}
+        first, second = [], []
+
+        def state():
+            return client._global_context.features["flag"].defaultValue
+
+        async def refreshing_listener(data):
+            first.append((data["features"]["flag"]["defaultValue"], state()))
+            if data is old:
+                if via_task:
+                    await asyncio.create_task(client.set_payload(new))
+                else:
+                    await client.set_payload(new)
+
+        async def observing_listener(data):
+            second.append((data["features"]["flag"]["defaultValue"], state()))
+
+        client.add_feature_refresh_listener(refreshing_listener)
+        client.add_feature_refresh_listener(observing_listener)
+        try:
+            await asyncio.wait_for(client.set_payload(old), timeout=5)
+
+            assert all(value == ctx for value, ctx in first + second), (first, second)
+            assert second == [("new", "new")]
+            assert first == [("old", "old"), ("new", "new")]
+
+            # The ordering lock is free again: a later refresh still dispatches.
+            later = {"features": {"flag": {"defaultValue": "later"}}, "savedGroups": {}}
+            await asyncio.wait_for(client.set_payload(later), timeout=5)
+            assert second[-1] == ("later", "later")
+        finally:
+            await client.close()
+
+
+@pytest.mark.asyncio
+async def test_fire_and_forget_refresh_from_a_listener_is_still_delivered(mock_options):
+    """A task a listener starts without awaiting inherits the dispatch context.
+    If that dispatch ends while the task is still applying its payload, the
+    task must deliver the payload itself instead of leaving it unannounced."""
+    with patch('growthbook.growthbook_client.EnhancedFeatureRepository.stop_refresh',
+               new_callable=AsyncMock):
+        client = GrowthBookClient(mock_options)
+        old = {"features": {"flag": {"defaultValue": "old"}}, "savedGroups": {}}
+        new = {"features": {"flag": {"defaultValue": "new"}}, "savedGroups": {}}
+        seen = []
+        tasks = []
+        delivered_new = asyncio.Event()
+
+        real_apply = client._apply_payload
+
+        async def slow_apply(data):
+            if data is new:
+                # Let the dispatch that started this task finish first.
+                await asyncio.sleep(0.05)
+            await real_apply(data)
+
+        async def listener(data):
+            seen.append((data["features"]["flag"]["defaultValue"],
+                         client._global_context.features["flag"].defaultValue))
+            if data is old:
+                tasks.append(asyncio.create_task(client.set_payload(new)))
+                await asyncio.sleep(0)  # the task starts inside this dispatch
+            else:
+                delivered_new.set()
+
+        client.add_feature_refresh_listener(listener)
+        try:
+            with patch.object(client, "_apply_payload", side_effect=slow_apply):
+                await asyncio.wait_for(client.set_payload(old), timeout=5)
+                await asyncio.wait_for(asyncio.gather(*tasks), timeout=5)
+                await asyncio.wait_for(delivered_new.wait(), timeout=5)
+
+            assert seen == [("old", "old"), ("new", "new")]
+        finally:
+            await client.close()
