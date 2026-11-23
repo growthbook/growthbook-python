@@ -903,6 +903,14 @@ def test_experiment_to_dict_preserves_explicit_zero_coverage():
     assert Experiment(key="e", variations=[0, 1]).to_dict()["coverage"] == 1
 
 
+def test_feature_rule_to_dict_preserves_null_force():
+    # cases.json covers evaluating a rule that forces null; this covers the
+    # object form, which must not turn into a rule with no `force` when dumped.
+    assert FeatureRule(force=None).to_dict()["force"] is None
+    assert FeatureRule(**FeatureRule(force=None).to_dict()).is_force_rule
+    assert "force" not in FeatureRule(variations=[0, 1]).to_dict()
+
+
 def test_custom_fields_parsed_from_api_dict():
     # The API delivers experiment Custom Fields as a flat dict.
     exp = Experiment(

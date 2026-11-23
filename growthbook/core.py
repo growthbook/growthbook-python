@@ -1347,19 +1347,24 @@ def _eval_feature(
                 logger.debug("Skip rule because of failing prerequisite, feature %s", key)
                 continue
 
-        if rule.condition:
-            if not evalCondition(evalContext.user.attributes, rule.condition, evalContext.global_ctx.saved_groups):
-                logger.debug(
-                    "Skip rule because of failed condition, feature %s", key
-                )
-                continue
         if rule.filters:
             if _isFilteredOut(rule.filters, evalContext):
                 logger.debug(
                     "Skip rule because of filters/namespaces, feature %s", key
                 )
                 continue
-        if rule.force is not None:
+        if rule.is_force_rule:
+            # Only force rules check their condition here. An experiment rule's
+            # condition is checked in _run_experiment after the sticky bucket
+            # lookup, so a sticky-bucketed user stays in the experiment after
+            # the condition is narrowed (matches core.ts in the JS SDK).
+            if rule.condition and not evalCondition(
+                evalContext.user.attributes, rule.condition, evalContext.global_ctx.saved_groups
+            ):
+                logger.debug(
+                    "Skip rule because of failed condition, feature %s", key
+                )
+                continue
             if not _isIncludedInRollout(
                 seed=rule.seed or key,
                 hashAttribute=rule.hashAttribute,
