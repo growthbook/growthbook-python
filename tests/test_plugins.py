@@ -9,6 +9,7 @@ Plugin Tests for GrowthBook Python SDK
 import asyncio
 import json
 import pytest
+import threading
 import unittest
 from unittest.mock import patch, MagicMock
 from growthbook import (
@@ -465,9 +466,11 @@ class TestLogEvent(unittest.TestCase):
     def test_log_event_with_plugin_sends_correct_payload(self):
         """Plugin wires the event logger; log_event triggers an ingestor POST."""
         posted = []
+        sent = threading.Event()
 
         def fake_post(url, data, headers, timeout):
             posted.append({"url": url, "body": json.loads(data), "headers": headers})
+            sent.set()
             response = MagicMock()
             response.status_code = 200
             return response
@@ -478,14 +481,14 @@ class TestLogEvent(unittest.TestCase):
                 client_key="sdk-test-key",
                 plugins=[
                     growthbook_tracking_plugin(
-                        ingestor_host="https://us1.gb-ingest.com",
+                        ingestor_host="https://us-east-1.gb-ingest.com",
                         batch_size=1,  # flush immediately
                     )
                 ],
             )
             gb.log_event("checkout_started", {"cart_value": 99})
-            # Give the daemon thread a moment to post
-            import time; time.sleep(0.05)
+            # The POST runs on a daemon thread; wait for it while requests.post is still patched
+            self.assertTrue(sent.wait(timeout=2), "tracking did not send events")
 
         self.assertEqual(len(posted), 1, "Expected exactly one POST")
         url = posted[0]["url"]
@@ -507,6 +510,31 @@ class TestLogEvent(unittest.TestCase):
         self.assertNotIn("user_id", event["context_json"])
 
         self.assertEqual(posted[0]["headers"]["Content-Type"], "text/plain")
+        gb.destroy()
+
+    def test_default_ingestor_host_is_us_east_1(self):
+        """Without ingestor_host, events go to the us-east-1 ingest host."""
+        posted = []
+        sent = threading.Event()
+
+        def fake_post(url, data, headers, timeout):
+            posted.append(url)
+            sent.set()
+            response = MagicMock()
+            response.status_code = 200
+            return response
+
+        with patch("requests.post", side_effect=fake_post):
+            gb = GrowthBook(
+                attributes={"id": "user-42"},
+                client_key="sdk-test-key",
+                plugins=[growthbook_tracking_plugin(batch_size=1)],
+            )
+            gb.log_event("checkout_started", {})
+            # The POST runs on a daemon thread; wait for it while requests.post is still patched
+            self.assertTrue(sent.wait(timeout=2), "tracking did not send events")
+
+        self.assertEqual(posted, ["https://us-east-1.gb-ingest.com/track?client_key=sdk-test-key"])
         gb.destroy()
 
     def test_log_event_empty_properties(self):
@@ -605,7 +633,7 @@ class TestLogEvent(unittest.TestCase):
             Options(
                 client_key="sdk-key",
                 tracking_plugins=[
-                    growthbook_tracking_plugin(ingestor_host="https://us1.gb-ingest.com")
+                    growthbook_tracking_plugin(ingestor_host="https://us-east-1.gb-ingest.com")
                 ],
             )
         )

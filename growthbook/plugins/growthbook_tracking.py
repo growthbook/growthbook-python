@@ -94,7 +94,7 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
 
     def __init__(
         self,
-        ingestor_host: str = "https://us1.gb-ingest.com",
+        ingestor_host: str = "https://us-east-1.gb-ingest.com",
         track_experiment_viewed: bool = True,
         track_feature_evaluated: bool = True,
         batch_size: int = 10,
@@ -106,7 +106,7 @@ class GrowthBookTrackingPlugin(GrowthBookPlugin):
         Initialize GrowthBook tracking plugin.
 
         Args:
-            ingestor_host: Base URL of the GrowthBook ingestor (default: ``https://us1.gb-ingest.com``).
+            ingestor_host: Base URL of the GrowthBook ingestor (default: ``https://us-east-1.gb-ingest.com``).
             track_experiment_viewed: Whether to auto-track experiment viewed events.
             track_feature_evaluated: Whether to auto-track feature evaluated events.
             batch_size: Number of events to accumulate before flushing to the ingestor.
