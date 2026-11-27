@@ -541,7 +541,7 @@ gb = GrowthBook(
   plugins=[
     request_context_plugin(),  # Extracts request data
     growthbook_tracking_plugin(
-      ingestor_host="https://gb-ingest.growthbook.io",
+      ingestor_host="https://us-east-1.gb-ingest.com",
       # Optional: Add custom tracking callback
       additional_callback=my_custom_tracker
     )

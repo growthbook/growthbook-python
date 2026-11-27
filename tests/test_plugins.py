@@ -478,7 +478,7 @@ class TestLogEvent(unittest.TestCase):
                 client_key="sdk-test-key",
                 plugins=[
                     growthbook_tracking_plugin(
-                        ingestor_host="https://us1.gb-ingest.com",
+                        ingestor_host="https://us-east-1.gb-ingest.com",
                         batch_size=1,  # flush immediately
                     )
                 ],
@@ -507,6 +507,28 @@ class TestLogEvent(unittest.TestCase):
         self.assertNotIn("user_id", event["context_json"])
 
         self.assertEqual(posted[0]["headers"]["Content-Type"], "text/plain")
+        gb.destroy()
+
+    def test_default_ingestor_host_is_us_east_1(self):
+        """Without ingestor_host, events go to the us-east-1 ingest host."""
+        posted = []
+
+        def fake_post(url, data, headers, timeout):
+            posted.append(url)
+            response = MagicMock()
+            response.status_code = 200
+            return response
+
+        with patch("requests.post", side_effect=fake_post):
+            gb = GrowthBook(
+                attributes={"id": "user-42"},
+                client_key="sdk-test-key",
+                plugins=[growthbook_tracking_plugin(batch_size=1)],
+            )
+            gb.log_event("checkout_started", {})
+            import time; time.sleep(0.05)
+
+        self.assertEqual(posted, ["https://us-east-1.gb-ingest.com/track?client_key=sdk-test-key"])
         gb.destroy()
 
     def test_log_event_empty_properties(self):
@@ -605,7 +627,7 @@ class TestLogEvent(unittest.TestCase):
             Options(
                 client_key="sdk-key",
                 tracking_plugins=[
-                    growthbook_tracking_plugin(ingestor_host="https://us1.gb-ingest.com")
+                    growthbook_tracking_plugin(ingestor_host="https://us-east-1.gb-ingest.com")
                 ],
             )
         )
