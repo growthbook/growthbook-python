@@ -81,14 +81,19 @@ async def test_async_post_applies_http_timeouts(fake_session):
 
 
 @pytest.mark.asyncio
-async def test_async_accepts_a_single_timeout(fake_session):
-    repo = _repo(read=7)
+@pytest.mark.parametrize("connect, read", [(3, 7), (3, None), (None, 7)])
+async def test_async_keeps_aiohttp_defaults_for_unset_fields(fake_session, connect, read):
+    default = aiohttp.client.DEFAULT_TIMEOUT
+    repo = _repo(connect=connect, read=read)
 
     await repo._fetch_and_decode_async("https://cdn.growthbook.io", "sdk-abc123")
 
     timeout = fake_session.created[0].kwargs["timeout"]
-    assert timeout.sock_connect is None
-    assert timeout.sock_read == 7
+    # The overall request limit must survive setting either option.
+    assert timeout.total == default.total
+    assert timeout.connect == default.connect
+    assert timeout.sock_connect == (connect if connect is not None else default.sock_connect)
+    assert timeout.sock_read == (read if read is not None else default.sock_read)
 
 
 @pytest.mark.asyncio

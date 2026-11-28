@@ -511,14 +511,26 @@ class FeatureRepository(object):
         return Timeout(connect=self.http_connect_timeout, read=self.http_read_timeout)
 
     def _aiohttp_session_kwargs(self) -> Dict[str, Any]:
-        # Async counterpart of _http_timeout(). Without configured timeouts the
-        # aiohttp defaults are kept.
+        # Async counterpart of _http_timeout(). Passing a bare ClientTimeout
+        # would drop aiohttp's own defaults (overall request limit, socket
+        # connect limit), so start from them and override only what is set.
         if self.http_connect_timeout is None and self.http_read_timeout is None:
             return {}
+        default = aiohttp.client.DEFAULT_TIMEOUT
         return {
             "timeout": aiohttp.ClientTimeout(
-                sock_connect=self.http_connect_timeout,
-                sock_read=self.http_read_timeout,
+                total=default.total,
+                connect=default.connect,
+                sock_connect=(
+                    self.http_connect_timeout
+                    if self.http_connect_timeout is not None
+                    else default.sock_connect
+                ),
+                sock_read=(
+                    self.http_read_timeout
+                    if self.http_read_timeout is not None
+                    else default.sock_read
+                ),
             )
         }
 
