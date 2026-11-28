@@ -504,12 +504,39 @@ class FeatureRepository(object):
     def user_agent_suffix(self, value: Optional[str]) -> None:
         self._user_agent_suffix = value
 
+    def _http_timeout(self) -> Optional[Timeout]:
+        # Each timeout is optional on its own; an unset one stays unbounded.
+        if self.http_connect_timeout is None and self.http_read_timeout is None:
+            return None
+        return Timeout(connect=self.http_connect_timeout, read=self.http_read_timeout)
+
+    def _aiohttp_session_kwargs(self) -> Dict[str, Any]:
+        # Async counterpart of _http_timeout(). Passing a bare ClientTimeout
+        # would drop aiohttp's own defaults (overall request limit, socket
+        # connect limit), so start from them and override only what is set.
+        if self.http_connect_timeout is None and self.http_read_timeout is None:
+            return {}
+        default = aiohttp.client.DEFAULT_TIMEOUT
+        return {
+            "timeout": aiohttp.ClientTimeout(
+                total=default.total,
+                connect=default.connect,
+                sock_connect=(
+                    self.http_connect_timeout
+                    if self.http_connect_timeout is not None
+                    else default.sock_connect
+                ),
+                sock_read=(
+                    self.http_read_timeout
+                    if self.http_read_timeout is not None
+                    else default.sock_read
+                ),
+            )
+        }
+
     # Perform the GET request (separate method for easy mocking)
     def _get(self, url: str, headers: Optional[Dict[str, str]] = None) -> "BaseHTTPResponse":
-        timeout = None
-        if self.http_connect_timeout and self.http_read_timeout:
-            timeout = Timeout(connect=self.http_connect_timeout, read=self.http_read_timeout)
-        self.http = self.http or PoolManager(timeout=timeout)
+        self.http = self.http or PoolManager(timeout=self._http_timeout())
         return self.http.request("GET", url, headers=headers or {})
     
     def _get_headers(self, client_key: str, existing_headers: Optional[Dict[str, str]] = None) -> Dict[str, str]:
@@ -525,10 +552,7 @@ class FeatureRepository(object):
 
     # Perform the POST request (separate method for easy mocking)
     def _post(self, url: str, payload: Dict[str, Any], headers: Optional[Dict[str, str]] = None) -> "BaseHTTPResponse":
-        timeout = None
-        if self.http_connect_timeout and self.http_read_timeout:
-            timeout = Timeout(connect=self.http_connect_timeout, read=self.http_read_timeout)
-        self.http = self.http or PoolManager(timeout=timeout)
+        self.http = self.http or PoolManager(timeout=self._http_timeout())
         body = json.dumps(payload).encode("utf-8")
         return self.http.request("POST", url, body=body, headers=headers or {})
 
@@ -560,7 +584,7 @@ class FeatureRepository(object):
         headers["Content-Type"] = "application/json"
         logger.debug(f"[Async] Remote-eval POST to {url}")
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(**self._aiohttp_session_kwargs()) as session:
                 async with session.post(url, json=payload, headers=headers) as response:
                     if response.status >= 400:
                         logger.warning(
@@ -657,7 +681,7 @@ class FeatureRepository(object):
                 logger.debug(f"[Async] No ETag cache found for URL: {url}")
         
         try:
-            async with aiohttp.ClientSession() as session:
+            async with aiohttp.ClientSession(**self._aiohttp_session_kwargs()) as session:
                 async with session.get(url, headers=headers) as response:
                     # Handle 304 Not Modified - content hasn't changed
                     if response.status == 304:
@@ -1090,8 +1114,9 @@ class GrowthBook(object):
             # before the first eval. Matches the JS SDK init() behavior.
             self.load_features()
 
-        if http_connect_timeout and http_read_timeout:
+        if http_connect_timeout is not None:
             feature_repo.http_connect_timeout = http_connect_timeout
+        if http_read_timeout is not None:
             feature_repo.http_read_timeout = http_read_timeout
 
     def _remote_eval_payload(self) -> Dict[str, Any]:
